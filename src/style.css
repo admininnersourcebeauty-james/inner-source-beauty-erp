@@ -11,3 +11,18 @@
 .small-cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:12px 0}.small-cards .card{padding:14px}.small-cards .card b{font-size:18px}
 .detail-panel h4{margin:22px 0 8px}
 @media(max-width:900px){.customer-layout{grid-template-columns:1fr}.detail-panel{position:static;max-height:none}}
+
+
+.customer-form-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
+.customer-form-grid textarea{padding:11px;border:1px solid #d1d5db;border-radius:10px;background:white;min-height:74px;resize:vertical;font:inherit}
+.customer-form-grid textarea:nth-of-type(1),.customer-form-grid textarea:nth-of-type(2){grid-column:span 2}
+.check-row{display:flex;gap:8px;align-items:center;background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px;color:#334155;font-weight:700;grid-column:span 2}
+.check-row input{width:auto}
+.address-pair{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.address-pair div{background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:10px}
+.address-pair pre{white-space:pre-wrap;margin:6px 0 0;font-family:inherit;color:#334155}
+.payment-form-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.payment-methods{grid-column:1/-1;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}
+.method-box{background:#f8fafc;color:#111827;border:1px solid #d1d5db;text-align:center;border-radius:12px;padding:13px 10px}
+.method-box.selected{background:#0f172a;color:white;border-color:#0f172a;box-shadow:0 6px 14px #0f172a22}
+@media(max-width:900px){.customer-form-grid,.payment-form-grid{grid-template-columns:1fr}.customer-form-grid textarea:nth-of-type(1),.customer-form-grid textarea:nth-of-type(2),.check-row{grid-column:span 1}.payment-methods{grid-template-columns:1fr 1fr}.address-pair{grid-template-columns:1fr}}

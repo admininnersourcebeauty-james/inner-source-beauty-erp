@@ -1,27 +1,5 @@
-# INNER SOURCE BEAUTY ERP
+# INNER SOURCE BEAUTY ERP Customer Full Update
 
-React + Vite + Supabase cloud ERP.
+Includes separate Billing Address and Shipping Address, same-as-billing checkbox, customer detail fields, preferred payment, terms, tax ID, and payment method boxes.
 
-## Files
-- package.json
-- vite.config.js
-- index.html
-- src/main.jsx
-- src/style.css
-- src/supabaseClient.js
-- supabase-schema.sql
-
-## Vercel Environment Variables
-VITE_SUPABASE_URL=https://YOUR-PROJECT-ID.supabase.co
-VITE_SUPABASE_ANON_KEY=YOUR-PUBLISHABLE-KEY
-
-## Features v1
-- Supabase login / local fallback
-- Dashboard
-- Customers
-- Inventory
-- Orders
-- Invoice print/PDF
-- Payments
-- Reports
-- Backup JSON
+Before uploading code, run `supabase-customer-full-patch.sql` one time in Supabase SQL Editor.

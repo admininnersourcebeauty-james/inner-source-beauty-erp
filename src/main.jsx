@@ -179,23 +179,44 @@ function paymentsForOrders(data, orders) {
 }
 
 function Customers({ data, addRow, deleteRow }) {
-  const [f, setF] = useState({ name:'', company:'', phone:'', email:'', address:'', note:'' })
+  const emptyCustomer = { name:'', company:'', phone:'', email:'', billing_address:'', shipping_address:'', shipping_same_as_billing:false, preferred_payment:'Zelle', payment_terms:'COD', tax_id:'', note:'' }
+  const [f, setF] = useState(emptyCustomer)
+  const [sameAddress, setSameAddress] = useState(false)
   const [selectedId, setSelectedId] = useState('')
   const [q, setQ] = useState('')
   const selected = data.customers.find(c => String(c.id) === String(selectedId)) || data.customers[0]
-  const filtered = data.customers.filter(c => [c.name,c.company,c.phone,c.email,c.address,c.note].join(' ').toLowerCase().includes(q.toLowerCase()))
+  const filtered = data.customers.filter(c => [c.name,c.company,c.phone,c.email,c.billing_address,c.address,c.shipping_address,c.preferred_payment,c.payment_terms,c.tax_id,c.note].join(' ').toLowerCase().includes(q.toLowerCase()))
+
+  function updateBilling(value) {
+    setF(prev => ({ ...prev, billing_address: value, address: value, shipping_address: sameAddress ? value : prev.shipping_address, shipping_same_as_billing: sameAddress }))
+  }
+  function toggleSameAddress() {
+    const next = !sameAddress
+    setSameAddress(next)
+    if (next) setF(prev => ({ ...prev, shipping_address: prev.billing_address || prev.address || '', shipping_same_as_billing: true }))
+    else setF(prev => ({ ...prev, shipping_same_as_billing: false }))
+  }
 
   return <div className="customer-layout">
     <div className="panel">
       <h3>Add Customer</h3>
-      <div className="form-grid">
+      <div className="form-grid customer-form-grid">
         <input placeholder="Contact Name" value={f.name} onChange={e=>setF({...f,name:e.target.value})}/>
         <input placeholder="Business Name" value={f.company} onChange={e=>setF({...f,company:e.target.value})}/>
         <input placeholder="Phone" value={f.phone} onChange={e=>setF({...f,phone:e.target.value})}/>
         <input placeholder="Email" value={f.email} onChange={e=>setF({...f,email:e.target.value})}/>
-        <input placeholder="Billing / Shipping Address" value={f.address} onChange={e=>setF({...f,address:e.target.value})}/>
+        <textarea placeholder="Billing Address" value={f.billing_address} onChange={e=>updateBilling(e.target.value)} />
+        <textarea placeholder="Shipping Address" value={f.shipping_address} onChange={e=>setF({...f,shipping_address:e.target.value})}/>
+        <label className="check-row"><input type="checkbox" checked={sameAddress} onChange={toggleSameAddress}/> Shipping Address is same as Billing Address</label>
+        <select value={f.preferred_payment} onChange={e=>setF({...f,preferred_payment:e.target.value})}>
+          {['Zelle','Venmo','Cash','Credit Card','Check'].map(m => <option key={m}>{m}</option>)}
+        </select>
+        <select value={f.payment_terms} onChange={e=>setF({...f,payment_terms:e.target.value})}>
+          {['COD','NET 7','NET 15','NET 30'].map(m => <option key={m}>{m}</option>)}
+        </select>
+        <input placeholder="Tax ID / Seller Permit" value={f.tax_id} onChange={e=>setF({...f,tax_id:e.target.value})}/>
         <input placeholder="Customer Note" value={f.note} onChange={e=>setF({...f,note:e.target.value})}/>
-        <button onClick={() => { addRow('customers', f); setF({ name:'', company:'', phone:'', email:'', address:'', note:'' }) }}>Save Customer</button>
+        <button onClick={() => { addRow('customers', { ...f, address: f.billing_address }); setF(emptyCustomer); setSameAddress(false) }}>Save Customer</button>
       </div>
       <h3>Customers</h3>
       <input className="search" placeholder="Search customer..." value={q} onChange={e=>setQ(e.target.value)} />
@@ -234,7 +255,11 @@ function CustomerDetail({ customer, data }) {
   return <div className="panel detail-panel">
     <h3>Customer Detail</h3>
     <div className="customer-title"><b>{customer.company || customer.name}</b><span>{customer.name && customer.company ? customer.name : ''}</span></div>
-    <p><b>Phone:</b> {customer.phone || '-'}<br/><b>Email:</b> {customer.email || '-'}<br/><b>Address:</b> {customer.address || '-'}</p>
+    <p><b>Phone:</b> {customer.phone || '-'}<br/><b>Email:</b> {customer.email || '-'}<br/><b>Preferred Payment:</b> {customer.preferred_payment || '-'}<br/><b>Terms:</b> {customer.payment_terms || '-'}<br/><b>Tax ID:</b> {customer.tax_id || '-'}</p>
+    <div className="address-pair">
+      <div><b>Billing Address</b><pre>{customer.billing_address || customer.address || '-'}</pre></div>
+      <div><b>Shipping Address</b><pre>{customer.shipping_address || customer.billing_address || customer.address || '-'}</pre></div>
+    </div>
     {customer.note && <div className="note-box"><b>Note</b><br/>{customer.note}</div>}
     <div className="cards small-cards">
       <Card title="Lifetime Sales" value={money(sales)} />
@@ -277,8 +302,19 @@ function Invoice({ data }) {
   return <div className="panel"><select value={id} onChange={e=>setId(e.target.value)}>{data.orders.map(o=><option key={o.id} value={o.id}>{o.invoice_no} - {o.customer_name}</option>)}</select><div className="invoice"><h1>INNER SOURCE BEAUTY</h1><h2>INVOICE</h2><p><b>Invoice #:</b> {o.invoice_no}<br/><b>Date:</b> {new Date(o.created_at || Date.now()).toLocaleDateString()}<br/><b>Bill To:</b> {o.customer_name}</p><table><tbody><tr><th>Style</th><th>Qty</th><th>Unit Price</th><th>Total</th></tr><tr><td>{o.style}</td><td>{o.qty}</td><td>{money(o.price)}</td><td>{money(o.total)}</td></tr></tbody></table><h2>Total Due: {money(o.total)}</h2><p className="terms">ALL RETURNS ARE STORE CREDIT ONLY. RETURNS MUST BE DONE WITHIN 10 BUSINESS DAYS. 20% RESTOCKING FEE MAY APPLY. SHIPPING AND HANDLING ARE NOT REFUNDABLE BOTH WAYS.</p><button onClick={()=>window.print()}>Print / Save PDF</button></div></div>
 }
 function Payments({ data, addRow, deleteRow }) {
+  const methods = ['Zelle', 'Venmo', 'Cash', 'Credit Card', 'Check']
   const [f, setF] = useState({ invoice_no:'', amount:'', method:'Zelle', note:'' })
-  return <div className="panel"><h3>Add Payment</h3><Form fields={['invoice_no','amount','method','note']} f={f} setF={setF} onSubmit={() => { addRow('payments', { ...f, amount:Number(f.amount) }); setF({ invoice_no:'', amount:'', method:'Zelle', note:'' }) }} /><h3>Payments</h3><Table rows={data.payments} cols={['invoice_no','amount','method','note']} onDelete={id => deleteRow('payments', id)} /></div>
+  return <div className="panel"><h3>Add Payment</h3>
+    <div className="form-grid payment-form-grid">
+      <input placeholder="Invoice #" value={f.invoice_no} onChange={e=>setF({...f, invoice_no:e.target.value})} />
+      <input placeholder="Amount" value={f.amount} onChange={e=>setF({...f, amount:e.target.value})} />
+      <input placeholder="Payment Note" value={f.note} onChange={e=>setF({...f, note:e.target.value})} />
+      <div className="payment-methods">
+        {methods.map(m => <button key={m} type="button" className={f.method === m ? 'method-box selected' : 'method-box'} onClick={()=>setF({...f, method:m})}>{m}</button>)}
+      </div>
+      <button onClick={() => { addRow('payments', { ...f, amount:Number(f.amount) }); setF({ invoice_no:'', amount:'', method:'Zelle', note:'' }) }}>Save Payment</button>
+    </div>
+    <h3>Payments</h3><Table rows={data.payments} cols={['invoice_no','amount','method','note']} onDelete={id => deleteRow('payments', id)} /></div>
 }
 function Reports({ stats, data }) { return <div className="panel"><h3>Reports</h3><p>Total Customers: {data.customers.length}</p><p>Total Inventory Items: {data.inventory.length}</p><p>Total Orders: {data.orders.length}</p><p>Total Sales: {money(stats.sales)}</p><p>Open Balance: {money(stats.balance)}</p></div> }
 function Settings({ data }) { return <div className="panel"><h3>Settings</h3><p>Use Supabase Authentication to add employees. Add environment variables in Vercel for cloud mode.</p><button onClick={()=>{const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='isb-backup.json'; a.click();}}>Download Backup JSON</button></div> }

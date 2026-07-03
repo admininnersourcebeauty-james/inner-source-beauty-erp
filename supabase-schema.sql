@@ -5,6 +5,13 @@ create table if not exists customers (
   phone text,
   email text,
   address text,
+  billing_address text,
+  shipping_address text,
+  shipping_same_as_billing boolean default false,
+  preferred_payment text,
+  payment_terms text,
+  tax_id text,
+  note text,
   created_at timestamptz default now()
 );
 

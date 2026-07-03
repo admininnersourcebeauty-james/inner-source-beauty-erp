@@ -166,10 +166,92 @@ function Dashboard({ stats, data }) {
 function Card({ title, value }) { return <div className="card"><p>{title}</p><b>{value}</b></div> }
 function Table({ rows, cols, onDelete }) { return <table><thead><tr>{cols.map(c => <th key={c}>{c}</th>)}{onDelete && <th></th>}</tr></thead><tbody>{rows.map(r => <tr key={r.id}>{cols.map(c => <td key={c}>{c.includes('price') || c.includes('total') || c.includes('amount') ? money(r[c]) : String(r[c] ?? '')}</td>)}{onDelete && <td><button className="danger" onClick={() => onDelete(r.id)}>Delete</button></td>}</tr>)}</tbody></table> }
 
-function Customers({ data, addRow, deleteRow }) {
-  const [f, setF] = useState({ name:'', company:'', phone:'', email:'', address:'' })
-  return <div className="panel"><h3>Add Customer</h3><Form fields={['name','company','phone','email','address']} f={f} setF={setF} onSubmit={() => { addRow('customers', f); setF({ name:'', company:'', phone:'', email:'', address:'' }) }} /><h3>Customers</h3><Table rows={data.customers} cols={['name','company','phone','email','address']} onDelete={id => deleteRow('customers', id)} /></div>
+function customerKeys(c) {
+  return [c.name, c.company, `${c.company || ''} ${c.name || ''}`.trim()].filter(Boolean).map(x => String(x).toLowerCase())
 }
+function ordersForCustomer(data, c) {
+  const keys = customerKeys(c)
+  return data.orders.filter(o => keys.includes(String(o.customer_name || '').toLowerCase()))
+}
+function paymentsForOrders(data, orders) {
+  const invoiceSet = new Set(orders.map(o => o.invoice_no).filter(Boolean))
+  return data.payments.filter(p => invoiceSet.has(p.invoice_no))
+}
+
+function Customers({ data, addRow, deleteRow }) {
+  const [f, setF] = useState({ name:'', company:'', phone:'', email:'', address:'', note:'' })
+  const [selectedId, setSelectedId] = useState('')
+  const [q, setQ] = useState('')
+  const selected = data.customers.find(c => String(c.id) === String(selectedId)) || data.customers[0]
+  const filtered = data.customers.filter(c => [c.name,c.company,c.phone,c.email,c.address,c.note].join(' ').toLowerCase().includes(q.toLowerCase()))
+
+  return <div className="customer-layout">
+    <div className="panel">
+      <h3>Add Customer</h3>
+      <div className="form-grid">
+        <input placeholder="Contact Name" value={f.name} onChange={e=>setF({...f,name:e.target.value})}/>
+        <input placeholder="Business Name" value={f.company} onChange={e=>setF({...f,company:e.target.value})}/>
+        <input placeholder="Phone" value={f.phone} onChange={e=>setF({...f,phone:e.target.value})}/>
+        <input placeholder="Email" value={f.email} onChange={e=>setF({...f,email:e.target.value})}/>
+        <input placeholder="Billing / Shipping Address" value={f.address} onChange={e=>setF({...f,address:e.target.value})}/>
+        <input placeholder="Customer Note" value={f.note} onChange={e=>setF({...f,note:e.target.value})}/>
+        <button onClick={() => { addRow('customers', f); setF({ name:'', company:'', phone:'', email:'', address:'', note:'' }) }}>Save Customer</button>
+      </div>
+      <h3>Customers</h3>
+      <input className="search" placeholder="Search customer..." value={q} onChange={e=>setQ(e.target.value)} />
+      <table>
+        <thead><tr><th>Business</th><th>Contact</th><th>Phone</th><th>Balance</th><th>Last Order</th><th></th></tr></thead>
+        <tbody>{filtered.map(c => {
+          const os = ordersForCustomer(data, c)
+          const ps = paymentsForOrders(data, os)
+          const sales = os.reduce((s,o)=>s+Number(o.total||0),0)
+          const paid = ps.reduce((s,p)=>s+Number(p.amount||0),0)
+          const last = os[0]?.created_at ? new Date(os[0].created_at).toLocaleDateString() : ''
+          return <tr key={c.id} className={String(selected?.id)===String(c.id)?'selected-row':''}>
+            <td><button className="link-btn" onClick={()=>setSelectedId(c.id)}>{c.company || c.name || 'No Name'}</button></td>
+            <td>{c.name || ''}</td><td>{c.phone || ''}</td><td className={sales-paid>0?'balance-due':'paid'}>{sales-paid>0?money(sales-paid):'Paid'}</td><td>{last}</td>
+            <td><button className="danger" onClick={() => deleteRow('customers', c.id)}>Delete</button></td>
+          </tr>
+        })}</tbody>
+      </table>
+    </div>
+    <CustomerDetail customer={selected} data={data} />
+  </div>
+}
+
+function CustomerDetail({ customer, data }) {
+  if (!customer) return <div className="panel detail-panel"><h3>Customer Detail</h3><p>No customer selected.</p></div>
+  const orders = ordersForCustomer(data, customer)
+  const payments = paymentsForOrders(data, orders)
+  const sales = orders.reduce((s,o)=>s+Number(o.total||0),0)
+  const paid = payments.reduce((s,p)=>s+Number(p.amount||0),0)
+  const balance = sales - paid
+  const lastOrder = orders[0]?.created_at ? new Date(orders[0].created_at).toLocaleDateString() : '-'
+  const firstOrder = orders[orders.length-1]?.created_at ? new Date(orders[orders.length-1].created_at).toLocaleDateString() : '-'
+  const styleMap = {}
+  orders.forEach(o => { const k = o.style || 'No Style'; styleMap[k] = (styleMap[k] || 0) + Number(o.qty || 0) })
+  const styleRows = Object.entries(styleMap).map(([style, qty], idx) => ({ id: idx, style, qty }))
+  return <div className="panel detail-panel">
+    <h3>Customer Detail</h3>
+    <div className="customer-title"><b>{customer.company || customer.name}</b><span>{customer.name && customer.company ? customer.name : ''}</span></div>
+    <p><b>Phone:</b> {customer.phone || '-'}<br/><b>Email:</b> {customer.email || '-'}<br/><b>Address:</b> {customer.address || '-'}</p>
+    {customer.note && <div className="note-box"><b>Note</b><br/>{customer.note}</div>}
+    <div className="cards small-cards">
+      <Card title="Lifetime Sales" value={money(sales)} />
+      <Card title="Paid" value={money(paid)} />
+      <Card title="Balance" value={money(balance)} />
+      <Card title="Last Order" value={lastOrder} />
+    </div>
+    <p><b>First Order:</b> {firstOrder}</p>
+    <h4>Invoice History</h4>
+    <Table rows={orders} cols={['invoice_no','created_at','style','qty','total','status']} />
+    <h4>Payment History</h4>
+    <Table rows={payments} cols={['invoice_no','amount','method','note']} />
+    <h4>Ordered Styles</h4>
+    <Table rows={styleRows} cols={['style','qty']} />
+  </div>
+}
+
 function Inventory({ data, addRow, deleteRow }) {
   const [f, setF] = useState({ style:'', color:'', qty:'', cost:'', price:'' })
   return <div className="panel"><h3>Add Inventory</h3><Form fields={['style','color','qty','cost','price']} f={f} setF={setF} onSubmit={() => { addRow('inventory', { ...f, qty:Number(f.qty), cost:Number(f.cost), price:Number(f.price) }); setF({ style:'', color:'', qty:'', cost:'', price:'' }) }} /><h3>Inventory</h3><Table rows={data.inventory} cols={['style','color','qty','cost','price']} onDelete={id => deleteRow('inventory', id)} /></div>
@@ -178,12 +260,16 @@ function Orders({ data, createOrder, deleteRow }) {
   const [f, setF] = useState({ customer_name:'', inventory_id:'', style:'', qty:'', price:'', shipping:'0', discount:'0', status:'Pending' })
   function chooseItem(id){ const item=data.inventory.find(i=>String(i.id)===String(id)); setF({...f, inventory_id:id, style:item?.style||'', price:item?.price||''}) }
   return <div className="panel"><h3>Create Order</h3><div className="form-grid">
-    <input placeholder="Customer Name" value={f.customer_name} onChange={e=>setF({...f,customer_name:e.target.value})}/>
+    <select value={f.customer_name} onChange={e=>setF({...f,customer_name:e.target.value})}>
+      <option value="">Select Customer</option>
+      {data.customers.map(c => <option key={c.id} value={c.company || c.name}>{c.company || c.name}{c.name && c.company ? ` - ${c.name}` : ''}</option>)}
+    </select>
     <select value={f.inventory_id} onChange={e=>chooseItem(e.target.value)}><option value="">Select Item</option>{data.inventory.map(i=><option key={i.id} value={i.id}>{i.style} / {i.color} / Stock {i.qty}</option>)}</select>
     {['style','qty','price','shipping','discount','status'].map(x=><input key={x} placeholder={x} value={f[x]} onChange={e=>setF({...f,[x]:e.target.value})}/>) }
     <button onClick={()=>{createOrder({...f, qty:Number(f.qty), price:Number(f.price), shipping:Number(f.shipping), discount:Number(f.discount)}); setF({ customer_name:'', inventory_id:'', style:'', qty:'', price:'', shipping:'0', discount:'0', status:'Pending' })}}>Create Order</button>
   </div><h3>Orders</h3><Table rows={data.orders} cols={['invoice_no','customer_name','style','qty','price','total','status']} onDelete={id => deleteRow('orders', id)} /></div>
 }
+
 function Invoice({ data }) {
   const [id, setId] = useState('')
   const o = data.orders.find(x => String(x.id) === String(id)) || data.orders[0]

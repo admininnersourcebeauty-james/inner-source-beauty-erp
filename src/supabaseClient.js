@@ -6,6 +6,7 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 export const hasSupabaseConfig = Boolean(
   supabaseUrl &&
   supabaseAnonKey &&
+  supabaseUrl.includes('supabase.co') &&
   !supabaseUrl.includes('YOUR-PROJECT-ID') &&
   !supabaseAnonKey.includes('YOUR-PUBLISHABLE-KEY')
 )

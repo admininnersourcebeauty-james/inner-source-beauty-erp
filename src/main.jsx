@@ -3,321 +3,126 @@ import { createRoot } from 'react-dom/client'
 import { supabase, hasSupabaseConfig } from './supabaseClient.js'
 import './style.css'
 
-const tables = ['customers', 'inventory', 'orders', 'payments']
-const emptyData = { customers: [], inventory: [], orders: [], payments: [] }
-const money = n => `$${(Number(n) || 0).toFixed(2)}`
-const today = () => new Date().toISOString().slice(0, 10)
+const TABLES = ['customers','inventory','orders','payments']
+const EMPTY = { customers: [], inventory: [], orders: [], payments: [] }
+const PAYMENT_METHODS = ['Zelle','Venmo','Cash','Credit Card','Check','ACH/Wire']
+const TERMS = ['COD','NET 15','NET 30','NET 45','NET 60']
+const money = n => `$${(Number(n)||0).toFixed(2)}`
+const dateOnly = d => d ? String(d).slice(0,10) : ''
+const today = () => new Date().toISOString().slice(0,10)
+const uid = () => Math.random().toString(36).slice(2)+Date.now().toString(36)
 
-function uid() {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36)
+function useLocalData(){
+  const [data,setData]=useState(()=>{try{return JSON.parse(localStorage.getItem('isb_data_v1'))||EMPTY}catch{return EMPTY}})
+  useEffect(()=>localStorage.setItem('isb_data_v1',JSON.stringify(data)),[data])
+  return [data,setData]
 }
 
-function useLocalFallback() {
-  const [data, setData] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('isb_local_data')) || emptyData } catch { return emptyData }
-  })
-  useEffect(() => localStorage.setItem('isb_local_data', JSON.stringify(data)), [data])
-  return [data, setData]
-}
-
-function App() {
-  const [session, setSession] = useState(null)
-  const [authMode, setAuthMode] = useState('signin')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [authMsg, setAuthMsg] = useState('')
-  const [page, setPage] = useState('Dashboard')
-  const [cloudData, setCloudData] = useState(emptyData)
-  const [localData, setLocalData] = useLocalFallback()
-  const [loading, setLoading] = useState(false)
-  const [notice, setNotice] = useState('')
+function App(){
+  const [session,setSession]=useState(null)
+  const [authMode,setAuthMode]=useState('signin')
+  const [email,setEmail]=useState('')
+  const [password,setPassword]=useState('')
+  const [authMsg,setAuthMsg]=useState('')
+  const [page,setPage]=useState('Dashboard')
+  const [cloudData,setCloudData]=useState(EMPTY)
+  const [localData,setLocalData]=useLocalData()
+  const [notice,setNotice]=useState('')
+  const [loading,setLoading]=useState(false)
 
   const data = hasSupabaseConfig && session ? cloudData : localData
 
-  useEffect(() => {
-    if (!hasSupabaseConfig) return
-    supabase.auth.getSession().then(({ data }) => setSession(data.session))
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => setSession(session))
-    return () => sub.subscription.unsubscribe()
-  }, [])
+  useEffect(()=>{
+    if(!hasSupabaseConfig) return
+    supabase.auth.getSession().then(({data})=>setSession(data.session))
+    const { data: sub } = supabase.auth.onAuthStateChange((_e,s)=>setSession(s))
+    return ()=>sub.subscription.unsubscribe()
+  },[])
+  useEffect(()=>{ if(hasSupabaseConfig && session) loadCloudData() },[session])
 
-  useEffect(() => {
-    if (!hasSupabaseConfig || !session) return
-    loadCloudData()
-  }, [session])
-
-  async function loadCloudData() {
-    setLoading(true)
-    const next = { ...emptyData }
-    for (const t of tables) {
-      const { data, error } = await supabase.from(t).select('*').order('created_at', { ascending: false })
-      if (error) setNotice(error.message)
-      next[t] = data || []
+  async function loadCloudData(){
+    setLoading(true); setNotice('')
+    const next={...EMPTY}
+    for(const t of TABLES){
+      const { data: rows, error } = await supabase.from(t).select('*').order('created_at',{ascending:false})
+      if(error) setNotice(error.message)
+      next[t]=rows||[]
     }
-    setCloudData(next)
-    setLoading(false)
+    setCloudData(next); setLoading(false)
   }
 
-  async function authAction(e) {
-    e.preventDefault()
-    setAuthMsg('')
-    if (!hasSupabaseConfig) {
-      if (!email || !password) return setAuthMsg('Enter any email and password for local test mode.')
-      setSession({ user: { email } })
-      return
-    }
-    const fn = authMode === 'signup' ? supabase.auth.signUp : supabase.auth.signInWithPassword
-    const { error } = await fn.call(supabase.auth, { email, password })
-    if (error) setAuthMsg(error.message)
-    else setAuthMsg(authMode === 'signup' ? 'Account created. Check email if confirmation is enabled.' : '')
+  async function authAction(e){
+    e.preventDefault(); setAuthMsg('')
+    if(!email || !password) return setAuthMsg('Email and password required')
+    if(!hasSupabaseConfig){ setSession({user:{email}}); return }
+    const res = authMode==='signup'
+      ? await supabase.auth.signUp({email,password})
+      : await supabase.auth.signInWithPassword({email,password})
+    if(res.error) setAuthMsg(res.error.message)
+    else setAuthMsg(authMode==='signup'?'Account created. Check email if confirmation is enabled.':'')
   }
+  async function logout(){ if(hasSupabaseConfig) await supabase.auth.signOut(); setSession(null) }
 
-  async function logout() {
-    if (hasSupabaseConfig) await supabase.auth.signOut()
-    setSession(null)
-  }
-
-  async function addRow(table, row) {
-    if (hasSupabaseConfig && session) {
+  async function addRow(table,row){
+    setNotice('')
+    if(hasSupabaseConfig && session){
       const { error } = await supabase.from(table).insert(row)
-      if (error) return setNotice(error.message)
+      if(error) return setNotice(error.message)
       await loadCloudData()
-    } else {
-      setLocalData(prev => ({ ...prev, [table]: [{ id: uid(), created_at: new Date().toISOString(), ...row }, ...prev[table]] }))
-    }
+    } else setLocalData(p=>({...p,[table]:[{id:uid(),created_at:new Date().toISOString(),...row},...p[table]]}))
   }
-
-  async function deleteRow(table, id) {
-    if (!confirm('Delete this item?')) return
-    if (hasSupabaseConfig && session) {
-      const { error } = await supabase.from(table).delete().eq('id', id)
-      if (error) return setNotice(error.message)
+  async function updateRow(table,id,row){
+    setNotice('')
+    if(hasSupabaseConfig && session){
+      const { error } = await supabase.from(table).update(row).eq('id',id)
+      if(error) return setNotice(error.message)
       await loadCloudData()
-    } else {
-      setLocalData(prev => ({ ...prev, [table]: prev[table].filter(r => r.id !== id) }))
-    }
+    } else setLocalData(p=>({...p,[table]:p[table].map(x=>String(x.id)===String(id)?{...x,...row}:x)}))
   }
-
-  async function createOrder(order) {
-    const item = data.inventory.find(i => String(i.id) === String(order.inventory_id))
-    const total = Number(order.qty || 0) * Number(order.price || 0) + Number(order.shipping || 0) - Number(order.discount || 0)
-    const payload = { ...order, total, invoice_no: order.invoice_no || `ISB-${Date.now().toString().slice(-6)}` }
+  async function deleteRow(table,id){
+    if(!confirm('Delete this item?')) return
+    if(hasSupabaseConfig && session){
+      const { error } = await supabase.from(table).delete().eq('id',id)
+      if(error) return setNotice(error.message)
+      await loadCloudData()
+    } else setLocalData(p=>({...p,[table]:p[table].filter(x=>String(x.id)!==String(id))}))
+  }
+  async function createOrder(f){
+    const item=data.inventory.find(i=>String(i.id)===String(f.inventory_id))
+    const qty=Number(f.qty||0), price=Number(f.price||0), shipping=Number(f.shipping||0), discount=Number(f.discount||0)
+    const total=qty*price+shipping-discount
+    const customer=data.customers.find(c=>String(c.id)===String(f.customer_id))
+    const payload={...f, qty, price, shipping, discount, total, invoice_no:f.invoice_no||`ISB-${Date.now().toString().slice(-6)}`, customer_name:customer?.company||customer?.name||f.customer_name||'', style:item?.style||f.style, status:f.status||'Open', payment_status:f.payment_status||'Unpaid'}
     await addRow('orders', payload)
-    if (item && !hasSupabaseConfig) {
-      setLocalData(prev => ({
-        ...prev,
-        inventory: prev.inventory.map(i => String(i.id) === String(item.id) ? { ...i, qty: Number(i.qty || 0) - Number(order.qty || 0) } : i)
-      }))
+    if(item){
+      const newQty=Number(item.qty||0)-qty
+      await updateRow('inventory', item.id, { qty:newQty })
     }
   }
 
-  const stats = useMemo(() => {
-    const sales = data.orders.reduce((s, o) => s + Number(o.total || 0), 0)
-    const paid = data.payments.reduce((s, p) => s + Number(p.amount || 0), 0)
-    const stock = data.inventory.reduce((s, i) => s + Number(i.qty || 0), 0)
-    return { sales, paid, balance: sales - paid, stock }
-  }, [data])
+  const stats=useMemo(()=>calcStats(data),[data])
 
-  if (!session) {
-    return <div className="login-wrap"><form className="login-card" onSubmit={authAction}>
-      <div className="logo">ISB</div>
-      <h1>INNER SOURCE BEAUTY ERP</h1>
-      <p>{hasSupabaseConfig ? 'Supabase Cloud Login' : 'Local Test Login - add Supabase env in Vercel later'}</p>
-      <input placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} />
-      <input placeholder="Password" type="password" value={password} onChange={e => setPassword(e.target.value)} />
-      <button>{authMode === 'signin' ? 'Login' : 'Create Account'}</button>
-      <button type="button" className="soft" onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')}>
-        {authMode === 'signin' ? 'Create Account' : 'Back to Login'}
-      </button>
-      {authMsg && <div className="msg">{authMsg}</div>}
-    </form></div>
-  }
+  if(!session) return <Login authMode={authMode} setAuthMode={setAuthMode} email={email} setEmail={setEmail} password={password} setPassword={setPassword} authAction={authAction} authMsg={authMsg}/>
 
   return <div className="app">
-    <aside>
-      <div className="brand"><span>ISB</span><b>INNER SOURCE BEAUTY</b></div>
-      {['Dashboard','Customers','Inventory','Orders','Invoice','Payments','Reports','Settings'].map(x => <button key={x} className={page === x ? 'active' : ''} onClick={() => setPage(x)}>{x}</button>)}
-      <button className="logout" onClick={logout}>Logout</button>
-    </aside>
-    <main>
-      <header><h2>{page}</h2><div>{session.user?.email || 'Local user'}</div></header>
-      {notice && <div className="notice" onClick={() => setNotice('')}>{notice}</div>}
-      {loading ? <div className="panel">Loading...</div> : null}
-      {page === 'Dashboard' && <Dashboard stats={stats} data={data} />}
-      {page === 'Customers' && <Customers data={data} addRow={addRow} deleteRow={deleteRow} />}
-      {page === 'Inventory' && <Inventory data={data} addRow={addRow} deleteRow={deleteRow} />}
-      {page === 'Orders' && <Orders data={data} createOrder={createOrder} deleteRow={deleteRow} />}
-      {page === 'Invoice' && <Invoice data={data} />}
-      {page === 'Payments' && <Payments data={data} addRow={addRow} deleteRow={deleteRow} />}
-      {page === 'Reports' && <Reports stats={stats} data={data} />}
-      {page === 'Settings' && <Settings data={data} />}
-    </main>
+    <aside><div className="brand"><span>ISB</span><b>INNER SOURCE<br/>BEAUTY</b></div>{['Dashboard','Customers','Inventory','Orders','Invoice','Payments','Reports','Settings'].map(x=><button key={x} className={page===x?'active':''} onClick={()=>setPage(x)}>{x}</button>)}<button className="logout" onClick={logout}>Logout</button></aside>
+    <main><header><h1>{page}</h1><div className="user">{session.user?.email}</div></header>{notice&&<div className="notice" onClick={()=>setNotice('')}>{notice}</div>}{loading&&<div className="panel">Loading...</div>}
+      {page==='Dashboard'&&<Dashboard data={data} stats={stats}/>} {page==='Customers'&&<Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow}/>} {page==='Inventory'&&<Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow}/>} {page==='Orders'&&<Orders data={data} createOrder={createOrder} deleteRow={deleteRow}/>} {page==='Invoice'&&<Invoice data={data}/>} {page==='Payments'&&<Payments data={data} addRow={addRow} deleteRow={deleteRow}/>} {page==='Reports'&&<Reports data={data} stats={stats}/>} {page==='Settings'&&<Settings data={data} reload={loadCloudData}/>} </main>
   </div>
 }
-
-function Dashboard({ stats, data }) {
-  return <><div className="cards">
-    <Card title="Total Sales" value={money(stats.sales)} />
-    <Card title="Amount Paid" value={money(stats.paid)} />
-    <Card title="Open Balance" value={money(stats.balance)} />
-    <Card title="Stock Qty" value={stats.stock} />
-  </div><div className="panel"><h3>Recent Orders</h3><Table rows={data.orders.slice(0, 6)} cols={['invoice_no','customer_name','style','qty','total','status']} /></div></>
-}
-function Card({ title, value }) { return <div className="card"><p>{title}</p><b>{value}</b></div> }
-function Table({ rows, cols, onDelete }) { return <table><thead><tr>{cols.map(c => <th key={c}>{c}</th>)}{onDelete && <th></th>}</tr></thead><tbody>{rows.map(r => <tr key={r.id}>{cols.map(c => <td key={c}>{c.includes('price') || c.includes('total') || c.includes('amount') ? money(r[c]) : String(r[c] ?? '')}</td>)}{onDelete && <td><button className="danger" onClick={() => onDelete(r.id)}>Delete</button></td>}</tr>)}</tbody></table> }
-
-function customerKeys(c) {
-  return [c.name, c.company, `${c.company || ''} ${c.name || ''}`.trim()].filter(Boolean).map(x => String(x).toLowerCase())
-}
-function ordersForCustomer(data, c) {
-  const keys = customerKeys(c)
-  return data.orders.filter(o => keys.includes(String(o.customer_name || '').toLowerCase()))
-}
-function paymentsForOrders(data, orders) {
-  const invoiceSet = new Set(orders.map(o => o.invoice_no).filter(Boolean))
-  return data.payments.filter(p => invoiceSet.has(p.invoice_no))
-}
-
-function Customers({ data, addRow, deleteRow }) {
-  const emptyCustomer = { name:'', company:'', phone:'', email:'', billing_address:'', shipping_address:'', shipping_same_as_billing:false, preferred_payment:'Zelle', payment_terms:'COD', tax_id:'', note:'' }
-  const [f, setF] = useState(emptyCustomer)
-  const [sameAddress, setSameAddress] = useState(false)
-  const [selectedId, setSelectedId] = useState('')
-  const [q, setQ] = useState('')
-  const selected = data.customers.find(c => String(c.id) === String(selectedId)) || data.customers[0]
-  const filtered = data.customers.filter(c => [c.name,c.company,c.phone,c.email,c.billing_address,c.address,c.shipping_address,c.preferred_payment,c.payment_terms,c.tax_id,c.note].join(' ').toLowerCase().includes(q.toLowerCase()))
-
-  function updateBilling(value) {
-    setF(prev => ({ ...prev, billing_address: value, address: value, shipping_address: sameAddress ? value : prev.shipping_address, shipping_same_as_billing: sameAddress }))
-  }
-  function toggleSameAddress() {
-    const next = !sameAddress
-    setSameAddress(next)
-    if (next) setF(prev => ({ ...prev, shipping_address: prev.billing_address || prev.address || '', shipping_same_as_billing: true }))
-    else setF(prev => ({ ...prev, shipping_same_as_billing: false }))
-  }
-
-  return <div className="customer-layout">
-    <div className="panel">
-      <h3>Add Customer</h3>
-      <div className="form-grid customer-form-grid">
-        <input placeholder="Contact Name" value={f.name} onChange={e=>setF({...f,name:e.target.value})}/>
-        <input placeholder="Business Name" value={f.company} onChange={e=>setF({...f,company:e.target.value})}/>
-        <input placeholder="Phone" value={f.phone} onChange={e=>setF({...f,phone:e.target.value})}/>
-        <input placeholder="Email" value={f.email} onChange={e=>setF({...f,email:e.target.value})}/>
-        <textarea placeholder="Billing Address" value={f.billing_address} onChange={e=>updateBilling(e.target.value)} />
-        <textarea placeholder="Shipping Address" value={f.shipping_address} onChange={e=>setF({...f,shipping_address:e.target.value})}/>
-        <label className="check-row"><input type="checkbox" checked={sameAddress} onChange={toggleSameAddress}/> Shipping Address is same as Billing Address</label>
-        <select value={f.preferred_payment} onChange={e=>setF({...f,preferred_payment:e.target.value})}>
-          {['Zelle','Venmo','Cash','Credit Card','Check'].map(m => <option key={m}>{m}</option>)}
-        </select>
-        <select value={f.payment_terms} onChange={e=>setF({...f,payment_terms:e.target.value})}>
-          {['COD','NET 7','NET 15','NET 30'].map(m => <option key={m}>{m}</option>)}
-        </select>
-        <input placeholder="Tax ID / Seller Permit" value={f.tax_id} onChange={e=>setF({...f,tax_id:e.target.value})}/>
-        <input placeholder="Customer Note" value={f.note} onChange={e=>setF({...f,note:e.target.value})}/>
-        <button onClick={() => { addRow('customers', { ...f, address: f.billing_address }); setF(emptyCustomer); setSameAddress(false) }}>Save Customer</button>
-      </div>
-      <h3>Customers</h3>
-      <input className="search" placeholder="Search customer..." value={q} onChange={e=>setQ(e.target.value)} />
-      <table>
-        <thead><tr><th>Business</th><th>Contact</th><th>Phone</th><th>Balance</th><th>Last Order</th><th></th></tr></thead>
-        <tbody>{filtered.map(c => {
-          const os = ordersForCustomer(data, c)
-          const ps = paymentsForOrders(data, os)
-          const sales = os.reduce((s,o)=>s+Number(o.total||0),0)
-          const paid = ps.reduce((s,p)=>s+Number(p.amount||0),0)
-          const last = os[0]?.created_at ? new Date(os[0].created_at).toLocaleDateString() : ''
-          return <tr key={c.id} className={String(selected?.id)===String(c.id)?'selected-row':''}>
-            <td><button className="link-btn" onClick={()=>setSelectedId(c.id)}>{c.company || c.name || 'No Name'}</button></td>
-            <td>{c.name || ''}</td><td>{c.phone || ''}</td><td className={sales-paid>0?'balance-due':'paid'}>{sales-paid>0?money(sales-paid):'Paid'}</td><td>{last}</td>
-            <td><button className="danger" onClick={() => deleteRow('customers', c.id)}>Delete</button></td>
-          </tr>
-        })}</tbody>
-      </table>
-    </div>
-    <CustomerDetail customer={selected} data={data} />
-  </div>
-}
-
-function CustomerDetail({ customer, data }) {
-  if (!customer) return <div className="panel detail-panel"><h3>Customer Detail</h3><p>No customer selected.</p></div>
-  const orders = ordersForCustomer(data, customer)
-  const payments = paymentsForOrders(data, orders)
-  const sales = orders.reduce((s,o)=>s+Number(o.total||0),0)
-  const paid = payments.reduce((s,p)=>s+Number(p.amount||0),0)
-  const balance = sales - paid
-  const lastOrder = orders[0]?.created_at ? new Date(orders[0].created_at).toLocaleDateString() : '-'
-  const firstOrder = orders[orders.length-1]?.created_at ? new Date(orders[orders.length-1].created_at).toLocaleDateString() : '-'
-  const styleMap = {}
-  orders.forEach(o => { const k = o.style || 'No Style'; styleMap[k] = (styleMap[k] || 0) + Number(o.qty || 0) })
-  const styleRows = Object.entries(styleMap).map(([style, qty], idx) => ({ id: idx, style, qty }))
-  return <div className="panel detail-panel">
-    <h3>Customer Detail</h3>
-    <div className="customer-title"><b>{customer.company || customer.name}</b><span>{customer.name && customer.company ? customer.name : ''}</span></div>
-    <p><b>Phone:</b> {customer.phone || '-'}<br/><b>Email:</b> {customer.email || '-'}<br/><b>Preferred Payment:</b> {customer.preferred_payment || '-'}<br/><b>Terms:</b> {customer.payment_terms || '-'}<br/><b>Tax ID:</b> {customer.tax_id || '-'}</p>
-    <div className="address-pair">
-      <div><b>Billing Address</b><pre>{customer.billing_address || customer.address || '-'}</pre></div>
-      <div><b>Shipping Address</b><pre>{customer.shipping_address || customer.billing_address || customer.address || '-'}</pre></div>
-    </div>
-    {customer.note && <div className="note-box"><b>Note</b><br/>{customer.note}</div>}
-    <div className="cards small-cards">
-      <Card title="Lifetime Sales" value={money(sales)} />
-      <Card title="Paid" value={money(paid)} />
-      <Card title="Balance" value={money(balance)} />
-      <Card title="Last Order" value={lastOrder} />
-    </div>
-    <p><b>First Order:</b> {firstOrder}</p>
-    <h4>Invoice History</h4>
-    <Table rows={orders} cols={['invoice_no','created_at','style','qty','total','status']} />
-    <h4>Payment History</h4>
-    <Table rows={payments} cols={['invoice_no','amount','method','note']} />
-    <h4>Ordered Styles</h4>
-    <Table rows={styleRows} cols={['style','qty']} />
-  </div>
-}
-
-function Inventory({ data, addRow, deleteRow }) {
-  const [f, setF] = useState({ style:'', color:'', qty:'', cost:'', price:'' })
-  return <div className="panel"><h3>Add Inventory</h3><Form fields={['style','color','qty','cost','price']} f={f} setF={setF} onSubmit={() => { addRow('inventory', { ...f, qty:Number(f.qty), cost:Number(f.cost), price:Number(f.price) }); setF({ style:'', color:'', qty:'', cost:'', price:'' }) }} /><h3>Inventory</h3><Table rows={data.inventory} cols={['style','color','qty','cost','price']} onDelete={id => deleteRow('inventory', id)} /></div>
-}
-function Orders({ data, createOrder, deleteRow }) {
-  const [f, setF] = useState({ customer_name:'', inventory_id:'', style:'', qty:'', price:'', shipping:'0', discount:'0', status:'Pending' })
-  function chooseItem(id){ const item=data.inventory.find(i=>String(i.id)===String(id)); setF({...f, inventory_id:id, style:item?.style||'', price:item?.price||''}) }
-  return <div className="panel"><h3>Create Order</h3><div className="form-grid">
-    <select value={f.customer_name} onChange={e=>setF({...f,customer_name:e.target.value})}>
-      <option value="">Select Customer</option>
-      {data.customers.map(c => <option key={c.id} value={c.company || c.name}>{c.company || c.name}{c.name && c.company ? ` - ${c.name}` : ''}</option>)}
-    </select>
-    <select value={f.inventory_id} onChange={e=>chooseItem(e.target.value)}><option value="">Select Item</option>{data.inventory.map(i=><option key={i.id} value={i.id}>{i.style} / {i.color} / Stock {i.qty}</option>)}</select>
-    {['style','qty','price','shipping','discount','status'].map(x=><input key={x} placeholder={x} value={f[x]} onChange={e=>setF({...f,[x]:e.target.value})}/>) }
-    <button onClick={()=>{createOrder({...f, qty:Number(f.qty), price:Number(f.price), shipping:Number(f.shipping), discount:Number(f.discount)}); setF({ customer_name:'', inventory_id:'', style:'', qty:'', price:'', shipping:'0', discount:'0', status:'Pending' })}}>Create Order</button>
-  </div><h3>Orders</h3><Table rows={data.orders} cols={['invoice_no','customer_name','style','qty','price','total','status']} onDelete={id => deleteRow('orders', id)} /></div>
-}
-
-function Invoice({ data }) {
-  const [id, setId] = useState('')
-  const o = data.orders.find(x => String(x.id) === String(id)) || data.orders[0]
-  if (!o) return <div className="panel">No invoice yet.</div>
-  return <div className="panel"><select value={id} onChange={e=>setId(e.target.value)}>{data.orders.map(o=><option key={o.id} value={o.id}>{o.invoice_no} - {o.customer_name}</option>)}</select><div className="invoice"><h1>INNER SOURCE BEAUTY</h1><h2>INVOICE</h2><p><b>Invoice #:</b> {o.invoice_no}<br/><b>Date:</b> {new Date(o.created_at || Date.now()).toLocaleDateString()}<br/><b>Bill To:</b> {o.customer_name}</p><table><tbody><tr><th>Style</th><th>Qty</th><th>Unit Price</th><th>Total</th></tr><tr><td>{o.style}</td><td>{o.qty}</td><td>{money(o.price)}</td><td>{money(o.total)}</td></tr></tbody></table><h2>Total Due: {money(o.total)}</h2><p className="terms">ALL RETURNS ARE STORE CREDIT ONLY. RETURNS MUST BE DONE WITHIN 10 BUSINESS DAYS. 20% RESTOCKING FEE MAY APPLY. SHIPPING AND HANDLING ARE NOT REFUNDABLE BOTH WAYS.</p><button onClick={()=>window.print()}>Print / Save PDF</button></div></div>
-}
-function Payments({ data, addRow, deleteRow }) {
-  const methods = ['Zelle', 'Venmo', 'Cash', 'Credit Card', 'Check']
-  const [f, setF] = useState({ invoice_no:'', amount:'', method:'Zelle', note:'' })
-  return <div className="panel"><h3>Add Payment</h3>
-    <div className="form-grid payment-form-grid">
-      <input placeholder="Invoice #" value={f.invoice_no} onChange={e=>setF({...f, invoice_no:e.target.value})} />
-      <input placeholder="Amount" value={f.amount} onChange={e=>setF({...f, amount:e.target.value})} />
-      <input placeholder="Payment Note" value={f.note} onChange={e=>setF({...f, note:e.target.value})} />
-      <div className="payment-methods">
-        {methods.map(m => <button key={m} type="button" className={f.method === m ? 'method-box selected' : 'method-box'} onClick={()=>setF({...f, method:m})}>{m}</button>)}
-      </div>
-      <button onClick={() => { addRow('payments', { ...f, amount:Number(f.amount) }); setF({ invoice_no:'', amount:'', method:'Zelle', note:'' }) }}>Save Payment</button>
-    </div>
-    <h3>Payments</h3><Table rows={data.payments} cols={['invoice_no','amount','method','note']} onDelete={id => deleteRow('payments', id)} /></div>
-}
-function Reports({ stats, data }) { return <div className="panel"><h3>Reports</h3><p>Total Customers: {data.customers.length}</p><p>Total Inventory Items: {data.inventory.length}</p><p>Total Orders: {data.orders.length}</p><p>Total Sales: {money(stats.sales)}</p><p>Open Balance: {money(stats.balance)}</p></div> }
-function Settings({ data }) { return <div className="panel"><h3>Settings</h3><p>Use Supabase Authentication to add employees. Add environment variables in Vercel for cloud mode.</p><button onClick={()=>{const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='isb-backup.json'; a.click();}}>Download Backup JSON</button></div> }
-function Form({ fields, f, setF, onSubmit }) { return <div className="form-grid">{fields.map(x => <input key={x} placeholder={x} value={f[x] || ''} onChange={e => setF({ ...f, [x]: e.target.value })} />)}<button onClick={onSubmit}>Save</button></div> }
+function Login(p){return <div className="login-wrap"><form className="login-card" onSubmit={p.authAction}><div className="logo">ISB</div><h1>INNER SOURCE<br/>BEAUTY ERP</h1><p>Supabase Cloud Login</p><input placeholder="Email" value={p.email} onChange={e=>p.setEmail(e.target.value)}/><input placeholder="Password" type="password" value={p.password} onChange={e=>p.setPassword(e.target.value)}/><div><button>{p.authMode==='signin'?'Login':'Create Account'}</button><button type="button" className="soft" onClick={()=>p.setAuthMode(p.authMode==='signin'?'signup':'signin')}>{p.authMode==='signin'?'Create Account':'Back to Login'}</button></div>{p.authMsg&&<div className="msg">{p.authMsg}</div>}</form></div>}
+function calcStats(data){const sales=data.orders.reduce((s,o)=>s+Number(o.total||0),0); const paid=data.payments.reduce((s,p)=>s+Number(p.amount||0),0); const stock=data.inventory.reduce((s,i)=>s+Number(i.qty||0),0); return {sales,paid,balance:sales-paid,stock,orders:data.orders.length,customers:data.customers.length}}
+function Dashboard({data,stats}){return <><div className="cards"><Card t="Total Sales" v={money(stats.sales)}/><Card t="Amount Paid" v={money(stats.paid)}/><Card t="Open Balance" v={money(stats.balance)}/><Card t="Stock Qty" v={stats.stock}/></div><div className="panel"><h2>Recent Orders</h2><Table rows={data.orders.slice(0,8)} cols={['invoice_no','customer_name','style','qty','total','status']}/></div></>}
+function Card({t,v}){return <div className="card"><p>{t}</p><b>{v}</b></div>}
+function Customers({data,addRow,updateRow,deleteRow}){const blank={name:'',company:'',phone:'',email:'',billing_address:'',shipping_address:'',shipping_same_as_billing:false,preferred_payment:'Zelle',payment_terms:'COD',tax_id:'',note:'',status:'Active'}; const [f,setF]=useState(blank); const [selected,setSelected]=useState(null); const [q,setQ]=useState(''); const customers=data.customers.filter(c=>[c.name,c.company,c.phone,c.email].join(' ').toLowerCase().includes(q.toLowerCase())); function setSame(v){setF({...f,shipping_same_as_billing:v,shipping_address:v?f.billing_address:f.shipping_address})} async function save(){const row={...f,shipping_address:f.shipping_same_as_billing?f.billing_address:f.shipping_address}; await addRow('customers', row); setF(blank)} const selectedCustomer=data.customers.find(c=>String(c.id)===String(selected)); return <div className="split"><div className="panel"><h2>Add Customer</h2><div className="form-grid customer-form"><input placeholder="Contact Name" value={f.name} onChange={e=>setF({...f,name:e.target.value})}/><input placeholder="Business Name" value={f.company} onChange={e=>setF({...f,company:e.target.value})}/><input placeholder="Phone" value={f.phone} onChange={e=>setF({...f,phone:e.target.value})}/><input placeholder="Email" value={f.email} onChange={e=>setF({...f,email:e.target.value})}/><textarea placeholder="Billing Address" value={f.billing_address} onChange={e=>setF({...f,billing_address:e.target.value,shipping_address:f.shipping_same_as_billing?e.target.value:f.shipping_address})}/><textarea placeholder="Shipping Address" value={f.shipping_address} disabled={f.shipping_same_as_billing} onChange={e=>setF({...f,shipping_address:e.target.value})}/><label className="check"><input type="checkbox" checked={f.shipping_same_as_billing} onChange={e=>setSame(e.target.checked)}/> Shipping Address is same as Billing Address</label><select value={f.preferred_payment} onChange={e=>setF({...f,preferred_payment:e.target.value})}>{PAYMENT_METHODS.map(x=><option key={x}>{x}</option>)}</select><select value={f.payment_terms} onChange={e=>setF({...f,payment_terms:e.target.value})}>{TERMS.map(x=><option key={x}>{x}</option>)}</select><input placeholder="Tax ID / Seller Permit" value={f.tax_id} onChange={e=>setF({...f,tax_id:e.target.value})}/><input placeholder="Customer Note" value={f.note} onChange={e=>setF({...f,note:e.target.value})}/><button onClick={save}>Save Customer</button></div><h2>Customers</h2><input className="search" placeholder="Search customer..." value={q} onChange={e=>setQ(e.target.value)}/><table><thead><tr><th>Business</th><th>Contact</th><th>Phone</th><th>Balance</th><th>Last Order</th></tr></thead><tbody>{customers.map(c=>{const s=customerStats(c,data);return <tr key={c.id} onClick={()=>setSelected(c.id)} className={String(selected)===String(c.id)?'sel':''}><td><b>{c.company||'-'}</b></td><td>{c.name}</td><td>{c.phone}</td><td>{money(s.balance)}</td><td>{s.lastOrder||'-'}</td></tr>})}</tbody></table></div><CustomerDetail customer={selectedCustomer} data={data} deleteRow={deleteRow}/></div>}
+function customerStats(c,data){const orders=data.orders.filter(o=>String(o.customer_id)===String(c.id)||o.customer_name===(c.company||c.name)); const payments=data.payments.filter(p=>String(p.customer_id)===String(c.id)||orders.some(o=>o.invoice_no===p.invoice_no)); const sales=orders.reduce((s,o)=>s+Number(o.total||0),0); const paid=payments.reduce((s,p)=>s+Number(p.amount||0),0); const last=orders[0]?.created_at?dateOnly(orders[0].created_at):''; return {orders,payments,sales,paid,balance:sales-paid,lastOrder:last}}
+function CustomerDetail({customer,data,deleteRow}){if(!customer)return <div className="panel detail"><h2>Customer Detail</h2><p>No customer selected.</p></div>; const s=customerStats(customer,data); return <div className="panel detail"><h2>{customer.company||customer.name}</h2><p><b>Contact:</b> {customer.name}<br/><b>Phone:</b> {customer.phone}<br/><b>Email:</b> {customer.email}<br/><b>Preferred Payment:</b> {customer.preferred_payment||'-'}<br/><b>Terms:</b> {customer.payment_terms||'-'}<br/><b>Tax ID:</b> {customer.tax_id||'-'}</p><div className="mini-cards"><Card t="Total Sales" v={money(s.sales)}/><Card t="Paid" v={money(s.paid)}/><Card t="Balance" v={money(s.balance)}/><Card t="Orders" v={s.orders.length}/></div><h3>Billing Address</h3><pre>{customer.billing_address||customer.address||''}</pre><h3>Shipping Address</h3><pre>{customer.shipping_address||customer.billing_address||customer.address||''}</pre><h3>Note</h3><pre>{customer.note||''}</pre><h3>Invoice / Order History</h3><Table rows={s.orders} cols={['invoice_no','style','qty','total','status','payment_status']}/><h3>Payment History</h3><Table rows={s.payments} cols={['payment_date','invoice_no','amount','method','reference_no','note']}/></div>}
+function Inventory({data,addRow,updateRow,deleteRow}){const blank={style:'',brand:'',category:'',color:'',qty:'',cost:'',price:'',retail:'',lot:'',expiration_date:'',low_stock:5}; const [f,setF]=useState(blank); async function save(){await addRow('inventory',{...f,qty:Number(f.qty),cost:Number(f.cost),price:Number(f.price),retail:Number(f.retail),low_stock:Number(f.low_stock)}); setF(blank)} return <div className="panel"><h2>Add Inventory</h2><div className="form-grid">{['style','brand','category','color','qty','cost','price','retail','lot','expiration_date','low_stock'].map(x=><input key={x} placeholder={x} type={x==='expiration_date'?'date':'text'} value={f[x]||''} onChange={e=>setF({...f,[x]:e.target.value})}/>) }<button onClick={save}>Save Item</button></div><h2>Inventory</h2><Table rows={data.inventory} cols={['style','brand','category','color','qty','cost','price','retail','lot','expiration_date']} onDelete={id=>deleteRow('inventory',id)}/></div>}
+function Orders({data,createOrder,deleteRow}){const blank={customer_id:'',inventory_id:'',customer_name:'',style:'',qty:'',price:'',shipping:'0',discount:'0',status:'Open',payment_status:'Unpaid',note:''}; const [f,setF]=useState(blank); function chooseCustomer(id){const c=data.customers.find(x=>String(x.id)===String(id)); setF({...f,customer_id:id,customer_name:c?.company||c?.name||''})} function chooseItem(id){const i=data.inventory.find(x=>String(x.id)===String(id)); setF({...f,inventory_id:id,style:i?.style||'',price:i?.price||''})} return <div className="panel"><h2>Create Order / Invoice</h2><div className="form-grid"><select value={f.customer_id} onChange={e=>chooseCustomer(e.target.value)}><option value="">Select Customer</option>{data.customers.map(c=><option key={c.id} value={c.id}>{c.company||c.name}</option>)}</select><select value={f.inventory_id} onChange={e=>chooseItem(e.target.value)}><option value="">Select Product</option>{data.inventory.map(i=><option key={i.id} value={i.id}>{i.style} / {i.color} / Stock {i.qty}</option>)}</select>{['style','qty','price','shipping','discount'].map(x=><input key={x} placeholder={x} value={f[x]} onChange={e=>setF({...f,[x]:e.target.value})}/>) }<select value={f.status} onChange={e=>setF({...f,status:e.target.value})}>{['Open','Pending','Shipped','Cancelled'].map(x=><option key={x}>{x}</option>)}</select><select value={f.payment_status} onChange={e=>setF({...f,payment_status:e.target.value})}>{['Unpaid','Partial','Paid'].map(x=><option key={x}>{x}</option>)}</select><input placeholder="Order Note" value={f.note} onChange={e=>setF({...f,note:e.target.value})}/><button onClick={()=>{createOrder(f);setF(blank)}}>Create Invoice</button></div><h2>Orders</h2><Table rows={data.orders} cols={['invoice_no','customer_name','style','qty','price','shipping','discount','total','status','payment_status']} onDelete={id=>deleteRow('orders',id)}/></div>}
+function Invoice({data}){const [id,setId]=useState(''); const o=data.orders.find(x=>String(x.id)===String(id))||data.orders[0]; const c=data.customers.find(x=>String(x.id)===String(o?.customer_id)); if(!o)return <div className="panel">No invoice yet.</div>; return <div className="panel"><select value={id} onChange={e=>setId(e.target.value)}>{data.orders.map(o=><option key={o.id} value={o.id}>{o.invoice_no} - {o.customer_name}</option>)}</select><div className="invoice"><h1>INNER SOURCE BEAUTY</h1><h2>INVOICE</h2><div className="invoice-grid"><p><b>Invoice #:</b> {o.invoice_no}<br/><b>Date:</b> {dateOnly(o.created_at)||today()}<br/><b>Status:</b> {o.payment_status}</p><p><b>Bill To</b><br/>{c?.company||o.customer_name}<br/>{c?.billing_address||c?.address||''}</p><p><b>Ship To</b><br/>{c?.shipping_address||c?.billing_address||c?.address||''}</p></div><table><tbody><tr><th>Style</th><th>Qty</th><th>Unit</th><th>Shipping</th><th>Discount</th><th>Total</th></tr><tr><td>{o.style}</td><td>{o.qty}</td><td>{money(o.price)}</td><td>{money(o.shipping)}</td><td>{money(o.discount)}</td><td>{money(o.total)}</td></tr></tbody></table><h2>Total Due: {money(o.total)}</h2><p className="terms">ALL RETURNS ARE STORE CREDIT ONLY. RETURNS MUST BE DONE WITHIN 10 BUSINESS DAYS. 20% RESTOCKING FEE MAY APPLY. SHIPPING AND HANDLING ARE NOT REFUNDABLE BOTH WAYS.</p><button onClick={()=>window.print()}>Print / Save PDF</button></div></div>}
+function Payments({data,addRow,deleteRow}){const blank={customer_id:'',order_id:'',invoice_no:'',payment_date:today(),amount:'',method:'Zelle',reference_no:'',note:''}; const [f,setF]=useState(blank); function chooseOrder(id){const o=data.orders.find(x=>String(x.id)===String(id)); setF({...f,order_id:id,customer_id:o?.customer_id||'',invoice_no:o?.invoice_no||'',amount:o?.total||''})} return <div className="panel"><h2>Add Payment</h2><div className="form-grid"><select value={f.order_id} onChange={e=>chooseOrder(e.target.value)}><option value="">Select Invoice</option>{data.orders.map(o=><option key={o.id} value={o.id}>{o.invoice_no} - {o.customer_name} - {money(o.total)}</option>)}</select><input type="date" value={f.payment_date} onChange={e=>setF({...f,payment_date:e.target.value})}/><input placeholder="Amount" value={f.amount} onChange={e=>setF({...f,amount:e.target.value})}/><div className="method-boxes">{PAYMENT_METHODS.map(m=><button key={m} type="button" className={f.method===m?'chosen':''} onClick={()=>setF({...f,method:m})}>{m}</button>)}</div><input placeholder="Reference / Check #" value={f.reference_no} onChange={e=>setF({...f,reference_no:e.target.value})}/><input placeholder="Memo" value={f.note} onChange={e=>setF({...f,note:e.target.value})}/><button onClick={()=>{addRow('payments',{...f,amount:Number(f.amount)});setF(blank)}}>Save Payment</button></div><h2>Payments</h2><Table rows={data.payments} cols={['payment_date','invoice_no','amount','method','reference_no','note']} onDelete={id=>deleteRow('payments',id)}/></div>}
+function Reports({data,stats}){const top=[...data.customers].map(c=>({...c,...customerStats(c,data)})).sort((a,b)=>b.sales-a.sales).slice(0,10); return <div className="panel"><h2>Reports</h2><div className="cards"><Card t="Customers" v={stats.customers}/><Card t="Orders" v={stats.orders}/><Card t="Sales" v={money(stats.sales)}/><Card t="Open Balance" v={money(stats.balance)}/></div><h3>Top Customers</h3><table><thead><tr><th>Customer</th><th>Sales</th><th>Paid</th><th>Balance</th></tr></thead><tbody>{top.map(c=><tr key={c.id}><td>{c.company||c.name}</td><td>{money(c.sales)}</td><td>{money(c.paid)}</td><td>{money(c.balance)}</td></tr>)}</tbody></table></div>}
+function Settings({data,reload}){function backup(){const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='inner-source-beauty-backup.json'; a.click()} return <div className="panel"><h2>Settings</h2><p>INNER SOURCE BEAUTY ERP cloud version. Data is stored in Supabase.</p><button onClick={backup}>Download Backup JSON</button><button onClick={reload}>Reload Cloud Data</button></div>}
+function Table({rows,cols,onDelete}){return <div className="table-wrap"><table><thead><tr>{cols.map(c=><th key={c}>{c.replaceAll('_',' ')}</th>)}{onDelete&&<th></th>}</tr></thead><tbody>{rows.map(r=><tr key={r.id}>{cols.map(c=><td key={c}>{['total','amount','price','cost','retail','shipping','discount'].includes(c)?money(r[c]):String(r[c]??'')}</td>)}{onDelete&&<td><button className="danger" onClick={()=>onDelete(r.id)}>Delete</button></td>}</tr>)}</tbody></table></div>}
 
 createRoot(document.getElementById('root')).render(<App />)

@@ -379,9 +379,14 @@ function inventoryQty(i) {
 }
 
 function inventoryUnitCost(i) {
-  const buying = Number(i?.buying_price) || 0
-  const cost = Number(i?.cost) || 0
-  return buying > 0 ? buying : cost
+  for (const key of ['buying_price', 'cost', 'buy_price']) {
+    const v = i?.[key]
+    if (v != null && v !== '') {
+      const n = Number(v)
+      if (!Number.isNaN(n) && n > 0) return n
+    }
+  }
+  return 0
 }
 
 function Dashboard({ data, stats }) {
@@ -394,13 +399,15 @@ function Dashboard({ data, stats }) {
   const monthlySales = monthOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   const monthlyProfit = monthOrders.reduce((s, o) => s + orderProfit(o), 0)
   const openBalance = stats.balance
-  const inventoryValue = data.inventory.reduce((s, i) => s + inventoryQty(i) * inventoryUnitCost(i), 0)
+  const inventoryValue = data.inventory.reduce((s, i) => {
+    const qty = Math.max(0, Number(i.qty) || 0)
+    return s + qty * inventoryUnitCost(i)
+  }, 0)
   const expectedProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
   const totalCustomers = data.customers.length
   const lowStock = data.inventory.filter(i => inventoryQty(i) < 5).length
-  const salesByDay = stats.salesByDay || buildSalesGraph(data.orders)
-  const maxDaySales = Math.max(...salesByDay.map(d => d.total), 1)
-  const barMaxPx = 140
+  const salesByDay = buildSalesGraph(data.orders)
+  const max = Math.max(...salesByDay.map(d => Number(d.total) || 0), 1)
 
   return (
     <>
@@ -420,13 +427,12 @@ function Dashboard({ data, stats }) {
         <h2>Sales — Last 30 Days</h2>
         <div className="sales-graph">
           {salesByDay.map(d => {
-            const barPx = d.total > 0
-              ? Math.max(Math.round((d.total / maxDaySales) * barMaxPx), 4)
-              : 2
+            const total = Number(d.total) || 0
+            const barHeight = total === 0 ? '4px' : `${(total / max) * 100}%`
             return (
-              <div key={d.date} className="bar-col" title={`${d.label}: ${money(d.total)}`}>
-                <div className="bar-track">
-                  <div className="bar" style={{ height: `${barPx}px` }} />
+              <div key={d.date} className="bar-col" title={`${d.label}: ${money(total)}`}>
+                <div className="bar-track" style={{ height: 140 }}>
+                  <div className="bar" style={{ height: barHeight, minHeight: total === 0 ? 4 : undefined }} />
                 </div>
                 <span className="bar-label">{d.label}</span>
               </div>

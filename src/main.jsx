@@ -378,6 +378,12 @@ function inventoryQty(i) {
   return Math.max(0, Number(i.qty) || 0)
 }
 
+function inventoryUnitCost(i) {
+  const buying = Number(i?.buying_price) || 0
+  const cost = Number(i?.cost) || 0
+  return buying > 0 ? buying : cost
+}
+
 function Dashboard({ data, stats }) {
   const todayOrders = data.orders.filter(o => isToday(o.created_at))
   const monthOrders = data.orders.filter(o => isThisMonth(o.created_at))
@@ -388,11 +394,13 @@ function Dashboard({ data, stats }) {
   const monthlySales = monthOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   const monthlyProfit = monthOrders.reduce((s, o) => s + orderProfit(o), 0)
   const openBalance = stats.balance
-  const inventoryValue = data.inventory.reduce((s, i) => s + inventoryQty(i) * itemBuying(i), 0)
+  const inventoryValue = data.inventory.reduce((s, i) => s + inventoryQty(i) * inventoryUnitCost(i), 0)
   const expectedProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
   const totalCustomers = data.customers.length
   const lowStock = data.inventory.filter(i => inventoryQty(i) < 5).length
   const salesByDay = stats.salesByDay || buildSalesGraph(data.orders)
+  const maxDaySales = Math.max(...salesByDay.map(d => d.total), 1)
+  const barMaxPx = 140
 
   return (
     <>
@@ -411,12 +419,19 @@ function Dashboard({ data, stats }) {
       <div className="panel">
         <h2>Sales — Last 30 Days</h2>
         <div className="sales-graph">
-          {salesByDay.map(d => (
-            <div key={d.date} className="bar-col" title={`${d.label}: ${money(d.total)}`}>
-              <div className="bar" style={{ height: `${Math.max(d.pct, 2)}%` }} />
-              <span className="bar-label">{d.label.slice(0, 6)}</span>
-            </div>
-          ))}
+          {salesByDay.map(d => {
+            const barPx = d.total > 0
+              ? Math.max(Math.round((d.total / maxDaySales) * barMaxPx), 4)
+              : 2
+            return (
+              <div key={d.date} className="bar-col" title={`${d.label}: ${money(d.total)}`}>
+                <div className="bar-track">
+                  <div className="bar" style={{ height: `${barPx}px` }} />
+                </div>
+                <span className="bar-label">{d.label}</span>
+              </div>
+            )
+          })}
         </div>
       </div>
     </>

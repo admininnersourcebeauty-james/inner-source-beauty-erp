@@ -1,0 +1,173 @@
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#f4f7fb;color:#07142b}
+button,input,select,textarea{font:inherit}
+button{background:#08142b;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:700;cursor:pointer}
+.soft{background:#e7ebf1;color:#07142b}
+.danger{background:#9b1c1c}
+
+.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f4f7fb}
+.login-card{width:430px;max-width:95vw;background:white;border-radius:22px;padding:34px;box-shadow:0 24px 60px #0c173015;text-align:center}
+.logo,.brand span{background:#111;color:white;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:800;letter-spacing:3px}
+.logo{width:72px;height:72px}
+.login-card h1{font-size:32px;line-height:1.05}
+.login-card input{width:100%;padding:15px;border:1px solid #cbd3df;border-radius:10px;margin:8px 0}
+.msg,.notice{color:#d20f0f;margin:12px 0}
+
+.app{display:flex;min-height:100vh}
+aside{width:270px;background:#0f1b31;color:white;padding:20px;position:fixed;top:0;bottom:0;left:0;z-index:100;overflow-y:auto}
+main{margin-left:270px;flex:1;padding:30px;min-width:0}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:26px;gap:12px;flex-wrap:wrap}
+.header-right{display:flex;align-items:center;gap:12px;flex:1;justify-content:flex-end;min-width:200px}
+.global-search{max-width:420px;flex:1;padding:10px 14px;border:1px solid #c9d2df;border-radius:10px;background:white}
+.brand{display:flex;gap:14px;align-items:center;margin-bottom:16px}
+.brand span{width:54px;height:54px;background:white;color:#07142b}
+.brand b{font-size:18px;line-height:1.05}
+.role-badge{background:#24324b;border-radius:8px;padding:6px 12px;font-size:12px;font-weight:700;margin-bottom:20px;text-align:center;letter-spacing:1px}
+aside button{display:block;width:100%;text-align:left;background:transparent;margin:8px 0}
+aside button.active{background:#24324b}
+.logout{background:#9b1c1c!important;margin-top:45px!important}
+.menu-toggle{display:none;position:fixed;top:12px;left:12px;z-index:200;background:#0f1b31;padding:10px 14px;border-radius:8px}
+
+.cards,.mini-cards{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:16px;margin-bottom:18px}
+.cards-9{grid-template-columns:repeat(4,minmax(140px,1fr))}
+.card,.panel{background:white;border:1px solid #dce3ee;border-radius:18px;box-shadow:0 10px 35px #0b172010}
+.card{padding:22px}
+.card p{margin:0 0 10px;color:#52607a;font-size:13px}
+.card b{font-size:24px}
+.card-warn{border-color:#f5c6cb;background:#fff5f5}
+.card-warn b{color:#9b1c1c}
+.panel{padding:22px;margin-bottom:18px}
+.split{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:20px}
+.form-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-bottom:20px;align-items:end}
+.customer-form{grid-template-columns:repeat(4,1fr)}
+input,select,textarea{width:100%;padding:13px;border:1px solid #c9d2df;border-radius:10px;background:white}
+textarea{min-height:82px;resize:vertical}
+.customer-form textarea{grid-column:span 2}
+.check{display:flex;align-items:center;gap:10px;border:1px solid #c9d2df;border-radius:10px;padding:10px 14px;font-weight:700}
+.check input{width:auto}
+.search{margin:8px 0 14px}
+.table-wrap{overflow:auto;-webkit-overflow-scrolling:touch}
+table{width:100%;border-collapse:collapse;background:white}
+th,td{padding:12px;border-bottom:1px solid #e3e8f0;text-align:left;white-space:nowrap;font-size:14px}
+th{background:#f5f7fa;text-transform:capitalize}
+tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
+.detail{position:sticky;top:20px;height:max-content;max-height:calc(100vh - 40px);overflow-y:auto}
+.detail pre{white-space:pre-wrap;background:#f6f8fb;border:1px solid #e2e8f0;border-radius:12px;padding:12px;font-size:13px}
+.notice{background:#fff1f1;border:1px solid #ffc8c8;padding:12px;border-radius:10px;cursor:pointer}
+.hint{font-size:13px;color:#52607a;margin:8px 0}
+.method-boxes{grid-column:span 2;display:flex;gap:8px;flex-wrap:wrap}
+.method-boxes button{background:#e8edf5;color:#07142b;padding:8px 12px;font-size:13px}
+.method-boxes button.chosen{background:#08142b;color:white}
+
+/* Status badges */
+.status-badge{padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700}
+.status-active{background:#d4edda;color:#155724}
+.status-hold{background:#fff3cd;color:#856404}
+.status-vip{background:#cce5ff;color:#004085}
+
+/* Stock level colors */
+.stock-badge{padding:4px 10px;border-radius:8px;font-weight:700;font-size:13px;display:inline-block}
+.stock-green{background:#d4edda;color:#155724}
+.stock-yellow{background:#fff3cd;color:#856404}
+.stock-orange{background:#ffe0b2;color:#e65100}
+.stock-red{background:#f8d7da;color:#721c24}
+
+/* Reorder */
+.reorder-yes{color:#9b1c1c;font-weight:700;font-size:13px}
+.reorder-yes small{font-weight:400;color:#52607a}
+.reorder-no{color:#155724;font-size:13px}
+
+/* Search results */
+.search-results{display:flex;flex-wrap:wrap;gap:8px;padding:14px}
+.search-hit{background:#eef4ff;border:1px solid #c9d2df;border-radius:10px;padding:10px 14px;cursor:pointer;text-align:left;color:#07142b}
+.search-hit:hover{background:#dce8ff}
+.tag{font-size:11px;font-weight:700;text-transform:uppercase;padding:2px 6px;border-radius:4px;margin-right:6px}
+.tag-customer{background:#cce5ff;color:#004085}
+.tag-product{background:#d4edda;color:#155724}
+.tag-invoice{background:#fff3cd;color:#856404}
+
+/* Sales graph */
+.sales-graph{display:flex;align-items:flex-end;gap:3px;height:180px;padding:10px 0;overflow-x:auto}
+.bar-col{display:flex;flex-direction:column;align-items:center;flex:1;min-width:18px;height:100%;justify-content:flex-end}
+.bar{width:100%;max-width:24px;background:linear-gradient(180deg,#08142b,#24324b);border-radius:4px 4px 0 0;min-height:2px;transition:height .3s}
+.bar-label{font-size:9px;color:#52607a;margin-top:4px;writing-mode:vertical-rl;transform:rotate(180deg);max-height:40px;overflow:hidden}
+
+/* Inventory */
+.inventory-page .inventory-form{display:flex;flex-direction:column;gap:20px;margin-bottom:28px}
+.inventory-page .form-section{background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;padding:18px 20px}
+.inventory-page .form-section h3{margin:0 0 14px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#52607a;font-weight:700}
+.inventory-grid label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:700;color:#52607a}
+.inventory-grid label input{margin:0}
+.pricing-grid{align-items:end}
+.margin-display{display:flex;flex-direction:column;justify-content:center;gap:4px;padding:13px 16px;background:#fff;border:1px solid #c9d2df;border-radius:10px}
+.margin-display span{font-size:11px;font-weight:700;color:#52607a;text-transform:uppercase}
+.margin-display strong{font-size:20px;color:#08142b}
+.margin-value{color:#0d5c2e!important}
+.inventory-save{align-self:flex-start;min-width:160px}
+.inventory-table .margin-cell{font-weight:700;color:#0d5c2e}
+
+/* Orders */
+.stock-info,.profit-preview{padding:13px;background:#f0f4ff;border:1px solid #c9d2df;border-radius:10px;font-size:14px;font-weight:700;color:#52607a}
+.profit-preview strong{color:#0d5c2e}
+
+/* Invoice */
+.invoice{max-width:900px;margin:20px auto;background:white;border:1px solid #dce3ee;padding:40px;border-radius:4px}
+.invoice-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:30px;border-bottom:3px solid #08142b;padding-bottom:20px}
+.invoice h1{margin:0;font-size:28px;letter-spacing:3px;color:#08142b}
+.invoice-sub{margin:4px 0 0;color:#52607a;font-size:13px}
+.invoice-meta{text-align:right}
+.invoice-meta h2{margin:0 0 10px;font-size:22px;color:#52607a}
+.invoice-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-bottom:24px}
+.invoice-block h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#52607a;border-bottom:1px solid #e2e8f0;padding-bottom:6px}
+.invoice-block p{margin:0;font-size:14px;line-height:1.6;white-space:pre-wrap}
+.invoice-table{width:100%;margin:20px 0}
+.invoice-table th{background:#08142b;color:white;padding:10px}
+.invoice-table td{padding:12px;border-bottom:1px solid #e2e8f0}
+.invoice-totals{text-align:right;margin:20px 0;font-size:15px}
+.invoice-totals p{margin:6px 0}
+.balance-due{font-size:20px;color:#08142b;border-top:2px solid #08142b;padding-top:10px;margin-top:10px!important}
+.terms{font-size:11px;color:#4c5870;border-top:1px solid #ddd;padding-top:16px;margin-top:24px;line-height:1.5}
+.signature-line{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin:40px 0 20px}
+.sig-box{text-align:center}
+.sig-line{border-bottom:1px solid #333;height:40px;margin-bottom:8px}
+.sig-box p{margin:0;font-size:12px;color:#52607a}
+.invoice-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}
+.invoice-actions input{flex:1;min-width:180px}
+
+/* Reports */
+.report-row{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:20px}
+.report-row h3{margin:0 0 8px}
+.settings-row{margin:16px 0}
+.settings-row label{display:flex;flex-direction:column;gap:6px;font-weight:700;max-width:240px}
+
+/* Mobile */
+@media(max-width:900px){
+  .menu-toggle{display:block}
+  aside{transform:translateX(-100%);transition:transform .25s}
+  aside.open{transform:translateX(0)}
+  main{margin:0;padding:15px;padding-top:56px}
+  .split{grid-template-columns:1fr}
+  .detail{position:static;max-height:none}
+  .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
+  .customer-form textarea,.method-boxes{grid-column:auto}
+  .invoice-grid,.signature-line,.report-row{grid-template-columns:1fr}
+  .invoice-header{flex-direction:column;gap:16px}
+  .invoice-meta{text-align:left}
+  .header-right{flex-direction:column;width:100%}
+  .global-search{max-width:100%;width:100%}
+  header h1{font-size:22px}
+  .sales-graph{height:140px}
+}
+
+@media(max-width:480px){
+  .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr}
+  .invoice{padding:20px}
+  aside{width:85vw;max-width:300px}
+}
+
+@media print{
+  aside,header,select,button,.notice,.menu-toggle,.invoice-actions,.search-results{display:none!important}
+  main{margin:0;padding:0}
+  .panel{box-shadow:none;border:0;padding:0}
+  .invoice{border:0;margin:0;max-width:none;padding:20px}
+}

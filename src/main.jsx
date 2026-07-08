@@ -24,6 +24,12 @@ const formatMargin = (buying, selling) => {
   return m === null ? '—' : `${m.toFixed(1)}%`
 }
 const dateOnly = d => d ? String(d).slice(0, 10) : ''
+const localDateKey = d => {
+  if (!d) return ''
+  const dt = new Date(d)
+  if (Number.isNaN(dt.getTime())) return String(d).slice(0, 10)
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
+}
 const today = () => new Date().toISOString().slice(0, 10)
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
 const isToday = d => dateOnly(d) === today()
@@ -314,14 +320,19 @@ function calcStats(data) {
 
 function buildSalesGraph(orders) {
   const days = []
+  const base = new Date()
+  base.setHours(0, 0, 0, 0)
   for (let i = 29; i >= 0; i--) {
-    const d = new Date(); d.setDate(d.getDate() - i)
-    const key = d.toISOString().slice(0, 10)
-    const total = orders.filter(o => dateOnly(o.created_at) === key).reduce((s, o) => s + Number(o.total || 0), 0)
+    const d = new Date(base)
+    d.setDate(base.getDate() - i)
+    const key = localDateKey(d)
+    const total = orders
+      .filter(o => localDateKey(o.created_at) === key)
+      .reduce((s, o) => s + Number(o.total || 0), 0)
     days.push({ date: key, label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), total })
   }
   const max = Math.max(...days.map(d => d.total), 1)
-  return days.map(d => ({ ...d, pct: (d.total / max) * 100 }))
+  return days.map(d => ({ ...d, pct: Math.max((d.total / max) * 100, 2) }))
 }
 
 function avgMonthlySales(style, orders) {
@@ -379,14 +390,7 @@ function inventoryQty(i) {
 }
 
 function inventoryUnitCost(i) {
-  for (const key of ['buying_price', 'cost', 'buy_price']) {
-    const v = i?.[key]
-    if (v != null && v !== '') {
-      const n = Number(v)
-      if (!Number.isNaN(n) && n > 0) return n
-    }
-  }
-  return 0
+  return Number(i?.buying_price || i?.cost || i?.buy_price || 0)
 }
 
 function Dashboard({ data, stats }) {
@@ -401,13 +405,13 @@ function Dashboard({ data, stats }) {
   const openBalance = stats.balance
   const inventoryValue = data.inventory.reduce((s, i) => {
     const qty = Math.max(0, Number(i.qty) || 0)
-    return s + qty * inventoryUnitCost(i)
+    const unit = Number(i.buying_price || i.cost || i.buy_price || 0)
+    return s + qty * unit
   }, 0)
   const expectedProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
   const totalCustomers = data.customers.length
   const lowStock = data.inventory.filter(i => inventoryQty(i) < 5).length
   const salesByDay = buildSalesGraph(data.orders)
-  const max = Math.max(...salesByDay.map(d => Number(d.total) || 0), 1)
 
   return (
     <>
@@ -426,18 +430,14 @@ function Dashboard({ data, stats }) {
       <div className="panel">
         <h2>Sales — Last 30 Days</h2>
         <div className="sales-graph">
-          {salesByDay.map(d => {
-            const total = Number(d.total) || 0
-            const barHeight = total === 0 ? '4px' : `${(total / max) * 100}%`
-            return (
-              <div key={d.date} className="bar-col" title={`${d.label}: ${money(total)}`}>
-                <div className="bar-track" style={{ height: 140 }}>
-                  <div className="bar" style={{ height: barHeight, minHeight: total === 0 ? 4 : undefined }} />
-                </div>
-                <span className="bar-label">{d.label}</span>
+          {salesByDay.map(d => (
+            <div key={d.date} className="bar-col" title={`${d.label}: ${money(d.total)}`}>
+              <div className="bar-track" style={{ height: 140 }}>
+                <div className="bar" style={{ height: `${d.pct}%` }} />
               </div>
-            )
-          })}
+              <span className="bar-label">{d.label}</span>
+            </div>
+          ))}
         </div>
       </div>
     </>

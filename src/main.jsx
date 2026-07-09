@@ -911,8 +911,6 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
     return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
   }
 
-  const orderRows = data.orders.map(o => ({ ...o, order_date: formatOrderDate(o) }))
-
   return (
     <div className="panel">
       <h2>Create Order / Invoice</h2>
@@ -942,8 +940,46 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
         <button onClick={() => { createOrder(f); setF(blank) }}>Create Invoice</button>
       </div>
       <h2>Orders</h2>
-      <Table rows={orderRows} cols={['order_date', 'invoice_no', 'customer_name', 'style', 'qty', 'price', 'total', 'profit', 'status', 'payment_status']}
-        highlightId={highlightId} rowIdPrefix="order-row-" onDelete={id => deleteRow('orders', id)} />
+      <div className="table-wrap orders-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Order Date</th>
+              <th>Invoice No</th>
+              <th>Customer Name</th>
+              <th>Style</th>
+              <th>Qty</th>
+              <th>Price</th>
+              <th>Total</th>
+              <th>Profit</th>
+              <th>Status</th>
+              <th>Payment Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.orders.map(o => (
+              <tr
+                key={o.id}
+                id={`order-row-${o.id}`}
+                className={String(highlightId) === String(o.id) ? 'sel' : ''}
+              >
+                <td>{formatOrderDate(o)}</td>
+                <td>{o.invoice_no || '—'}</td>
+                <td>{o.customer_name || '—'}</td>
+                <td>{o.style || '—'}</td>
+                <td>{o.qty ?? 0}</td>
+                <td>{money(o.price)}</td>
+                <td>{money(o.total)}</td>
+                <td>{money(o.profit)}</td>
+                <td>{o.status || '—'}</td>
+                <td>{o.payment_status || '—'}</td>
+                <td><button className="danger" onClick={() => deleteRow('orders', o.id)}>Delete</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

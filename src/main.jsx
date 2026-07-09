@@ -31,6 +31,14 @@ const localDateKey = d => {
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
 }
 const today = () => new Date().toISOString().slice(0, 10)
+const toDbDate = value => {
+  if (!value) return today()
+  const s = String(value).trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return today()
+  return d.toISOString().slice(0, 10)
+}
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
 const isToday = d => dateOnly(d) === today()
 const isThisMonth = d => {
@@ -181,7 +189,7 @@ function App() {
     const buying = item ? itemBuying(item) : 0
     const total = qty * price + shipping - discount
     const profit = total - (qty * buying)
-    const dueDate = f.due_date || calcDueDate(customer?.payment_terms, today())
+    const dueDate = toDbDate(f.due_date || calcDueDate(customer?.payment_terms, today()))
     const payload = {
       customer_id: f.customer_id || null,
       inventory_id: f.inventory_id || null,
@@ -785,7 +793,7 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
 
   function chooseCustomer(id) {
     const c = data.customers.find(x => String(x.id) === String(id))
-    setF({ ...f, customer_id: id, customer_name: c?.company || c?.name || '', due_date: calcDueDate(c?.payment_terms, today()) })
+    setF({ ...f, customer_id: id, customer_name: c?.company || c?.name || '', due_date: toDbDate(calcDueDate(c?.payment_terms, today())) })
   }
 
   function chooseItem(id) {

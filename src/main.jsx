@@ -806,6 +806,16 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
   const buying = item ? itemBuying(item) : 0
   const lineProfit = (price - buying) * qty
 
+  function formatOrderDate(order) {
+    const raw = order.order_date || order.created_at
+    if (!raw) return '—'
+    const dt = new Date(raw)
+    if (Number.isNaN(dt.getTime())) return '—'
+    return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
+  }
+
+  const orderRows = data.orders.map(o => ({ ...o, order_date: formatOrderDate(o) }))
+
   return (
     <div className="panel">
       <h2>Create Order / Invoice</h2>
@@ -835,7 +845,7 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
         <button onClick={() => { createOrder(f); setF(blank) }}>Create Invoice</button>
       </div>
       <h2>Orders</h2>
-      <Table rows={data.orders} cols={['invoice_no', 'customer_name', 'style', 'qty', 'price', 'total', 'profit', 'status', 'payment_status']}
+      <Table rows={orderRows} cols={['order_date', 'invoice_no', 'customer_name', 'style', 'qty', 'price', 'total', 'profit', 'status', 'payment_status']}
         highlightId={highlightId} rowIdPrefix="order-row-" onDelete={id => deleteRow('orders', id)} />
     </div>
   )

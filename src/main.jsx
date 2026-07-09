@@ -564,17 +564,38 @@ function CustomerDetail({ customer, data, deleteRow }) {
 function Inventory({ data, addRow, updateRow, deleteRow }) {
   const blank = { style: '', brand: '', category: '', qty: '', buying_price: '', selling_price: '', low_stock: 5 }
   const [f, setF] = useState(blank)
+  const [editingId, setEditingId] = useState(null)
   const margin = formatMargin(f.buying_price, f.selling_price)
   const profit = calcProfit(f.buying_price, f.selling_price)
 
+  function loadItem(item) {
+    setEditingId(item.id)
+    setF({
+      style: item.style || '',
+      brand: item.brand || '',
+      category: item.category || '',
+      qty: item.qty ?? '',
+      buying_price: itemBuying(item) || '',
+      selling_price: itemSelling(item) || '',
+      low_stock: item.low_stock ?? 5,
+    })
+  }
+
+  function cancelEdit() {
+    setEditingId(null)
+    setF(blank)
+  }
+
   async function save() {
     const buying = Number(f.buying_price) || 0, selling = Number(f.selling_price) || 0
-    await addRow('inventory', {
+    const row = {
       style: f.style, brand: f.brand, category: f.category,
       qty: Number(f.qty) || 0, buying_price: buying, selling_price: selling,
       cost: buying, price: selling, low_stock: Number(f.low_stock) || 5,
-    })
-    setF(blank)
+    }
+    if (editingId) await updateRow('inventory', editingId, row)
+    else await addRow('inventory', row)
+    cancelEdit()
   }
 
   const rows = data.inventory.map(item => {
@@ -591,7 +612,7 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
 
   return (
     <div className="panel inventory-page">
-      <h2>Add Inventory Item</h2>
+      <h2>{editingId ? 'Edit Inventory Item' : 'Add Inventory Item'}</h2>
       <div className="inventory-form">
         <div className="form-section">
           <h3>Product Details</h3>
@@ -613,15 +634,18 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
             </div>
           </div>
         </div>
-        <button className="inventory-save" onClick={save}>Save Item</button>
+        <div className="inventory-actions">
+          <button className="inventory-save" onClick={save}>Save Item</button>
+          {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel</button>}
+        </div>
       </div>
       <h2>Inventory</h2>
-      <InventoryTable rows={rows} onDelete={id => deleteRow('inventory', id)} />
+      <InventoryTable rows={rows} editingId={editingId} onEdit={loadItem} onDelete={id => deleteRow('inventory', id)} />
     </div>
   )
 }
 
-function InventoryTable({ rows, onDelete }) {
+function InventoryTable({ rows, editingId, onEdit, onDelete }) {
   return (
     <div className="table-wrap inventory-table">
       <table>
@@ -630,7 +654,7 @@ function InventoryTable({ rows, onDelete }) {
           <th>Buying</th><th>Selling</th><th>Profit $</th><th>Margin</th><th>Reorder</th><th></th>
         </tr></thead>
         <tbody>{rows.map(r => (
-          <tr key={r.id}>
+          <tr key={r.id} className={String(editingId) === String(r.id) ? 'sel' : ''} onClick={() => onEdit(r)}>
             <td><b>{r.style || '—'}</b></td>
             <td>{r.brand || '—'}</td>
             <td>{r.category || '—'}</td>
@@ -642,7 +666,10 @@ function InventoryTable({ rows, onDelete }) {
             <td>{r.reorder ? (r.reorder.recommended
               ? <span className="reorder-yes">Reorder Recommended<br /><small>Avg {r.reorder.avg}/mo · Stock {r.qty}</small></span>
               : <span className="reorder-no">OK · Avg {r.reorder.avg}/mo</span>) : '—'}</td>
-            <td><button className="danger" onClick={() => onDelete(r.id)}>Delete</button></td>
+            <td className="row-actions" onClick={e => e.stopPropagation()}>
+              <button type="button" className="soft" onClick={() => onEdit(r)}>Edit</button>
+              <button type="button" className="danger" onClick={() => onDelete(r.id)}>Delete</button>
+            </td>
           </tr>
         ))}</tbody>
       </table>

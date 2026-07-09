@@ -82,6 +82,7 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [globalSearch, setGlobalSearch] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
+  const [selectedRecord, setSelectedRecord] = useState({ page: '', id: '' })
 
   const data = hasSupabaseConfig && session ? cloudData : localData
   const role = profile.role || 'Admin'
@@ -231,8 +232,18 @@ function App() {
     setGlobalSearch('')
     if (result.type === 'customer') { setPage('Customers') }
     else if (result.type === 'product') { setPage('Inventory') }
-    else if (result.type === 'invoice') { setPage('Invoice') }
+    else if (result.type === 'invoice') { openRecord('Invoice', result.id) }
     setMenuOpen(false)
+  }
+
+  function openRecord(targetPage, id) {
+    setSelectedRecord({ page: targetPage, id: String(id) })
+    setPage(targetPage)
+    setMenuOpen(false)
+  }
+
+  function clearSelectedRecord() {
+    setSelectedRecord({ page: '', id: '' })
   }
 
   if (!session) return (
@@ -272,11 +283,14 @@ function App() {
         {notice && <div className="notice" onClick={() => setNotice('')}>{notice}</div>}
         {loading && <div className="panel">Loading...</div>}
         {page === 'Dashboard' && <Dashboard data={data} stats={stats} />}
-        {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} />}
+        {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} onNavigate={openRecord} />}
         {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} />}
-        {page === 'Orders' && <Orders data={data} createOrder={createOrder} deleteRow={deleteRow} />}
-        {page === 'Invoice' && <Invoice data={data} updateRow={updateRow} />}
-        {page === 'Payments' && <Payments data={data} recordPayment={recordPayment} deleteRow={deleteRow} />}
+        {page === 'Orders' && <Orders data={data} createOrder={createOrder} deleteRow={deleteRow}
+          selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
+        {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
+          selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
+        {page === 'Payments' && <Payments data={data} recordPayment={recordPayment} deleteRow={deleteRow}
+          selectedPaymentId={selectedRecord.page === 'Payments' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Reports' && <Reports data={data} stats={stats} />}
         {page === 'Settings' && <Settings data={data} reload={loadCloudData} profile={profile} setProfile={setProfile} session={session} />}
       </main>
@@ -448,7 +462,7 @@ function Card({ t, v, cls }) {
   return <div className={`card ${cls || ''}`}><p>{t}</p><b>{v}</b></div>
 }
 
-function Customers({ data, addRow, updateRow, deleteRow }) {
+function Customers({ data, addRow, updateRow, deleteRow, onNavigate }) {
   const blank = {
     name: '', company: '', phone: '', email: '', billing_address: '', shipping_address: '',
     shipping_same_as_billing: false, preferred_payment: 'Zelle', payment_terms: 'COD',
@@ -560,14 +574,17 @@ function Customers({ data, addRow, updateRow, deleteRow }) {
           </table>
         </div>
       </div>
-      <CustomerDetail customer={selectedCustomer} data={data} deleteRow={deleteRow} />
+      <CustomerDetail customer={selectedCustomer} data={data} deleteRow={deleteRow} onNavigate={onNavigate} />
     </div>
   )
 }
 
-function CustomerDetail({ customer, data, deleteRow }) {
+function CustomerDetail({ customer, data, deleteRow, onNavigate }) {
   if (!customer) return <div className="panel detail"><h2>Customer Detail</h2><p>Select a customer.</p></div>
   const s = customerStats(customer, data)
+  const moneyCols = ['total', 'amount']
+  const cellValue = (r, c) => moneyCols.includes(c) ? money(r[c]) : c === 'created_at' ? dateOnly(r[c]) : String(r[c] ?? '')
+
   return (
     <div className="panel detail">
       <h2>{customer.company || customer.name}</h2>
@@ -592,11 +609,43 @@ function CustomerDetail({ customer, data, deleteRow }) {
       <h3>Shipping Address</h3><pre>{customer.shipping_address || customer.billing_address || customer.address || ''}</pre>
       <h3>Note</h3><pre>{customer.note || ''}</pre>
       <h3>Invoices</h3>
-      <Table rows={s.orders} cols={['invoice_no', 'style', 'qty', 'total', 'status', 'payment_status']} />
+      <div className="table-wrap detail-nav-table">
+        <table>
+          <thead><tr>{['invoice_no', 'style', 'qty', 'total', 'status', 'payment_status'].map(c => <th key={c}>{c.replaceAll('_', ' ')}</th>)}</tr></thead>
+          <tbody>{s.orders.map(r => (
+            <tr key={r.id}>
+              <td>
+                <button type="button" className="link-cell" onClick={() => onNavigate('Invoice', r.id)}>
+                  {r.invoice_no || '—'}
+                </button>
+              </td>
+              {['style', 'qty', 'total', 'status', 'payment_status'].map(c => <td key={c}>{cellValue(r, c)}</td>)}
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
       <h3>Payments</h3>
-      <Table rows={s.payments} cols={['payment_date', 'invoice_no', 'amount', 'method', 'reference_no', 'note']} />
+      <div className="table-wrap detail-nav-table">
+        <table>
+          <thead><tr>{['payment_date', 'invoice_no', 'amount', 'method', 'reference_no', 'note'].map(c => <th key={c}>{c.replaceAll('_', ' ')}</th>)}</tr></thead>
+          <tbody>{s.payments.map(r => (
+            <tr key={r.id} className="clickable-row" onClick={() => onNavigate('Payments', r.id)}>
+              {['payment_date', 'invoice_no', 'amount', 'method', 'reference_no', 'note'].map(c => <td key={c}>{cellValue(r, c)}</td>)}
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
       <h3>Order History</h3>
-      <Table rows={s.orders} cols={['created_at', 'invoice_no', 'style', 'qty', 'total', 'payment_status']} />
+      <div className="table-wrap detail-nav-table">
+        <table>
+          <thead><tr>{['created_at', 'invoice_no', 'style', 'qty', 'total', 'payment_status'].map(c => <th key={c}>{c.replaceAll('_', ' ')}</th>)}</tr></thead>
+          <tbody>{s.orders.map(r => (
+            <tr key={r.id} className="clickable-row" onClick={() => onNavigate('Orders', r.id)}>
+              {['created_at', 'invoice_no', 'style', 'qty', 'total', 'payment_status'].map(c => <td key={c}>{cellValue(r, c)}</td>)}
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -717,12 +766,22 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
   )
 }
 
-function Orders({ data, createOrder, deleteRow }) {
+function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection }) {
   const blank = {
     customer_id: '', inventory_id: '', customer_name: '', style: '', qty: '', price: '',
     shipping: '0', discount: '0', status: 'Open', note: '', tracking: '', due_date: '',
   }
   const [f, setF] = useState(blank)
+  const [highlightId, setHighlightId] = useState('')
+
+  useEffect(() => {
+    if (!selectedOrderId) return
+    setHighlightId(selectedOrderId)
+    clearSelection?.()
+    requestAnimationFrame(() => {
+      document.getElementById(`order-row-${selectedOrderId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [selectedOrderId, clearSelection])
 
   function chooseCustomer(id) {
     const c = data.customers.find(x => String(x.id) === String(id))
@@ -769,13 +828,20 @@ function Orders({ data, createOrder, deleteRow }) {
       </div>
       <h2>Orders</h2>
       <Table rows={data.orders} cols={['invoice_no', 'customer_name', 'style', 'qty', 'price', 'total', 'profit', 'status', 'payment_status']}
-        onDelete={id => deleteRow('orders', id)} />
+        highlightId={highlightId} rowIdPrefix="order-row-" onDelete={id => deleteRow('orders', id)} />
     </div>
   )
 }
 
-function Invoice({ data, updateRow }) {
+function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
   const [id, setId] = useState('')
+
+  useEffect(() => {
+    if (!selectedOrderId) return
+    setId(selectedOrderId)
+    clearSelection?.()
+  }, [selectedOrderId, clearSelection])
+
   const o = data.orders.find(x => String(x.id) === String(id)) || data.orders[0]
   const c = data.customers.find(x => String(x.id) === String(o?.customer_id))
   if (!o) return <div className="panel">No invoice yet. Create an order first.</div>
@@ -846,9 +912,32 @@ function Invoice({ data, updateRow }) {
   )
 }
 
-function Payments({ data, recordPayment, deleteRow }) {
+function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSelection }) {
   const blank = { customer_id: '', order_id: '', invoice_no: '', payment_date: today(), amount: '', method: 'Zelle', reference_no: '', note: '' }
   const [f, setF] = useState(blank)
+  const [highlightId, setHighlightId] = useState('')
+
+  useEffect(() => {
+    if (!selectedPaymentId) return
+    setHighlightId(selectedPaymentId)
+    const payment = data.payments.find(p => String(p.id) === String(selectedPaymentId))
+    if (payment) {
+      setF({
+        customer_id: payment.customer_id || '',
+        order_id: payment.order_id || '',
+        invoice_no: payment.invoice_no || '',
+        payment_date: payment.payment_date || today(),
+        amount: payment.amount ?? '',
+        method: payment.method || 'Zelle',
+        reference_no: payment.reference_no || '',
+        note: payment.note || '',
+      })
+    }
+    clearSelection?.()
+    requestAnimationFrame(() => {
+      document.getElementById(`payment-row-${selectedPaymentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [selectedPaymentId, clearSelection, data.payments])
 
   function chooseOrder(id) {
     const o = data.orders.find(x => String(x.id) === String(id))
@@ -878,7 +967,8 @@ function Payments({ data, recordPayment, deleteRow }) {
       </div>
       <p className="hint">Payment automatically updates invoice status (Paid / Partial / Unpaid) and reduces customer balance.</p>
       <h2>Payments</h2>
-      <Table rows={data.payments} cols={['payment_date', 'invoice_no', 'amount', 'method', 'reference_no', 'note']} onDelete={id => deleteRow('payments', id)} />
+      <Table rows={data.payments} cols={['payment_date', 'invoice_no', 'amount', 'method', 'reference_no', 'note']}
+        highlightId={highlightId} rowIdPrefix="payment-row-" onDelete={id => deleteRow('payments', id)} />
     </div>
   )
 }
@@ -961,14 +1051,15 @@ function Settings({ data, reload, profile, setProfile, session }) {
   )
 }
 
-function Table({ rows, cols, onDelete }) {
+function Table({ rows, cols, onDelete, highlightId, rowIdPrefix }) {
   const moneyCols = ['total', 'amount', 'price', 'cost', 'buying_price', 'selling_price', 'shipping', 'discount', 'profit']
   return (
     <div className="table-wrap">
       <table>
         <thead><tr>{cols.map(c => <th key={c}>{c.replaceAll('_', ' ')}</th>)}{onDelete && <th></th>}</tr></thead>
         <tbody>{rows.map(r => (
-          <tr key={r.id}>
+          <tr key={r.id} id={rowIdPrefix ? `${rowIdPrefix}${r.id}` : undefined}
+            className={highlightId && String(highlightId) === String(r.id) ? 'sel' : ''}>
             {cols.map(c => <td key={c}>{moneyCols.includes(c) ? money(r[c]) : c === 'created_at' ? dateOnly(r[c]) : String(r[c] ?? '')}</td>)}
             {onDelete && <td><button className="danger" onClick={() => onDelete(r.id)}>Delete</button></td>}
           </tr>

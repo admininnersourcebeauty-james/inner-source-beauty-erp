@@ -155,6 +155,10 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
   .detail{position:static;max-height:none}
   .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
   .customer-form textarea,.method-boxes{grid-column:auto}
+.customer-form-actions{display:flex;gap:10px;align-items:center;grid-column:span 2}
+.customer-table tbody tr{cursor:pointer}
+.customer-table .row-actions{display:flex;gap:8px;white-space:nowrap}
+.customer-table .row-actions button{padding:8px 12px;font-size:13px}
   .invoice-grid,.signature-line,.report-row{grid-template-columns:1fr}
   .invoice-header{flex-direction:column;gap:16px}
   .invoice-meta{text-align:left}

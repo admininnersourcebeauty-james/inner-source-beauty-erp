@@ -455,6 +455,7 @@ function Customers({ data, addRow, updateRow, deleteRow }) {
     tax_id: '', note: '', status: 'Active',
   }
   const [f, setF] = useState(blank)
+  const [editingId, setEditingId] = useState(null)
   const [selected, setSelected] = useState(null)
   const [q, setQ] = useState('')
   const customers = data.customers.filter(c => [c.name, c.company, c.phone, c.email].join(' ').toLowerCase().includes(q.toLowerCase()))
@@ -463,10 +464,40 @@ function Customers({ data, addRow, updateRow, deleteRow }) {
     setF({ ...f, shipping_same_as_billing: v, shipping_address: v ? f.billing_address : f.shipping_address })
   }
 
+  function loadCustomer(c) {
+    setEditingId(c.id)
+    setSelected(c.id)
+    const billing = c.billing_address || c.address || ''
+    const shipping = c.shipping_address || billing
+    const sameAsBilling = Boolean(c.shipping_same_as_billing) || (shipping === billing && billing !== '')
+    setF({
+      name: c.name || '',
+      company: c.company || '',
+      phone: c.phone || '',
+      email: c.email || '',
+      billing_address: billing,
+      shipping_address: sameAsBilling ? billing : shipping,
+      shipping_same_as_billing: sameAsBilling,
+      preferred_payment: c.preferred_payment || 'Zelle',
+      payment_terms: c.payment_terms || 'COD',
+      tax_id: c.tax_id || '',
+      note: c.note || '',
+      status: c.status || 'Active',
+    })
+  }
+
+  function cancelEdit() {
+    setEditingId(null)
+    setF(blank)
+  }
+
   async function save() {
     const row = { ...f, shipping_address: f.shipping_same_as_billing ? f.billing_address : f.shipping_address }
-    await addRow('customers', row)
-    setF(blank)
+    const id = editingId
+    if (editingId) await updateRow('customers', editingId, row)
+    else await addRow('customers', row)
+    cancelEdit()
+    if (id) setSelected(id)
   }
 
   const selectedCustomer = data.customers.find(c => String(c.id) === String(selected))
@@ -474,7 +505,7 @@ function Customers({ data, addRow, updateRow, deleteRow }) {
   return (
     <div className="split">
       <div className="panel">
-        <h2>Add Customer</h2>
+        <h2>{editingId ? 'Edit Customer' : 'Add Customer'}</h2>
         <div className="form-grid customer-form">
           <input placeholder="Contact Name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} />
           <input placeholder="Business Name" value={f.company} onChange={e => setF({ ...f, company: e.target.value })} />
@@ -499,26 +530,35 @@ function Customers({ data, addRow, updateRow, deleteRow }) {
           <select value={f.status} onChange={e => setF({ ...f, status: e.target.value })}>
             {STATUSES.map(x => <option key={x}>{x}</option>)}
           </select>
-          <button onClick={save}>Save Customer</button>
+          <div className="customer-form-actions">
+            <button onClick={save}>Save Customer</button>
+            {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel</button>}
+          </div>
         </div>
         <h2>Customers</h2>
         <input className="search" placeholder="Search customer..." value={q} onChange={e => setQ(e.target.value)} />
-        <table>
-          <thead><tr><th>Business</th><th>Contact</th><th>Phone</th><th>Status</th><th>Balance</th><th>Last Order</th></tr></thead>
-          <tbody>{customers.map(c => {
-            const s = customerStats(c, data)
-            return (
-              <tr key={c.id} onClick={() => setSelected(c.id)} className={String(selected) === String(c.id) ? 'sel' : ''}>
-                <td><b>{c.company || '—'}</b></td>
-                <td>{c.name}</td>
-                <td>{c.phone}</td>
-                <td><span className={`status-badge status-${(c.status || 'Active').toLowerCase()}`}>{c.status || 'Active'}</span></td>
-                <td>{money(s.balance)}</td>
-                <td>{s.lastOrder || '—'}</td>
-              </tr>
-            )
-          })}</tbody>
-        </table>
+        <div className="table-wrap customer-table">
+          <table>
+            <thead><tr><th>Business</th><th>Contact</th><th>Phone</th><th>Status</th><th>Balance</th><th>Last Order</th><th></th></tr></thead>
+            <tbody>{customers.map(c => {
+              const s = customerStats(c, data)
+              return (
+                <tr key={c.id} onClick={() => loadCustomer(c)}
+                  className={String(selected) === String(c.id) || String(editingId) === String(c.id) ? 'sel' : ''}>
+                  <td><b>{c.company || '—'}</b></td>
+                  <td>{c.name}</td>
+                  <td>{c.phone}</td>
+                  <td><span className={`status-badge status-${(c.status || 'Active').toLowerCase()}`}>{c.status || 'Active'}</span></td>
+                  <td>{money(s.balance)}</td>
+                  <td>{s.lastOrder || '—'}</td>
+                  <td className="row-actions" onClick={e => e.stopPropagation()}>
+                    <button type="button" className="soft" onClick={() => loadCustomer(c)}>Edit</button>
+                  </td>
+                </tr>
+              )
+            })}</tbody>
+          </table>
+        </div>
       </div>
       <CustomerDetail customer={selectedCustomer} data={data} deleteRow={deleteRow} />
     </div>

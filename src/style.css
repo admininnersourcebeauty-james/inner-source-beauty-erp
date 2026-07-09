@@ -30,6 +30,14 @@ aside button.active{background:#24324b}
 
 .cards,.mini-cards{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:16px;margin-bottom:18px}
 .cards-9{grid-template-columns:repeat(4,minmax(140px,1fr))}
+.dashboard-rows{display:flex;flex-direction:column;gap:16px;margin-bottom:18px}
+.dashboard-rows .cards{margin-bottom:0}
+.dashboard-row-5{grid-template-columns:repeat(5,minmax(120px,1fr))}
+.low-stock-alerts{list-style:none;padding:0;margin:0}
+.low-stock-alerts li{padding:12px 0;border-bottom:1px solid #e3e8f0;font-size:14px;line-height:1.5}
+.low-stock-alerts li:last-child{border-bottom:0}
+.alert-reorder{color:#9b1c1c;font-weight:700}
+.alert-ok{color:#155724;font-weight:700}
 .card,.panel{background:white;border:1px solid #dce3ee;border-radius:18px;box-shadow:0 10px 35px #0b172010}
 .card{padding:22px}
 .card p{margin:0 0 10px;color:#52607a;font-size:13px}
@@ -154,6 +162,7 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
   .split{grid-template-columns:1fr}
   .detail{position:static;max-height:none}
   .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
+  .dashboard-row-5{grid-template-columns:1fr 1fr}
   .customer-form textarea,.method-boxes{grid-column:auto}
 .customer-form-actions{display:flex;gap:10px;align-items:center;grid-column:span 2}
 .customer-table tbody tr{cursor:pointer}

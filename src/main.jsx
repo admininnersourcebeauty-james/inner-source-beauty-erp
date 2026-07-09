@@ -407,10 +407,6 @@ function orderProfit(o) {
   return qty * price - qty * buying
 }
 
-function inventoryQty(i) {
-  return Math.max(0, Number(i.qty) || 0)
-}
-
 function inventoryUnitCost(i) {
   return Number(i?.buying_price || i?.cost || i?.buy_price || 0)
 }
@@ -425,30 +421,131 @@ function Dashboard({ data, stats }) {
   const monthlySales = monthOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   const monthlyProfit = monthOrders.reduce((s, o) => s + orderProfit(o), 0)
   const openBalance = stats.balance
-  const inventoryValue = data.inventory.reduce((s, i) => {
-    const qty = Math.max(0, Number(i.qty) || 0)
-    const unit = Number(i.buying_price || i.cost || i.buy_price || 0)
-    return s + qty * unit
-  }, 0)
   const expectedProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
   const totalCustomers = data.customers.length
-  const lowStock = data.inventory.filter(i => inventoryQty(i) < 5).length
+  const totalProducts = data.inventory.length
+  const totalInventoryQty = data.inventory.reduce((s, i) => {
+    const qty = Number(i.qty) || 0
+    return qty > 0 ? s + qty : s
+  }, 0)
+  const inventoryValue = data.inventory.reduce((s, i) => {
+    const qty = Number(i.qty) || 0
+    if (qty <= 0) return s
+    return s + qty * inventoryUnitCost(i)
+  }, 0)
+  const lowStockLimit = i => Number(i.low_stock ?? 5) || 5
+  const lowStockItems = data.inventory.filter(i => {
+    const qty = Number(i.qty) || 0
+    return qty > 0 && qty <= lowStockLimit(i)
+  })
+  const outOfStockItems = data.inventory.filter(i => (Number(i.qty) || 0) <= 0)
   const salesByDay = buildSalesGraph(data.orders)
+
+  const lowStockAlerts = lowStockItems
+    .slice()
+    .sort((a, b) => (Number(a.qty) || 0) - (Number(b.qty) || 0))
+    .slice(0, 5)
+    .map(item => {
+      const qty = Number(item.qty) || 0
+      const limit = lowStockLimit(item)
+      const reorder = reorderInfo(item, data.orders)
+      const label = [item.style, item.brand].filter(Boolean).join(' ')
+      return { id: item.id, label, qty, limit, recommended: reorder?.recommended }
+    })
+
+  function formatDashboardDate(raw) {
+    if (!raw) return '—'
+    const dt = new Date(raw)
+    if (Number.isNaN(dt.getTime())) return '—'
+    return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
+  }
+
+  const recentOrders = data.orders.slice(0, 5).map(o => ({
+    id: o.id,
+    order_date: formatDashboardDate(o.order_date || o.created_at),
+    invoice_no: o.invoice_no || '—',
+    customer_name: o.customer_name || '—',
+    total: money(o.total),
+    payment_status: o.payment_status || '—',
+  }))
 
   return (
     <>
-      <div className="cards">
-        <Card t="Today's Sales" v={money(todaySales)} />
-        <Card t="Today's Profit" v={money(todayProfit)} />
-        <Card t="Orders Today" v={ordersToday} />
-        <Card t="Monthly Sales" v={money(monthlySales)} />
-        <Card t="Monthly Profit" v={money(monthlyProfit)} />
-        <Card t="Open Balance" v={money(openBalance)} />
-        <Card t="Inventory Value" v={money(inventoryValue)} />
-        <Card t="Expected Profit" v={money(expectedProfit)} />
-        <Card t="Total Customers" v={totalCustomers} />
-        <Card t="Low Stock" v={lowStock} cls={lowStock > 0 ? 'card-warn' : ''} />
+      <div className="dashboard-rows">
+        <div className="cards dashboard-row">
+          <Card t="Today's Sales" v={money(todaySales)} />
+          <Card t="Today's Profit" v={money(todayProfit)} />
+          <Card t="Orders Today" v={ordersToday} />
+          <Card t="Monthly Sales" v={money(monthlySales)} />
+        </div>
+        <div className="cards dashboard-row">
+          <Card t="Open Balance" v={money(openBalance)} />
+          <Card t="Inventory Value" v={money(inventoryValue)} />
+          <Card t="Expected Profit" v={money(expectedProfit)} />
+          <Card t="Monthly Profit" v={money(monthlyProfit)} />
+        </div>
+        <div className="cards dashboard-row dashboard-row-5">
+          <Card t="Total Customers" v={totalCustomers} />
+          <Card t="Total Products" v={totalProducts} />
+          <Card t="Total Inventory Qty" v={totalInventoryQty} />
+          <Card t="Low Stock Items" v={lowStockItems.length} cls={lowStockItems.length > 0 ? 'card-warn' : ''} />
+          <Card t="Out of Stock Items" v={outOfStockItems.length} cls={outOfStockItems.length > 0 ? 'card-warn' : ''} />
+        </div>
       </div>
+
+      <div className="panel">
+        <h2>Low Stock Alerts</h2>
+        {lowStockAlerts.length === 0 ? (
+          <p className="hint">No low stock items right now.</p>
+        ) : (
+          <ul className="low-stock-alerts">
+            {lowStockAlerts.map(item => (
+              <li key={item.id}>
+                <strong>{item.label}</strong>
+                {' — Only '}{item.qty} left
+                {' — Limit '}{item.limit}
+                {' — '}
+                <span className={item.recommended ? 'alert-reorder' : 'alert-ok'}>
+                  {item.recommended ? 'Reorder Recommended' : 'Monitor'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="panel">
+        <h2>Recent Orders</h2>
+        {recentOrders.length === 0 ? (
+          <p className="hint">No orders yet.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Order Date</th>
+                  <th>Invoice No</th>
+                  <th>Customer Name</th>
+                  <th>Total</th>
+                  <th>Payment Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentOrders.map(o => (
+                  <tr key={o.id}>
+                    <td>{o.order_date}</td>
+                    <td>{o.invoice_no}</td>
+                    <td>{o.customer_name}</td>
+                    <td>{o.total}</td>
+                    <td>{o.payment_status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       <div className="panel">
         <h2>Sales — Last 30 Days</h2>
         <div className="sales-graph">

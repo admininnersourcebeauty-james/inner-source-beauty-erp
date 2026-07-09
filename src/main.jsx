@@ -917,6 +917,23 @@ function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSele
   const [f, setF] = useState(blank)
   const [highlightId, setHighlightId] = useState('')
 
+  function orderCustomerName(order) {
+    if (order?.customer_name) return order.customer_name
+    const customer = data.customers.find(c => String(c.id) === String(order?.customer_id))
+    return customer?.company || customer?.name || '—'
+  }
+
+  function paymentCustomerName(payment) {
+    const order = data.orders.find(o =>
+      String(o.id) === String(payment.order_id) || o.invoice_no === payment.invoice_no
+    )
+    if (order) return orderCustomerName(order)
+    const customer = data.customers.find(c => String(c.id) === String(payment.customer_id))
+    return customer?.company || customer?.name || '—'
+  }
+
+  const paymentRows = data.payments.map(p => ({ ...p, customer_name: paymentCustomerName(p) }))
+
   useEffect(() => {
     if (!selectedPaymentId) return
     setHighlightId(selectedPaymentId)
@@ -952,7 +969,9 @@ function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSele
       <div className="form-grid">
         <select value={f.order_id} onChange={e => chooseOrder(e.target.value)}>
           <option value="">Select Invoice</option>
-          {data.orders.map(o => <option key={o.id} value={o.id}>{o.invoice_no} — {o.customer_name} — {money(o.total)} ({o.payment_status})</option>)}
+          {data.orders.map(o => (
+            <option key={o.id} value={o.id}>{o.invoice_no} - {orderCustomerName(o)} - {money(o.total)}</option>
+          ))}
         </select>
         <input type="date" value={f.payment_date} onChange={e => setF({ ...f, payment_date: e.target.value })} />
         <input placeholder="Amount" type="number" step="0.01" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} />
@@ -967,7 +986,7 @@ function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSele
       </div>
       <p className="hint">Payment automatically updates invoice status (Paid / Partial / Unpaid) and reduces customer balance.</p>
       <h2>Payments</h2>
-      <Table rows={data.payments} cols={['payment_date', 'invoice_no', 'amount', 'method', 'reference_no', 'note']}
+      <Table rows={paymentRows} cols={['payment_date', 'customer_name', 'invoice_no', 'amount', 'method', 'reference_no', 'note']}
         highlightId={highlightId} rowIdPrefix="payment-row-" onDelete={id => deleteRow('payments', id)} />
     </div>
   )

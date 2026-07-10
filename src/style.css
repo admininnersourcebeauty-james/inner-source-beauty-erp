@@ -209,8 +209,10 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   aside,header,select,button,.notice,.menu-toggle,.invoice-actions,.search-results{display:none!important}
   main{margin:0;padding:0}
   .panel{box-shadow:none;border:0;padding:0}
-  .invoice{border:0;margin:0;max-width:none;width:100%;padding:0}
-  .address-grid{display:grid;grid-template-columns:1fr 140px 1fr;width:100%;column-gap:0;align-items:start;padding-top:18px;padding-bottom:22px;page-break-inside:avoid}
-  .address-spacer{display:block;min-width:140px}
-  .bill-to,.ship-to{page-break-inside:avoid}
+  .invoice{border:0;box-shadow:none}
+  .invoice-print{width:7.5in!important;max-width:7.5in!important;margin:0 auto!important;padding:0.35in 0.45in!important;box-sizing:border-box!important}
+  .address-grid{display:flex!important;justify-content:space-between!important;align-items:flex-start!important;width:100%!important;gap:60px!important;padding:22px 0 26px!important}
+  .bill-to,.ship-to{width:42%!important;flex:0 0 42%!important;page-break-inside:avoid}
+  .ship-to{margin-left:auto!important}
+  .address-spacer{display:none!important}
 }

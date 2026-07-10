@@ -1068,7 +1068,7 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
       >
         {data.orders.map(o2 => <option key={o2.id} value={o2.id}>{o2.invoice_no} — {o2.customer_name}</option>)}
       </select>
-      <div className={`invoice${String(highlightId) === String(o.id) ? ' invoice-highlight' : ''}`}>
+      <div className={`invoice invoice-print${String(highlightId) === String(o.id) ? ' invoice-highlight' : ''}`}>
         <div className="invoice-header">
           <div><h1>INNER SOURCE BEAUTY</h1><p className="invoice-sub">Professional Beauty Distribution</p></div>
           <div className="invoice-meta">

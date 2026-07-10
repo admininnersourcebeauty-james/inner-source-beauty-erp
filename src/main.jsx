@@ -1080,8 +1080,8 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
               <b>Tracking:</b> {o.tracking || '—'}</p>
           </div>
         </div>
-        <div className="invoice-address-row">
-          <div className="invoice-block invoice-bill-to">
+        <div className="address-grid">
+          <div className="bill-to">
             <h3>BILL TO</h3>
             <div className="invoice-address">
               {company && <span className="invoice-address-line">{company}</span>}
@@ -1089,7 +1089,8 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
               {billLines.map((line, i) => <span key={i} className="invoice-address-line">{line}</span>)}
             </div>
           </div>
-          <div className="invoice-block invoice-ship-to">
+          <div className="address-spacer" aria-hidden="true" />
+          <div className="ship-to">
             <h3>SHIP TO</h3>
             <div className="invoice-address">
               {company && <span className="invoice-address-line">{company}</span>}

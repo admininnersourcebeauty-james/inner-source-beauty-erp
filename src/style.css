@@ -138,18 +138,15 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .invoice-sub{margin:4px 0 0;color:#52607a;font-size:13px}
 .invoice-meta{text-align:right}
 .invoice-meta h2{margin:0 0 10px;font-size:22px;color:#52607a}
-.invoice-address-row{display:grid;grid-template-columns:minmax(180px,36%) minmax(200px,1fr) minmax(180px,36%);align-items:start;margin:0 0 28px;width:100%;page-break-inside:avoid}
-.invoice-bill-to{grid-column:1}
-.invoice-ship-to{grid-column:3}
-.invoice-bill-to,.invoice-ship-to{width:100%;max-width:280px}
-.invoice-ship-to{justify-self:end}
-.invoice-bill-to h3,.invoice-ship-to h3{margin:0 0 10px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:1.4px;color:#0f2d5c;border-bottom:2px solid #0f2d5c;padding-bottom:5px}
+.address-grid{display:grid;grid-template-columns:1fr 140px 1fr;width:100%;column-gap:0;align-items:start;padding-top:18px;padding-bottom:22px;page-break-inside:avoid}
+.address-spacer{min-width:140px}
+.bill-to h3,.ship-to h3{margin:0 0 10px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:1.4px;color:#0f2d5c;border-bottom:2px solid #0f2d5c;padding-bottom:5px}
 .invoice-terms-block{margin-bottom:24px}
 .invoice-block h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#52607a;border-bottom:1px solid #e2e8f0;padding-bottom:6px}
 .invoice-block p{margin:0;font-size:14px;line-height:1.6;white-space:pre-wrap}
 .invoice-address{display:flex;flex-direction:column;gap:3px;font-size:13px;line-height:1.55;color:#1a2744}
 .invoice-address-line{display:block;white-space:pre-wrap}
-.invoice-bill-to .invoice-address-line:first-child,.invoice-ship-to .invoice-address-line:first-child{font-weight:700;color:#08142b}
+.invoice-bill-to .invoice-address-line:first-child,.invoice-ship-to .invoice-address-line:first-child,.bill-to .invoice-address-line:first-child,.ship-to .invoice-address-line:first-child{font-weight:700;color:#08142b}
 .invoice-table{width:100%;margin:20px 0}
 .invoice-table th{background:#08142b;color:white;padding:10px}
 .invoice-table td{padding:12px;border-bottom:1px solid #e2e8f0}
@@ -192,8 +189,8 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
   .dashboard-row-5{grid-template-columns:1fr 1fr}
   .customer-form textarea,.method-boxes{grid-column:auto}
-  .invoice-address-row{display:flex;flex-direction:column;gap:24px}
-  .invoice-bill-to,.invoice-ship-to{grid-column:auto;justify-self:stretch;width:100%;max-width:none}
+  .address-grid{grid-template-columns:1fr;row-gap:24px}
+  .address-spacer{display:none}
   .invoice-header{flex-direction:column;gap:16px}
   .invoice-meta{text-align:left}
   .header-right{flex-direction:column;width:100%}
@@ -213,8 +210,7 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   main{margin:0;padding:0}
   .panel{box-shadow:none;border:0;padding:0}
   .invoice{border:0;margin:0;max-width:none;width:100%;padding:0}
-  .invoice-address-row{display:grid;grid-template-columns:2.75in minmax(2in,1fr) 2.75in;align-items:start;margin-bottom:24px;page-break-inside:avoid;width:100%}
-  .invoice-bill-to{grid-column:1;justify-self:start;width:2.75in;max-width:2.75in;page-break-inside:avoid}
-  .invoice-ship-to{grid-column:3;justify-self:end;width:2.75in;max-width:2.75in;page-break-inside:avoid}
-  .invoice-bill-to h3,.invoice-ship-to h3{color:#0f2d5c;border-bottom-color:#0f2d5c}
+  .address-grid{display:grid;grid-template-columns:1fr 140px 1fr;width:100%;column-gap:0;align-items:start;padding-top:18px;padding-bottom:22px;page-break-inside:avoid}
+  .address-spacer{display:block;min-width:140px}
+  .bill-to,.ship-to{page-break-inside:avoid}
 }

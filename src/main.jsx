@@ -977,8 +977,14 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
         <input placeholder="Qty" type="number" min="1" value={f.qty} onChange={e => setF({ ...f, qty: e.target.value })} />
         <input placeholder="Selling Price (auto)" value={f.price} onChange={e => setF({ ...f, price: e.target.value })} />
         <div className="profit-preview">Profit: <strong>{money(lineProfit)}</strong></div>
-        <input placeholder="Shipping" value={f.shipping} onChange={e => setF({ ...f, shipping: e.target.value })} />
-        <input placeholder="Discount" value={f.discount} onChange={e => setF({ ...f, discount: e.target.value })} />
+        <label className="order-field">
+          Shipping Cost
+          <input placeholder="Shipping Cost" type="number" min="0" step="0.01" value={f.shipping} onChange={e => setF({ ...f, shipping: e.target.value })} />
+        </label>
+        <label className="order-field">
+          Discount
+          <input placeholder="Discount" type="number" min="0" step="0.01" value={f.discount} onChange={e => setF({ ...f, discount: e.target.value })} />
+        </label>
         <input placeholder="Tracking #" value={f.tracking} onChange={e => setF({ ...f, tracking: e.target.value })} />
         <input type="date" placeholder="Due Date" value={f.due_date} onChange={e => setF({ ...f, due_date: e.target.value })} />
         <select value={f.status} onChange={e => setF({ ...f, status: e.target.value })}>

@@ -47,6 +47,8 @@ aside button.active{background:#24324b}
 .panel{padding:22px;margin-bottom:18px}
 .split{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:20px}
 .form-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-bottom:20px;align-items:end}
+.form-grid label.order-field{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:700;color:#52607a}
+.form-grid label.order-field input{margin:0}
 .customer-form{grid-template-columns:repeat(4,1fr)}
 input,select,textarea{width:100%;padding:13px;border:1px solid #c9d2df;border-radius:10px;background:white}
 textarea{min-height:82px;resize:vertical}

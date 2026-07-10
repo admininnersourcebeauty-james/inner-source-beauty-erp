@@ -54,6 +54,25 @@ const calcDueDate = (terms, fromDate) => {
   base.setDate(base.getDate() + days)
   return dateOnly(base)
 }
+const ISB_INVOICE_PREFIX = 'ISB-'
+const ISB_INVOICE_FIRST = 250001
+
+function isbInvoiceNumber(invoiceNo) {
+  if (!invoiceNo || !String(invoiceNo).startsWith(ISB_INVOICE_PREFIX)) return null
+  const num = parseInt(String(invoiceNo).slice(ISB_INVOICE_PREFIX.length), 10)
+  return Number.isFinite(num) ? num : null
+}
+
+function nextInvoiceNo(orders, explicitNo) {
+  if (explicitNo) return explicitNo
+  let max = null
+  for (const o of orders || []) {
+    const num = isbInvoiceNumber(o.invoice_no)
+    if (num !== null && (max === null || num > max)) max = num
+  }
+  const next = (max ?? ISB_INVOICE_FIRST - 1) + 1
+  return `${ISB_INVOICE_PREFIX}${String(next).padStart(6, '0')}`
+}
 const stockLevel = qty => {
   const q = Number(qty) || 0
   if (q >= 25) return { cls: 'stock-green', label: q }
@@ -197,7 +216,7 @@ function App() {
       style: item?.style || f.style,
       qty, price, buying_price: buying, profit,
       shipping, discount, total,
-      invoice_no: f.invoice_no || `ISB-${Date.now().toString().slice(-6)}`,
+      invoice_no: nextInvoiceNo(data.orders, f.invoice_no),
       status: f.status || 'Open',
       payment_status: 'Unpaid',
       note: f.note || '',

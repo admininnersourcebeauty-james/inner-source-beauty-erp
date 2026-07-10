@@ -72,6 +72,14 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .status-active{background:#d4edda;color:#155724}
 .status-hold{background:#fff3cd;color:#856404}
 .status-vip{background:#cce5ff;color:#004085}
+.payment-status-unpaid{background:#f8d7da;color:#721c24}
+.payment-status-partial{background:#fff3cd;color:#856404}
+.payment-status-paid{background:#d4edda;color:#155724}
+.payment-filters{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+.payment-filters button{background:#e8edf5;color:#07142b;padding:8px 14px;font-size:13px}
+.payment-filters button.active{background:#08142b;color:#fff}
+.payment-page .open-invoices-table tbody tr{cursor:pointer}
+.payment-page .open-invoices-table tbody tr:hover{background:#eef4ff}
 
 /* Stock level colors */
 .stock-badge{padding:4px 10px;border-radius:8px;font-weight:700;font-size:13px;display:inline-block}

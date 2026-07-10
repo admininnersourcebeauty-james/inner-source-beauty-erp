@@ -1067,6 +1067,7 @@ function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSele
   const blank = { customer_id: '', order_id: '', invoice_no: '', payment_date: today(), amount: '', method: 'Zelle', reference_no: '', note: '' }
   const [f, setF] = useState(blank)
   const [highlightId, setHighlightId] = useState('')
+  const [invoiceFilter, setInvoiceFilter] = useState('All')
 
   function orderCustomerName(order) {
     if (order?.customer_name) return order.customer_name
@@ -1082,6 +1083,80 @@ function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSele
     const customer = data.customers.find(c => String(c.id) === String(payment.customer_id))
     return customer?.company || customer?.name || '—'
   }
+
+  function orderPaidAmount(order) {
+    return data.payments
+      .filter(p => String(p.order_id) === String(order.id) || p.invoice_no === order.invoice_no)
+      .reduce((s, p) => s + Number(p.amount || 0), 0)
+  }
+
+  function resolvePaymentStatus(order, paid) {
+    const total = Number(order.total || 0)
+    const stored = order.payment_status || ''
+    if (stored === 'Paid' || stored === 'Partial' || stored === 'Unpaid') return stored
+    if (paid <= 0) return 'Unpaid'
+    if (paid >= total) return 'Paid'
+    return 'Partial'
+  }
+
+  function formatInvoiceDate(order) {
+    const raw = order.order_date || order.created_at
+    if (!raw) return '—'
+    const dt = new Date(raw)
+    if (Number.isNaN(dt.getTime())) return '—'
+    return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
+  }
+
+  function formatDueDate(order) {
+    const raw = order.due_date || calcDueDate(
+      data.customers.find(c => String(c.id) === String(order.customer_id))?.payment_terms,
+      order.created_at
+    )
+    if (!raw) return '—'
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(raw))) {
+      const [y, m, d] = String(raw).split('-')
+      return `${m}/${d}/${y}`
+    }
+    const dt = new Date(raw)
+    if (Number.isNaN(dt.getTime())) return String(raw)
+    return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
+  }
+
+  function paymentBadgeClass(status) {
+    if (status === 'Paid') return 'payment-status-paid'
+    if (status === 'Partial') return 'payment-status-partial'
+    return 'payment-status-unpaid'
+  }
+
+  const invoiceRows = data.orders.map(order => {
+    const paid = orderPaidAmount(order)
+    const total = Number(order.total || 0)
+    const balance = Math.max(total - paid, 0)
+    const payment_status = resolvePaymentStatus(order, paid)
+    return {
+      ...order,
+      customer_name: orderCustomerName(order),
+      invoice_date: formatInvoiceDate(order),
+      paid,
+      balance,
+      payment_status,
+      due_date_display: formatDueDate(order),
+    }
+  })
+
+  const unpaidCount = invoiceRows.filter(o => o.payment_status === 'Unpaid').length
+  const partialCount = invoiceRows.filter(o => o.payment_status === 'Partial').length
+  const paidCount = invoiceRows.filter(o => o.payment_status === 'Paid').length
+  const totalOpenBalance = invoiceRows
+    .filter(o => o.payment_status === 'Unpaid' || o.payment_status === 'Partial')
+    .reduce((s, o) => s + o.balance, 0)
+
+  const openInvoices = invoiceRows.filter(o => {
+    if (invoiceFilter === 'Unpaid') return o.payment_status === 'Unpaid'
+    if (invoiceFilter === 'Partial') return o.payment_status === 'Partial'
+    if (invoiceFilter === 'Paid') return o.payment_status === 'Paid'
+    return o.payment_status === 'Unpaid' || o.payment_status === 'Partial'
+  })
 
   const paymentRows = data.payments.map(p => ({ ...p, customer_name: paymentCustomerName(p) }))
 
@@ -1109,36 +1184,107 @@ function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSele
 
   function chooseOrder(id) {
     const o = data.orders.find(x => String(x.id) === String(id))
-    const paid = data.payments.filter(p => String(p.order_id) === String(id)).reduce((s, p) => s + Number(p.amount || 0), 0)
+    const paid = orderPaidAmount(o)
     const remaining = Number(o?.total || 0) - paid
     setF({ ...f, order_id: id, customer_id: o?.customer_id || '', invoice_no: o?.invoice_no || '', amount: remaining > 0 ? remaining : o?.total || '' })
   }
 
+  function pickOpenInvoice(order) {
+    chooseOrder(order.id)
+    document.getElementById('add-payment-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   return (
-    <div className="panel">
-      <h2>Add Payment</h2>
-      <div className="form-grid">
-        <select value={f.order_id} onChange={e => chooseOrder(e.target.value)}>
-          <option value="">Select Invoice</option>
-          {data.orders.map(o => (
-            <option key={o.id} value={o.id}>{o.invoice_no} - {orderCustomerName(o)} - {money(o.total)}</option>
-          ))}
-        </select>
-        <input type="date" value={f.payment_date} onChange={e => setF({ ...f, payment_date: e.target.value })} />
-        <input placeholder="Amount" type="number" step="0.01" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} />
-        <div className="method-boxes">
-          {PAYMENT_METHODS.map(m => (
-            <button key={m} type="button" className={f.method === m ? 'chosen' : ''} onClick={() => setF({ ...f, method: m })}>{m}</button>
+    <div className="payment-page">
+      <div className="panel">
+        <h2>Payment Status Summary</h2>
+        <div className="cards dashboard-row">
+          <Card t="Unpaid Invoices" v={unpaidCount} cls={unpaidCount > 0 ? 'card-warn' : ''} />
+          <Card t="Partial Invoices" v={partialCount} cls={partialCount > 0 ? 'card-warn' : ''} />
+          <Card t="Paid Invoices" v={paidCount} />
+          <Card t="Total Open Balance" v={money(totalOpenBalance)} cls={totalOpenBalance > 0 ? 'card-warn' : ''} />
+        </div>
+        <div className="payment-filters">
+          {['All', 'Unpaid', 'Partial', 'Paid'].map(label => (
+            <button
+              key={label}
+              type="button"
+              className={invoiceFilter === label ? 'active' : ''}
+              onClick={() => setInvoiceFilter(label)}
+            >
+              {label}
+            </button>
           ))}
         </div>
-        <input placeholder="Reference / Check #" value={f.reference_no} onChange={e => setF({ ...f, reference_no: e.target.value })} />
-        <input placeholder="Memo" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
-        <button onClick={() => { recordPayment(f); setF(blank) }}>Save Payment</button>
       </div>
-      <p className="hint">Payment automatically updates invoice status (Paid / Partial / Unpaid) and reduces customer balance.</p>
-      <h2>Payments</h2>
-      <Table rows={paymentRows} cols={['payment_date', 'customer_name', 'invoice_no', 'amount', 'method', 'reference_no', 'note']}
-        highlightId={highlightId} rowIdPrefix="payment-row-" onDelete={id => deleteRow('payments', id)} />
+
+      <div className="panel">
+        <h2>Open Invoices</h2>
+        {openInvoices.length === 0 ? (
+          <p className="hint">No invoices match this filter.</p>
+        ) : (
+          <div className="table-wrap open-invoices-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Customer Name</th>
+                  <th>Invoice No</th>
+                  <th>Invoice Date</th>
+                  <th>Total</th>
+                  <th>Paid</th>
+                  <th>Balance Due</th>
+                  <th>Payment Status</th>
+                  <th>Due Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {openInvoices.map(o => (
+                  <tr key={o.id} onClick={() => pickOpenInvoice(o)}>
+                    <td>{o.customer_name}</td>
+                    <td>{o.invoice_no || '—'}</td>
+                    <td>{o.invoice_date}</td>
+                    <td>{money(o.total)}</td>
+                    <td>{money(o.paid)}</td>
+                    <td>{money(o.balance)}</td>
+                    <td>
+                      <span className={`status-badge ${paymentBadgeClass(o.payment_status)}`}>
+                        {o.payment_status}
+                      </span>
+                    </td>
+                    <td>{o.due_date_display}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="panel" id="add-payment-form">
+        <h2>Add Payment</h2>
+        <div className="form-grid">
+          <select value={f.order_id} onChange={e => chooseOrder(e.target.value)}>
+            <option value="">Select Invoice</option>
+            {data.orders.map(o => (
+              <option key={o.id} value={o.id}>{o.invoice_no} - {orderCustomerName(o)} - {money(o.total)}</option>
+            ))}
+          </select>
+          <input type="date" value={f.payment_date} onChange={e => setF({ ...f, payment_date: e.target.value })} />
+          <input placeholder="Amount" type="number" step="0.01" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} />
+          <div className="method-boxes">
+            {PAYMENT_METHODS.map(m => (
+              <button key={m} type="button" className={f.method === m ? 'chosen' : ''} onClick={() => setF({ ...f, method: m })}>{m}</button>
+            ))}
+          </div>
+          <input placeholder="Reference / Check #" value={f.reference_no} onChange={e => setF({ ...f, reference_no: e.target.value })} />
+          <input placeholder="Memo" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
+          <button onClick={() => { recordPayment(f); setF(blank) }}>Save Payment</button>
+        </div>
+        <p className="hint">Payment automatically updates invoice status (Paid / Partial / Unpaid) and reduces customer balance.</p>
+        <h2>Payment History</h2>
+        <Table rows={paymentRows} cols={['payment_date', 'customer_name', 'invoice_no', 'amount', 'method', 'reference_no', 'note']}
+          highlightId={highlightId} rowIdPrefix="payment-row-" onDelete={id => deleteRow('payments', id)} />
+      </div>
     </div>
   )
 }

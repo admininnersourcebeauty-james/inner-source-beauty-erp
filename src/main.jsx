@@ -12,15 +12,17 @@ const ROLES = ['Admin', 'Staff', 'Warehouse']
 
 const money = n => `$${(Number(n) || 0).toFixed(2)}`
 const itemBuying = item => Number(item?.buying_price ?? item?.cost ?? 0)
+const itemShipping = item => Number(item?.shipping_cost ?? 0)
+const itemUnitCost = item => itemBuying(item) + itemShipping(item)
 const itemSelling = item => Number(item?.selling_price ?? item?.price ?? item?.retail ?? 0)
-const calcMargin = (buying, selling) => {
-  const b = Number(buying) || 0, s = Number(selling) || 0
+const calcMargin = (buying, selling, shipping = 0) => {
+  const b = Number(buying) || 0, s = Number(selling) || 0, sh = Number(shipping) || 0
   if (s <= 0) return null
-  return ((s - b) / s) * 100
+  return ((s - b - sh) / s) * 100
 }
-const calcProfit = (buying, selling) => Number(selling) - Number(buying)
-const formatMargin = (buying, selling) => {
-  const m = calcMargin(buying, selling)
+const calcProfit = (buying, selling, shipping = 0) => Number(selling) - Number(buying) - Number(shipping)
+const formatMargin = (buying, selling, shipping = 0) => {
+  const m = calcMargin(buying, selling, shipping)
   return m === null ? '—' : `${m.toFixed(1)}%`
 }
 const dateOnly = d => d ? String(d).slice(0, 10) : ''
@@ -206,15 +208,16 @@ function App() {
     const qty = Number(f.qty || 0), price = Number(f.price || 0)
     const shipping = Number(f.shipping || 0), discount = Number(f.discount || 0)
     const buying = item ? itemBuying(item) : 0
+    const inboundShipping = item ? itemShipping(item) : 0
     const total = qty * price + shipping - discount
-    const profit = total - (qty * buying)
+    const profit = total - (qty * (buying + inboundShipping))
     const dueDate = toDbDate(f.due_date || calcDueDate(customer?.payment_terms, today()))
     const payload = {
       customer_id: f.customer_id || null,
       inventory_id: f.inventory_id || null,
       customer_name: customer?.company || customer?.name || f.customer_name || '',
       style: item?.style || f.style,
-      qty, price, buying_price: buying, profit,
+      qty, price, buying_price: buying, shipping_cost: inboundShipping, profit,
       shipping, discount, total,
       invoice_no: nextInvoiceNo(data.orders, f.invoice_no),
       status: f.status || 'Open',
@@ -350,8 +353,8 @@ function calcStats(data) {
   const paid = data.payments.reduce((s, p) => s + Number(p.amount || 0), 0)
   const todaySales = data.orders.filter(o => isToday(o.created_at)).reduce((s, o) => s + Number(o.total || 0), 0)
   const monthlySales = data.orders.filter(o => isThisMonth(o.created_at)).reduce((s, o) => s + Number(o.total || 0), 0)
-  const inventoryValue = data.inventory.reduce((s, i) => s + Number(i.qty || 0) * itemBuying(i), 0)
-  const expectedProfit = data.orders.reduce((s, o) => s + Number(o.profit ?? ((Number(o.qty) * Number(o.price)) - (Number(o.qty) * Number(o.buying_price || 0)))), 0)
+  const inventoryValue = data.inventory.reduce((s, i) => s + Number(i.qty || 0) * itemUnitCost(i), 0)
+  const expectedProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
   const ordersToday = data.orders.filter(o => isToday(o.created_at)).length
   const lowStock = data.inventory.filter(i => Number(i.qty || 0) < 5).length
   const salesByDay = buildSalesGraph(data.orders)
@@ -421,14 +424,19 @@ function runGlobalSearch(data, q) {
   return results
 }
 
+function orderUnitCost(o) {
+  return Number(o.buying_price || 0) + Number(o.shipping_cost ?? 0)
+}
+
 function orderProfit(o) {
   if (o.profit != null && o.profit !== '') return Number(o.profit) || 0
-  const qty = Number(o.qty) || 0, price = Number(o.price) || 0, buying = Number(o.buying_price) || 0
-  return qty * price - qty * buying
+  const qty = Number(o.qty) || 0, price = Number(o.price) || 0
+  const total = Number(o.total) || (qty * price + Number(o.shipping || 0) - Number(o.discount || 0))
+  return total - qty * orderUnitCost(o)
 }
 
 function inventoryUnitCost(i) {
-  return Number(i?.buying_price || i?.cost || i?.buy_price || 0)
+  return itemUnitCost(i)
 }
 
 function Dashboard({ data, stats }) {
@@ -786,11 +794,11 @@ function CustomerDetail({ customer, data, deleteRow, onNavigate }) {
 }
 
 function Inventory({ data, addRow, updateRow, deleteRow }) {
-  const blank = { style: '', brand: '', category: '', qty: '', buying_price: '', selling_price: '', low_stock: 5 }
+  const blank = { style: '', brand: '', category: '', qty: '', buying_price: '', shipping_cost: '', selling_price: '', low_stock: 5 }
   const [f, setF] = useState(blank)
   const [editingId, setEditingId] = useState(null)
-  const margin = formatMargin(f.buying_price, f.selling_price)
-  const profit = calcProfit(f.buying_price, f.selling_price)
+  const margin = formatMargin(f.buying_price, f.selling_price, f.shipping_cost)
+  const profit = calcProfit(f.buying_price, f.selling_price, f.shipping_cost)
 
   function loadItem(item) {
     setEditingId(item.id)
@@ -800,6 +808,7 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
       category: item.category || '',
       qty: item.qty ?? '',
       buying_price: itemBuying(item) || '',
+      shipping_cost: item.shipping_cost ?? '',
       selling_price: itemSelling(item) || '',
       low_stock: item.low_stock ?? 5,
     })
@@ -811,10 +820,11 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
   }
 
   async function save() {
-    const buying = Number(f.buying_price) || 0, selling = Number(f.selling_price) || 0
+    const buying = Number(f.buying_price) || 0, shippingCost = Number(f.shipping_cost) || 0
+    const selling = Number(f.selling_price) || 0
     const row = {
       style: f.style, brand: f.brand, category: f.category,
-      qty: Number(f.qty) || 0, buying_price: buying, selling_price: selling,
+      qty: Number(f.qty) || 0, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
       cost: buying, price: selling, low_stock: Number(f.low_stock) || 5,
     }
     if (editingId) await updateRow('inventory', editingId, row)
@@ -823,12 +833,12 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
   }
 
   const rows = data.inventory.map(item => {
-    const buying = itemBuying(item), selling = itemSelling(item)
+    const buying = itemBuying(item), shippingCost = itemShipping(item), selling = itemSelling(item)
     const ri = reorderInfo(item, data.orders)
     return {
-      ...item, buying_price: buying, selling_price: selling,
-      profit: calcProfit(buying, selling),
-      margin: formatMargin(buying, selling),
+      ...item, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
+      profit: calcProfit(buying, selling, shippingCost),
+      margin: formatMargin(buying, selling, shippingCost),
       stock: stockLevel(item.qty),
       reorder: ri,
     }
@@ -851,6 +861,7 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
           <h3>Pricing</h3>
           <div className="form-grid inventory-grid pricing-grid">
             <label>Buying Price<input type="number" min="0" step="0.01" value={f.buying_price} onChange={e => setF({ ...f, buying_price: e.target.value })} /></label>
+            <label>Shipping Cost<input type="number" min="0" step="0.01" value={f.shipping_cost} onChange={e => setF({ ...f, shipping_cost: e.target.value })} /></label>
             <label>Selling Price<input type="number" min="0" step="0.01" value={f.selling_price} onChange={e => setF({ ...f, selling_price: e.target.value })} /></label>
             <div className="margin-display">
               <span>Profit $</span><strong>{money(profit)}</strong>
@@ -875,7 +886,7 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
       <table>
         <thead><tr>
           <th>Style</th><th>Brand</th><th>Category</th><th>Qty</th>
-          <th>Buying</th><th>Selling</th><th>Profit $</th><th>Margin</th><th>Reorder</th><th></th>
+          <th>Buying</th><th>Shipping</th><th>Selling</th><th>Profit $</th><th>Margin</th><th>Reorder</th><th>Edit</th><th>Delete</th>
         </tr></thead>
         <tbody>{rows.map(r => (
           <tr key={r.id} className={String(editingId) === String(r.id) ? 'sel' : ''} onClick={() => onEdit(r)}>
@@ -884,6 +895,7 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
             <td>{r.category || '—'}</td>
             <td><span className={`stock-badge ${r.stock.cls}`}>{r.stock.label}</span></td>
             <td>{money(r.buying_price)}</td>
+            <td>{money(r.shipping_cost)}</td>
             <td>{money(r.selling_price)}</td>
             <td>{money(r.profit)}</td>
             <td className="margin-cell">{r.margin}</td>
@@ -892,6 +904,8 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
               : <span className="reorder-no">OK · Avg {r.reorder.avg}/mo</span>) : '—'}</td>
             <td className="row-actions" onClick={e => e.stopPropagation()}>
               <button type="button" className="soft" onClick={() => onEdit(r)}>Edit</button>
+            </td>
+            <td className="row-actions" onClick={e => e.stopPropagation()}>
               <button type="button" className="danger" onClick={() => onDelete(r.id)}>Delete</button>
             </td>
           </tr>
@@ -930,8 +944,9 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
 
   const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
   const qty = Number(f.qty || 0), price = Number(f.price || 0)
-  const buying = item ? itemBuying(item) : 0
-  const lineProfit = (price - buying) * qty
+  const outboundShipping = Number(f.shipping || 0), discount = Number(f.discount || 0)
+  const unitCost = item ? itemUnitCost(item) : 0
+  const lineProfit = qty * price + outboundShipping - discount - qty * unitCost
 
   function formatOrderDate(order) {
     const raw = order.order_date || order.created_at
@@ -1353,14 +1368,16 @@ function Reports({ data, stats }) {
     const m = o.created_at ? o.created_at.slice(0, 7) : 'unknown'
     monthlyBreakdown[m] = (monthlyBreakdown[m] || 0) + Number(o.total || 0)
   })
-  const productSales = {}
+  const productStats = {}
   data.orders.forEach(o => {
     const k = o.style || 'Unknown'
-    productSales[k] = (productSales[k] || 0) + Number(o.qty || 0)
+    if (!productStats[k]) productStats[k] = { qty: 0, profit: 0 }
+    productStats[k].qty += Number(o.qty || 0)
+    productStats[k].profit += orderProfit(o)
   })
-  const sorted = Object.entries(productSales).sort((a, b) => b[1] - a[1])
+  const sorted = Object.entries(productStats).sort((a, b) => b[1].qty - a[1].qty)
   const best = sorted[0], worst = sorted[sorted.length - 1]
-  const totalProfit = data.orders.reduce((s, o) => s + Number(o.profit || 0), 0)
+  const totalProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
 
   return (
     <div className="panel">
@@ -1384,8 +1401,8 @@ function Reports({ data, stats }) {
           <tr key={m}><td>{m}</td><td>{money(v)}</td></tr>
         ))}</tbody></table>
       <div className="report-row">
-        <div><h3>Best Seller</h3><p>{best ? `${best[0]} — ${best[1]} units sold` : '—'}</p></div>
-        <div><h3>Worst Seller</h3><p>{worst && sorted.length > 1 ? `${worst[0]} — ${worst[1]} units sold` : '—'}</p></div>
+        <div><h3>Best Seller</h3><p>{best ? `${best[0]} — ${best[1].qty} units · ${money(best[1].profit)} profit` : '—'}</p></div>
+        <div><h3>Worst Seller</h3><p>{worst && sorted.length > 1 ? `${worst[0]} — ${worst[1].qty} units · ${money(worst[1].profit)} profit` : '—'}</p></div>
       </div>
     </div>
   )
@@ -1425,7 +1442,7 @@ function Settings({ data, reload, profile, setProfile, session }) {
 }
 
 function Table({ rows, cols, onDelete, highlightId, rowIdPrefix }) {
-  const moneyCols = ['total', 'amount', 'price', 'cost', 'buying_price', 'selling_price', 'shipping', 'discount', 'profit']
+  const moneyCols = ['total', 'amount', 'price', 'cost', 'buying_price', 'shipping_cost', 'selling_price', 'shipping', 'discount', 'profit']
   return (
     <div className="table-wrap">
       <table>

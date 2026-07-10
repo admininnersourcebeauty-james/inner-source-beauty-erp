@@ -75,6 +75,9 @@ function nextInvoiceNo(orders, explicitNo) {
   const next = (max ?? ISB_INVOICE_FIRST - 1) + 1
   return `${ISB_INVOICE_PREFIX}${String(next).padStart(6, '0')}`
 }
+function addressLines(address) {
+  return String(address || '').split(/\n/).map(l => l.trim()).filter(Boolean)
+}
 const stockLevel = qty => {
   const q = Number(qty) || 0
   if (q >= 25) return { cls: 'stock-green', label: q }
@@ -1051,6 +1054,10 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
     .filter(p => String(p.order_id) === String(o.id) || p.invoice_no === o.invoice_no)
     .reduce((s, p) => s + Number(p.amount || 0), 0)
   const due = Number(o.total || 0) - paid
+  const company = c?.company || o.customer_name || ''
+  const contact = c?.name && c.name !== company ? c.name : ''
+  const billLines = addressLines(c?.billing_address || c?.address)
+  const shipLines = addressLines(c?.shipping_address || c?.billing_address || c?.address)
 
   return (
     <div className="panel" id="invoice-panel">
@@ -1073,19 +1080,26 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
               <b>Tracking:</b> {o.tracking || '—'}</p>
           </div>
         </div>
-        <div className="invoice-grid">
-          <div className="invoice-block">
+        <div className="invoice-address-row">
+          <div className="invoice-block invoice-bill-to">
             <h3>Bill To</h3>
-            <p>{c?.company || o.customer_name}<br />{c?.name && c.name !== c?.company ? <>{c.name}<br /></> : null}{c?.billing_address || c?.address || ''}</p>
+            <div className="invoice-address">
+              {company && <span className="invoice-address-line">{company}</span>}
+              {contact && <span className="invoice-address-line">{contact}</span>}
+              {billLines.map((line, i) => <span key={i} className="invoice-address-line">{line}</span>)}
+            </div>
           </div>
-          <div className="invoice-block">
+          <div className="invoice-block invoice-ship-to">
             <h3>Ship To</h3>
-            <p>{c?.company || o.customer_name}<br />{c?.shipping_address || c?.billing_address || c?.address || ''}</p>
+            <div className="invoice-address">
+              {company && <span className="invoice-address-line">{company}</span>}
+              {shipLines.map((line, i) => <span key={i} className="invoice-address-line">{line}</span>)}
+            </div>
           </div>
-          <div className="invoice-block">
-            <h3>Terms</h3>
-            <p>{c?.payment_terms || 'COD'}<br />Preferred: {c?.preferred_payment || '—'}</p>
-          </div>
+        </div>
+        <div className="invoice-block invoice-terms-block">
+          <h3>Terms</h3>
+          <p>{c?.payment_terms || 'COD'}<br />Preferred: {c?.preferred_payment || '—'}</p>
         </div>
         <table className="invoice-table">
           <thead><tr><th>Style</th><th>Qty</th><th>Unit Price</th><th>Shipping</th><th>Discount</th><th>Total</th></tr></thead>

@@ -138,9 +138,13 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .invoice-sub{margin:4px 0 0;color:#52607a;font-size:13px}
 .invoice-meta{text-align:right}
 .invoice-meta h2{margin:0 0 10px;font-size:22px;color:#52607a}
-.invoice-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-bottom:24px}
+.invoice-address-row{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:20px;align-items:start}
+.invoice-address-row .invoice-block{width:100%;min-width:0}
+.invoice-terms-block{margin-bottom:24px}
 .invoice-block h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#52607a;border-bottom:1px solid #e2e8f0;padding-bottom:6px}
 .invoice-block p{margin:0;font-size:14px;line-height:1.6;white-space:pre-wrap}
+.invoice-address{display:flex;flex-direction:column;gap:2px;font-size:14px;line-height:1.6}
+.invoice-address-line{display:block;white-space:pre-wrap}
 .invoice-table{width:100%;margin:20px 0}
 .invoice-table th{background:#08142b;color:white;padding:10px}
 .invoice-table td{padding:12px;border-bottom:1px solid #e2e8f0}
@@ -183,7 +187,7 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
   .dashboard-row-5{grid-template-columns:1fr 1fr}
   .customer-form textarea,.method-boxes{grid-column:auto}
-  .invoice-grid,.signature-line,.report-row{grid-template-columns:1fr}
+  .invoice-address-row{grid-template-columns:1fr}
   .invoice-header{flex-direction:column;gap:16px}
   .invoice-meta{text-align:left}
   .header-right{flex-direction:column;width:100%}
@@ -198,8 +202,11 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
 }
 
 @media print{
+  @page{size:letter;margin:0.5in}
   aside,header,select,button,.notice,.menu-toggle,.invoice-actions,.search-results{display:none!important}
   main{margin:0;padding:0}
   .panel{box-shadow:none;border:0;padding:0}
-  .invoice{border:0;margin:0;max-width:none;padding:20px}
+  .invoice{border:0;margin:0;max-width:none;width:100%;padding:0}
+  .invoice-address-row{display:grid;grid-template-columns:1fr 1fr;gap:24px;page-break-inside:avoid}
+  .invoice-bill-to,.invoice-ship-to{page-break-inside:avoid}
 }

@@ -1082,7 +1082,7 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
         </div>
         <div className="invoice-address-row">
           <div className="invoice-block invoice-bill-to">
-            <h3>Bill To</h3>
+            <h3>BILL TO</h3>
             <div className="invoice-address">
               {company && <span className="invoice-address-line">{company}</span>}
               {contact && <span className="invoice-address-line">{contact}</span>}
@@ -1090,7 +1090,7 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
             </div>
           </div>
           <div className="invoice-block invoice-ship-to">
-            <h3>Ship To</h3>
+            <h3>SHIP TO</h3>
             <div className="invoice-address">
               {company && <span className="invoice-address-line">{company}</span>}
               {shipLines.map((line, i) => <span key={i} className="invoice-address-line">{line}</span>)}

@@ -161,6 +161,17 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .settings-row{margin:16px 0}
 .settings-row label{display:flex;flex-direction:column;gap:6px;font-weight:700;max-width:240px}
 
+.link-cell{background:none;border:none;padding:0;color:#08142b;font-weight:700;text-decoration:underline;cursor:pointer;font:inherit}
+.link-cell:hover{color:#24324b}
+select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
+.invoice-highlight{outline:2px solid #2563eb;outline-offset:4px;border-radius:8px}
+.detail-nav-table .clickable-row{cursor:pointer}
+.detail-nav-table .clickable-row:hover{background:#eef4ff}
+.customer-table tbody tr{cursor:pointer}
+.customer-table .row-actions{display:flex;gap:8px;white-space:nowrap}
+.customer-table .row-actions button{padding:8px 12px;font-size:13px}
+.customer-form-actions{display:flex;gap:10px;align-items:center;grid-column:span 2}
+
 /* Mobile */
 @media(max-width:900px){
   .menu-toggle{display:block}
@@ -172,14 +183,6 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
   .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
   .dashboard-row-5{grid-template-columns:1fr 1fr}
   .customer-form textarea,.method-boxes{grid-column:auto}
-.customer-form-actions{display:flex;gap:10px;align-items:center;grid-column:span 2}
-.customer-table tbody tr{cursor:pointer}
-.customer-table .row-actions{display:flex;gap:8px;white-space:nowrap}
-.customer-table .row-actions button{padding:8px 12px;font-size:13px}
-.detail-nav-table .clickable-row{cursor:pointer}
-.detail-nav-table .clickable-row:hover{background:#eef4ff}
-.link-cell{background:none;border:none;padding:0;color:#08142b;font-weight:700;text-decoration:underline;cursor:pointer;font:inherit}
-.link-cell:hover{color:#24324b}
   .invoice-grid,.signature-line,.report-row{grid-template-columns:1fr}
   .invoice-header{flex-direction:column;gap:16px}
   .invoice-meta{text-align:left}

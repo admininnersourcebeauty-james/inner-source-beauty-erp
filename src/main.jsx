@@ -291,13 +291,14 @@ function App() {
         {notice && <div className="notice" onClick={() => setNotice('')}>{notice}</div>}
         {loading && <div className="panel">Loading...</div>}
         {page === 'Dashboard' && <Dashboard data={data} stats={stats} />}
-        {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} onNavigate={openRecord} />}
+        {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} onNavigate={openRecord}
+          selectedCustomerId={selectedRecord.page === 'Customers' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} />}
         {page === 'Orders' && <Orders data={data} createOrder={createOrder} deleteRow={deleteRow}
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
-        {page === 'Payments' && <Payments data={data} recordPayment={recordPayment} deleteRow={deleteRow}
+        {page === 'Payments' && <Payments data={data} recordPayment={recordPayment} deleteRow={deleteRow} onNavigate={openRecord}
           selectedPaymentId={selectedRecord.page === 'Payments' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Reports' && <Reports data={data} stats={stats} />}
         {page === 'Settings' && <Settings data={data} reload={loadCloudData} profile={profile} setProfile={setProfile} session={session} />}
@@ -567,7 +568,7 @@ function Card({ t, v, cls }) {
   return <div className={`card ${cls || ''}`}><p>{t}</p><b>{v}</b></div>
 }
 
-function Customers({ data, addRow, updateRow, deleteRow, onNavigate }) {
+function Customers({ data, addRow, updateRow, deleteRow, onNavigate, selectedCustomerId, clearSelection }) {
   const blank = {
     name: '', company: '', phone: '', email: '', billing_address: '', shipping_address: '',
     shipping_same_as_billing: false, preferred_payment: 'Zelle', payment_terms: 'COD',
@@ -578,6 +579,16 @@ function Customers({ data, addRow, updateRow, deleteRow, onNavigate }) {
   const [selected, setSelected] = useState(null)
   const [q, setQ] = useState('')
   const customers = data.customers.filter(c => [c.name, c.company, c.phone, c.email].join(' ').toLowerCase().includes(q.toLowerCase()))
+
+  useEffect(() => {
+    if (!selectedCustomerId) return
+    const c = data.customers.find(x => String(x.id) === String(selectedCustomerId))
+    if (c) loadCustomer(c)
+    clearSelection?.()
+    requestAnimationFrame(() => {
+      document.getElementById(`customer-row-${selectedCustomerId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [selectedCustomerId, clearSelection, data.customers])
 
   function setSame(v) {
     setF({ ...f, shipping_same_as_billing: v, shipping_address: v ? f.billing_address : f.shipping_address })
@@ -662,7 +673,7 @@ function Customers({ data, addRow, updateRow, deleteRow, onNavigate }) {
             <tbody>{customers.map(c => {
               const s = customerStats(c, data)
               return (
-                <tr key={c.id} onClick={() => loadCustomer(c)}
+                <tr key={c.id} id={`customer-row-${c.id}`} onClick={() => loadCustomer(c)}
                   className={String(selected) === String(c.id) || String(editingId) === String(c.id) ? 'sel' : ''}>
                   <td><b>{c.company || '—'}</b></td>
                   <td>{c.name}</td>
@@ -986,11 +997,16 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
 
 function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
   const [id, setId] = useState('')
+  const [highlightId, setHighlightId] = useState('')
 
   useEffect(() => {
     if (!selectedOrderId) return
     setId(selectedOrderId)
+    setHighlightId(selectedOrderId)
     clearSelection?.()
+    requestAnimationFrame(() => {
+      document.getElementById('invoice-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
   }, [selectedOrderId, clearSelection])
 
   const o = data.orders.find(x => String(x.id) === String(id)) || data.orders[0]
@@ -1003,11 +1019,15 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
   const due = Number(o.total || 0) - paid
 
   return (
-    <div className="panel">
-      <select value={id || o.id} onChange={e => setId(e.target.value)}>
+    <div className="panel" id="invoice-panel">
+      <select
+        className={String(highlightId) === String(id || o.id) ? 'sel' : ''}
+        value={id || o.id}
+        onChange={e => { setId(e.target.value); setHighlightId('') }}
+      >
         {data.orders.map(o2 => <option key={o2.id} value={o2.id}>{o2.invoice_no} — {o2.customer_name}</option>)}
       </select>
-      <div className="invoice">
+      <div className={`invoice${String(highlightId) === String(o.id) ? ' invoice-highlight' : ''}`}>
         <div className="invoice-header">
           <div><h1>INNER SOURCE BEAUTY</h1><p className="invoice-sub">Professional Beauty Distribution</p></div>
           <div className="invoice-meta">
@@ -1063,7 +1083,7 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
   )
 }
 
-function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSelection }) {
+function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentId, clearSelection }) {
   const blank = { customer_id: '', order_id: '', invoice_no: '', payment_date: today(), amount: '', method: 'Zelle', reference_no: '', note: '' }
   const [f, setF] = useState(blank)
   const [highlightId, setHighlightId] = useState('')
@@ -1240,8 +1260,26 @@ function Payments({ data, recordPayment, deleteRow, selectedPaymentId, clearSele
               <tbody>
                 {openInvoices.map(o => (
                   <tr key={o.id} onClick={() => pickOpenInvoice(o)}>
-                    <td>{o.customer_name}</td>
-                    <td>{o.invoice_no || '—'}</td>
+                    <td>
+                      {o.customer_id ? (
+                        <button
+                          type="button"
+                          className="link-cell"
+                          onClick={e => { e.stopPropagation(); onNavigate('Customers', o.customer_id) }}
+                        >
+                          {orderCustomerName(o)}
+                        </button>
+                      ) : orderCustomerName(o)}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="link-cell"
+                        onClick={e => { e.stopPropagation(); onNavigate('Invoice', o.id) }}
+                      >
+                        {o.invoice_no || '—'}
+                      </button>
+                    </td>
                     <td>{o.invoice_date}</td>
                     <td>{money(o.total)}</td>
                     <td>{money(o.paid)}</td>

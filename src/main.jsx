@@ -212,6 +212,62 @@ function App() {
     }
   }
 
+  async function deleteOrder(id) {
+    const order = data.orders.find(o => String(o.id) === String(id))
+    if (!order) return false
+
+    const relatedPayments = data.payments.filter(p =>
+      String(p.order_id) === String(id) || (order.invoice_no && p.invoice_no === order.invoice_no)
+    )
+
+    if (!confirm(`Delete invoice ${order.invoice_no || '—'}?`)) return false
+
+    if (relatedPayments.length > 0) {
+      const paidTotal = relatedPayments.reduce((s, p) => s + Number(p.amount || 0), 0)
+      const deletePaymentsToo = confirm(
+        `This invoice has ${relatedPayments.length} payment record(s) totaling ${money(paidTotal)}.\n\nDelete those payment records as well?\n\nOK = delete invoice and payments\nCancel = abort deletion`
+      )
+      if (!deletePaymentsToo) return false
+    }
+
+    setNotice('')
+    const restoreQty = Number(order.qty || 0)
+    const inventoryId = order.inventory_id
+
+    if (hasSupabaseConfig && session) {
+      if (inventoryId && restoreQty > 0) {
+        const inv = data.inventory.find(i => String(i.id) === String(inventoryId))
+        if (inv) {
+          const { error } = await supabase.from('inventory')
+            .update({ qty: Number(inv.qty || 0) + restoreQty })
+            .eq('id', inv.id)
+          if (error) return setNotice(error.message), false
+        }
+      }
+      for (const p of relatedPayments) {
+        const { error } = await supabase.from('payments').delete().eq('id', p.id)
+        if (error) return setNotice(error.message), false
+      }
+      const { error } = await supabase.from('orders').delete().eq('id', id)
+      if (error) return setNotice(error.message), false
+      await loadCloudData()
+    } else {
+      const paymentIds = new Set(relatedPayments.map(p => String(p.id)))
+      setLocalData(p => ({
+        ...p,
+        inventory: inventoryId && restoreQty > 0
+          ? p.inventory.map(i => String(i.id) === String(inventoryId)
+            ? { ...i, qty: Number(i.qty || 0) + restoreQty }
+            : i)
+          : p.inventory,
+        payments: p.payments.filter(x => !paymentIds.has(String(x.id))),
+        orders: p.orders.filter(x => String(x.id) !== String(id)),
+      }))
+    }
+
+    return true
+  }
+
   async function createOrder(f) {
     const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
     const customer = data.customers.find(c => String(c.id) === String(f.customer_id))
@@ -393,7 +449,7 @@ function App() {
         {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} onNavigate={openRecord}
           selectedCustomerId={selectedRecord.page === 'Customers' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} />}
-        {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteRow={deleteRow}
+        {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteOrder={deleteOrder}
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
@@ -992,7 +1048,7 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
   )
 }
 
-function Orders({ data, createOrder, updateOrder, deleteRow, selectedOrderId, clearSelection }) {
+function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, clearSelection }) {
   const blank = {
     customer_id: '', inventory_id: '', customer_name: '', style: '', qty: '', price: '',
     shipping: '0', discount: '0', status: 'Open', note: '', tracking: '', due_date: '', order_date: '',
@@ -1056,6 +1112,11 @@ function Orders({ data, createOrder, updateOrder, deleteRow, selectedOrderId, cl
     }
     await createOrder(f)
     setF(blank)
+  }
+
+  async function handleDeleteOrder(id) {
+    const ok = await deleteOrder(id)
+    if (ok && String(editingId) === String(id)) cancelEdit()
   }
 
   function chooseCustomer(id) {
@@ -1166,7 +1227,7 @@ function Orders({ data, createOrder, updateOrder, deleteRow, selectedOrderId, cl
                 <td>{o.payment_status || '—'}</td>
                 <td className="row-actions">
                   <button type="button" className="soft" onClick={() => loadOrderForEdit(o)}>Edit</button>
-                  <button type="button" className="danger" onClick={() => deleteRow('orders', o.id)}>Delete</button>
+                  <button type="button" className="danger" onClick={() => handleDeleteOrder(o.id)}>Delete</button>
                 </td>
               </tr>
             ))}

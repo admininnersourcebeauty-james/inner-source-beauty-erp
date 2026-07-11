@@ -82,6 +82,11 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .payment-filters button.active{background:#08142b;color:#fff}
 .payment-page .open-invoices-table tbody tr{cursor:pointer}
 .payment-page .open-invoices-table tbody tr:hover{background:#eef4ff}
+.payment-invoice-select{display:flex;flex-direction:column;gap:8px}
+.payment-show-paid{align-self:flex-start;font-size:13px}
+.payment-amount-field{display:flex;flex-direction:column;gap:4px}
+.field-error{color:#9b1c1c;font-size:13px;font-weight:700;margin:0}
+.payment-form button[disabled]{opacity:.55;cursor:not-allowed}
 
 /* Stock level colors */
 .stock-badge{padding:4px 10px;border-radius:8px;font-weight:700;font-size:13px;display:inline-block}

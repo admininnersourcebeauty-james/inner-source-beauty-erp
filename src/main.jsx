@@ -1150,6 +1150,8 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
   const [f, setF] = useState(blank)
   const [highlightId, setHighlightId] = useState('')
   const [invoiceFilter, setInvoiceFilter] = useState('All')
+  const [showPaidInvoices, setShowPaidInvoices] = useState(false)
+  const [amountError, setAmountError] = useState('')
 
   function orderCustomerName(order) {
     if (order?.customer_name) return order.customer_name
@@ -1210,6 +1212,29 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
     return 'payment-status-unpaid'
   }
 
+  function invoiceSortDueKey(order) {
+    const raw = order.due_date || calcDueDate(
+      data.customers.find(c => String(c.id) === String(order.customer_id))?.payment_terms,
+      order.created_at
+    )
+    if (!raw) return '9999-99-99'
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(raw)) ? String(raw) : localDateKey(raw)
+  }
+
+  function invoiceSortDateKey(order) {
+    return localDateKey(order.order_date || order.created_at) || '9999-99-99'
+  }
+
+  function comparePayableInvoices(a, b) {
+    const byDue = invoiceSortDueKey(a).localeCompare(invoiceSortDueKey(b))
+    if (byDue !== 0) return byDue
+    return invoiceSortDateKey(a).localeCompare(invoiceSortDateKey(b))
+  }
+
+  function invoiceOptionLabel(order) {
+    return `${order.invoice_no || '—'} - ${order.customer_name} - Balance ${money(order.balance)}`
+  }
+
   const invoiceRows = data.orders.map(order => {
     const paid = orderPaidAmount(order)
     const total = Number(order.total || 0)
@@ -1240,6 +1265,39 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
     return o.payment_status === 'Unpaid' || o.payment_status === 'Partial'
   })
 
+  const payableInvoices = invoiceRows
+    .filter(o => o.balance > 0 && (o.payment_status === 'Unpaid' || o.payment_status === 'Partial'))
+    .sort(comparePayableInvoices)
+
+  const paidInvoices = invoiceRows
+    .filter(o => o.payment_status === 'Paid' || o.balance <= 0)
+    .sort(comparePayableInvoices)
+
+  const selectedInvoice = invoiceRows.find(o => String(o.id) === String(f.order_id))
+
+  function validateAmount(orderId, amountValue) {
+    if (!orderId) {
+      setAmountError('')
+      return true
+    }
+    const row = invoiceRows.find(o => String(o.id) === String(orderId))
+    if (!row) {
+      setAmountError('')
+      return true
+    }
+    const amountNum = Number(amountValue || 0)
+    if (amountNum <= 0) {
+      setAmountError('Enter an amount greater than zero.')
+      return false
+    }
+    if (amountNum > row.balance + 0.001) {
+      setAmountError(`Amount cannot exceed remaining balance of ${money(row.balance)}.`)
+      return false
+    }
+    setAmountError('')
+    return true
+  }
+
   const paymentRows = data.payments.map(p => ({ ...p, customer_name: paymentCustomerName(p) }))
 
   useEffect(() => {
@@ -1265,10 +1323,35 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
   }, [selectedPaymentId, clearSelection, data.payments])
 
   function chooseOrder(id) {
-    const o = data.orders.find(x => String(x.id) === String(id))
-    const paid = orderPaidAmount(o)
-    const remaining = Number(o?.total || 0) - paid
-    setF({ ...f, order_id: id, customer_id: o?.customer_id || '', invoice_no: o?.invoice_no || '', amount: remaining > 0 ? remaining : o?.total || '' })
+    if (!id) {
+      setAmountError('')
+      setF({ ...f, order_id: '', customer_id: '', invoice_no: '', amount: '' })
+      return
+    }
+    const row = invoiceRows.find(x => String(x.id) === String(id))
+    if (!row || row.balance <= 0) return
+    const amount = row.balance > 0 ? String(row.balance) : ''
+    setF({
+      ...f,
+      order_id: id,
+      customer_id: row.customer_id || '',
+      invoice_no: row.invoice_no || '',
+      amount,
+    })
+    setAmountError('')
+  }
+
+  function updateAmount(value) {
+    setF({ ...f, amount: value })
+    validateAmount(f.order_id, value)
+  }
+
+  function savePayment() {
+    if (!f.order_id) return
+    if (!validateAmount(f.order_id, f.amount)) return
+    recordPayment(f)
+    setF(blank)
+    setAmountError('')
   }
 
   function pickOpenInvoice(order) {
@@ -1362,15 +1445,41 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
 
       <div className="panel" id="add-payment-form">
         <h2>Add Payment</h2>
-        <div className="form-grid">
-          <select value={f.order_id} onChange={e => chooseOrder(e.target.value)}>
-            <option value="">Select Invoice</option>
-            {data.orders.map(o => (
-              <option key={o.id} value={o.id}>{o.invoice_no} - {orderCustomerName(o)} - {money(o.total)}</option>
-            ))}
-          </select>
+        <div className="form-grid payment-form">
+          <div className="payment-invoice-select">
+            <select value={f.order_id} onChange={e => chooseOrder(e.target.value)}>
+              <option value="">Select Invoice</option>
+              {payableInvoices.map(o => (
+                <option key={o.id} value={o.id}>{invoiceOptionLabel(o)}</option>
+              ))}
+              {showPaidInvoices && paidInvoices.map(o => (
+                <option key={`paid-${o.id}`} value={o.id} disabled>
+                  {invoiceOptionLabel(o)} (Paid)
+                </option>
+              ))}
+            </select>
+            <label className="check payment-show-paid">
+              <input
+                type="checkbox"
+                checked={showPaidInvoices}
+                onChange={e => setShowPaidInvoices(e.target.checked)}
+              />
+              Show Paid Invoices
+            </label>
+          </div>
           <input type="date" value={f.payment_date} onChange={e => setF({ ...f, payment_date: e.target.value })} />
-          <input placeholder="Amount" type="number" step="0.01" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} />
+          <div className="payment-amount-field">
+            <input
+              placeholder="Amount"
+              type="number"
+              min="0"
+              step="0.01"
+              max={selectedInvoice ? selectedInvoice.balance : undefined}
+              value={f.amount}
+              onChange={e => updateAmount(e.target.value)}
+            />
+            {amountError && <p className="field-error">{amountError}</p>}
+          </div>
           <div className="method-boxes">
             {PAYMENT_METHODS.map(m => (
               <button key={m} type="button" className={f.method === m ? 'chosen' : ''} onClick={() => setF({ ...f, method: m })}>{m}</button>
@@ -1378,7 +1487,7 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
           </div>
           <input placeholder="Reference / Check #" value={f.reference_no} onChange={e => setF({ ...f, reference_no: e.target.value })} />
           <input placeholder="Memo" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
-          <button onClick={() => { recordPayment(f); setF(blank) }}>Save Payment</button>
+          <button type="button" onClick={savePayment} disabled={!f.order_id || Boolean(amountError)}>Save Payment</button>
         </div>
         <p className="hint">Payment automatically updates invoice status (Paid / Partial / Unpaid) and reduces customer balance.</p>
         <h2>Payment History</h2>

@@ -137,6 +137,10 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 /* Orders */
 .stock-info,.profit-preview{padding:13px;background:#f0f4ff;border:1px solid #c9d2df;border-radius:10px;font-size:14px;font-weight:700;color:#52607a}
 .profit-preview strong{color:#0d5c2e}
+.order-form-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.order-edit-error{margin:0 0 12px}
+.orders-table .row-actions{display:flex;gap:8px;white-space:nowrap}
+.orders-table .row-actions button{padding:8px 12px;font-size:13px}
 
 /* Invoice */
 .invoice{max-width:900px;margin:20px auto;background:white;border:1px solid #dce3ee;padding:40px;border-radius:4px}

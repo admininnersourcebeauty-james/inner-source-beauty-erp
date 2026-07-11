@@ -243,6 +243,73 @@ function App() {
     }
   }
 
+  function orderPaidTotal(order) {
+    return data.payments
+      .filter(p => String(p.order_id) === String(order.id) || p.invoice_no === order.invoice_no)
+      .reduce((s, p) => s + Number(p.amount || 0), 0)
+  }
+
+  async function updateOrder(orderId, f, original) {
+    const existing = data.orders.find(o => String(o.id) === String(orderId))
+    if (!existing) return { error: 'Order not found.' }
+
+    const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
+    const customer = data.customers.find(c => String(c.id) === String(f.customer_id))
+    const qty = Number(f.qty || 0), price = Number(f.price || 0)
+    const shipping = Number(f.shipping || 0), discount = Number(f.discount || 0)
+    const buying = item ? itemBuying(item) : 0
+    const inboundShipping = item ? itemShipping(item) : 0
+    const total = qty * price + shipping - discount
+    const profit = total - (qty * (buying + inboundShipping))
+    const paid = orderPaidTotal(existing)
+
+    if (total < paid - 0.001) {
+      return { error: 'Invoice total cannot be less than the amount already paid.' }
+    }
+
+    const payment_status = paid <= 0 ? 'Unpaid' : paid >= total ? 'Paid' : 'Partial'
+    const payload = {
+      customer_id: f.customer_id || null,
+      inventory_id: f.inventory_id || null,
+      customer_name: customer?.company || customer?.name || f.customer_name || existing.customer_name || '',
+      style: item?.style || f.style || existing.style,
+      qty, price, buying_price: buying, shipping_cost: inboundShipping, profit,
+      shipping, discount, total,
+      invoice_no: existing.invoice_no,
+      status: f.status || 'Open',
+      payment_status,
+      note: f.note || '',
+      due_date: toDbDate(f.due_date || existing.due_date),
+      tracking: f.tracking || '',
+      order_date: toDbDate(f.order_date || existing.order_date || existing.created_at),
+    }
+    await updateRow('orders', orderId, payload)
+
+    const oldInventoryId = original?.inventory_id
+    const newInventoryId = f.inventory_id
+    const oldQty = Number(original?.qty || 0)
+    const newQty = qty
+
+    if (String(oldInventoryId || '') === String(newInventoryId || '')) {
+      const diff = newQty - oldQty
+      if (oldInventoryId && diff !== 0) {
+        const inv = data.inventory.find(i => String(i.id) === String(oldInventoryId))
+        if (inv) await updateRow('inventory', inv.id, { qty: Number(inv.qty || 0) - diff })
+      }
+    } else {
+      if (oldInventoryId && oldQty > 0) {
+        const oldInv = data.inventory.find(i => String(i.id) === String(oldInventoryId))
+        if (oldInv) await updateRow('inventory', oldInv.id, { qty: Number(oldInv.qty || 0) + oldQty })
+      }
+      if (newInventoryId && newQty > 0) {
+        const newInv = data.inventory.find(i => String(i.id) === String(newInventoryId))
+        if (newInv) await updateRow('inventory', newInv.id, { qty: Number(newInv.qty || 0) - newQty })
+      }
+    }
+
+    return { error: '' }
+  }
+
   async function recordPayment(f) {
     const amount = Number(f.amount || 0)
     const order = data.orders.find(o => String(o.id) === String(f.order_id))
@@ -326,7 +393,7 @@ function App() {
         {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} onNavigate={openRecord}
           selectedCustomerId={selectedRecord.page === 'Customers' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} />}
-        {page === 'Orders' && <Orders data={data} createOrder={createOrder} deleteRow={deleteRow}
+        {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteRow={deleteRow}
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
@@ -925,13 +992,16 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
   )
 }
 
-function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection }) {
+function Orders({ data, createOrder, updateOrder, deleteRow, selectedOrderId, clearSelection }) {
   const blank = {
     customer_id: '', inventory_id: '', customer_name: '', style: '', qty: '', price: '',
-    shipping: '0', discount: '0', status: 'Open', note: '', tracking: '', due_date: '',
+    shipping: '0', discount: '0', status: 'Open', note: '', tracking: '', due_date: '', order_date: '',
   }
   const [f, setF] = useState(blank)
   const [highlightId, setHighlightId] = useState('')
+  const [editingId, setEditingId] = useState(null)
+  const [editSnapshot, setEditSnapshot] = useState(null)
+  const [editError, setEditError] = useState('')
 
   useEffect(() => {
     if (!selectedOrderId) return
@@ -941,6 +1011,52 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
       document.getElementById(`order-row-${selectedOrderId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     })
   }, [selectedOrderId, clearSelection])
+
+  function cancelEdit() {
+    setEditingId(null)
+    setEditSnapshot(null)
+    setEditError('')
+    setF(blank)
+  }
+
+  function loadOrderForEdit(order) {
+    setEditingId(order.id)
+    setEditSnapshot({ inventory_id: order.inventory_id, qty: Number(order.qty || 0) })
+    setEditError('')
+    setHighlightId(order.id)
+    setF({
+      customer_id: order.customer_id || '',
+      inventory_id: order.inventory_id || '',
+      customer_name: order.customer_name || '',
+      style: order.style || '',
+      qty: order.qty ?? '',
+      price: order.price ?? '',
+      shipping: order.shipping ?? '0',
+      discount: order.discount ?? '0',
+      status: order.status || 'Open',
+      note: order.note || '',
+      tracking: order.tracking || '',
+      due_date: toDbDate(order.due_date || ''),
+      order_date: toDbDate(order.order_date || order.created_at || ''),
+    })
+    requestAnimationFrame(() => {
+      document.getElementById('order-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+
+  async function handleSave() {
+    if (editingId) {
+      const result = await updateOrder(editingId, f, editSnapshot)
+      if (result?.error) {
+        setEditError(result.error)
+        return
+      }
+      cancelEdit()
+      return
+    }
+    await createOrder(f)
+    setF(blank)
+  }
 
   function chooseCustomer(id) {
     const c = data.customers.find(x => String(x.id) === String(id))
@@ -968,7 +1084,13 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
 
   return (
     <div className="panel">
-      <h2>Create Order / Invoice</h2>
+      <h2 id="order-form">{editingId ? 'Edit Order / Invoice' : 'Create Order / Invoice'}</h2>
+      {editingId && (
+        <p className="hint">
+          Editing invoice <strong>{data.orders.find(o => String(o.id) === String(editingId))?.invoice_no || '—'}</strong>
+        </p>
+      )}
+      {editError && <p className="field-error order-edit-error">{editError}</p>}
       <div className="form-grid">
         <select value={f.customer_id} onChange={e => chooseCustomer(e.target.value)}>
           <option value="">Select Customer</option>
@@ -993,12 +1115,19 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
           <input placeholder="Discount" type="number" min="0" step="0.01" value={f.discount} onChange={e => setF({ ...f, discount: e.target.value })} />
         </label>
         <input placeholder="Tracking #" value={f.tracking} onChange={e => setF({ ...f, tracking: e.target.value })} />
+        <label className="order-field">
+          Order Date
+          <input type="date" value={f.order_date} onChange={e => setF({ ...f, order_date: e.target.value })} />
+        </label>
         <input type="date" placeholder="Due Date" value={f.due_date} onChange={e => setF({ ...f, due_date: e.target.value })} />
         <select value={f.status} onChange={e => setF({ ...f, status: e.target.value })}>
           {['Open', 'Pending', 'Shipped', 'Cancelled'].map(x => <option key={x}>{x}</option>)}
         </select>
         <input placeholder="Order Note" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
-        <button onClick={() => { createOrder(f); setF(blank) }}>Create Invoice</button>
+        <div className="order-form-actions">
+          <button type="button" onClick={handleSave}>{editingId ? 'Update Invoice' : 'Create Invoice'}</button>
+          {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel Edit</button>}
+        </div>
       </div>
       <h2>Orders</h2>
       <div className="table-wrap orders-table">
@@ -1023,7 +1152,7 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
               <tr
                 key={o.id}
                 id={`order-row-${o.id}`}
-                className={String(highlightId) === String(o.id) ? 'sel' : ''}
+                className={String(highlightId) === String(o.id) || String(editingId) === String(o.id) ? 'sel' : ''}
               >
                 <td>{formatOrderDate(o)}</td>
                 <td>{o.invoice_no || '—'}</td>
@@ -1035,7 +1164,10 @@ function Orders({ data, createOrder, deleteRow, selectedOrderId, clearSelection 
                 <td>{money(o.profit)}</td>
                 <td>{o.status || '—'}</td>
                 <td>{o.payment_status || '—'}</td>
-                <td><button className="danger" onClick={() => deleteRow('orders', o.id)}>Delete</button></td>
+                <td className="row-actions">
+                  <button type="button" className="soft" onClick={() => loadOrderForEdit(o)}>Edit</button>
+                  <button type="button" className="danger" onClick={() => deleteRow('orders', o.id)}>Delete</button>
+                </td>
               </tr>
             ))}
           </tbody>

@@ -55,6 +55,16 @@ const isThisMonth = d => {
   const now = new Date()
   return dt.getFullYear() === now.getFullYear() && dt.getMonth() === now.getMonth()
 }
+const isOrderDateToday = order => {
+  const key = localDateKey(order?.order_date)
+  if (!key) return false
+  return key === today()
+}
+const isOrderDateThisMonth = order => {
+  const key = localDateKey(order?.order_date)
+  if (!key) return false
+  return key.slice(0, 7) === today().slice(0, 7)
+}
 const calcDueDate = (terms, fromDate) => {
   const base = fromDate ? new Date(fromDate) : new Date()
   const map = { 'NET 15': 15, 'NET 30': 30, 'NET 45': 45, 'NET 60': 60 }
@@ -573,8 +583,8 @@ function inventoryUnitCost(i) {
 }
 
 function Dashboard({ data, stats }) {
-  const todayOrders = data.orders.filter(o => isToday(o.created_at))
-  const monthOrders = data.orders.filter(o => isThisMonth(o.created_at))
+  const todayOrders = data.orders.filter(isOrderDateToday)
+  const monthOrders = data.orders.filter(isOrderDateThisMonth)
 
   const todaySales = todayOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   const todayProfit = todayOrders.reduce((s, o) => s + orderProfit(o), 0)

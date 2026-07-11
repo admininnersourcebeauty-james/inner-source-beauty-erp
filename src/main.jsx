@@ -25,27 +25,34 @@ const formatMargin = (buying, selling, shipping = 0) => {
   const m = calcMargin(buying, selling, shipping)
   return m === null ? '—' : `${m.toFixed(1)}%`
 }
-const dateOnly = d => d ? String(d).slice(0, 10) : ''
 const localDateKey = d => {
   if (!d) return ''
+  const s = String(d).trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
   const dt = new Date(d)
-  if (Number.isNaN(dt.getTime())) return String(d).slice(0, 10)
+  if (Number.isNaN(dt.getTime())) return s.slice(0, 10)
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
 }
-const today = () => new Date().toISOString().slice(0, 10)
+const dateOnly = d => localDateKey(d)
+const today = () => localDateKey(new Date())
 const toDbDate = value => {
   if (!value) return today()
   const s = String(value).trim()
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return today()
-  return d.toISOString().slice(0, 10)
+  return localDateKey(d)
 }
 const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
-const isToday = d => dateOnly(d) === today()
+const isToday = d => {
+  if (!d) return false
+  return localDateKey(d) === today()
+}
 const isThisMonth = d => {
   if (!d) return false
-  const dt = new Date(d), now = new Date()
+  const dt = new Date(d)
+  if (Number.isNaN(dt.getTime())) return false
+  const now = new Date()
   return dt.getFullYear() === now.getFullYear() && dt.getMonth() === now.getMonth()
 }
 const calcDueDate = (terms, fromDate) => {
@@ -1386,7 +1393,7 @@ function Reports({ data, stats }) {
   const ranked = [...data.customers].map(c => ({ ...c, ...customerStats(c, data) })).sort((a, b) => b.sales - a.sales)
   const monthlyBreakdown = {}
   data.orders.forEach(o => {
-    const m = o.created_at ? o.created_at.slice(0, 7) : 'unknown'
+    const m = localDateKey(o.created_at).slice(0, 7)
     monthlyBreakdown[m] = (monthlyBreakdown[m] || 0) + Number(o.total || 0)
   })
   const productStats = {}

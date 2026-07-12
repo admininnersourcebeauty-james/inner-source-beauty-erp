@@ -377,25 +377,85 @@ function App() {
   }
 
   async function recordPayment(f) {
-    const amount = Number(f.amount || 0)
-    const order = data.orders.find(o => String(o.id) === String(f.order_id))
-    await addRow('payments', {
-      customer_id: f.customer_id || order?.customer_id || null,
-      order_id: f.order_id || null,
-      invoice_no: f.invoice_no || order?.invoice_no || '',
-      payment_date: f.payment_date || today(),
-      amount, method: f.method || 'Zelle',
-      reference_no: f.reference_no || '',
-      note: f.note || '',
+    return recordMultiPayment({
+      customer_id: f.customer_id,
+      payment_date: f.payment_date,
+      method: f.method,
+      reference_no: f.reference_no,
+      note: f.note,
+      allocations: [{ order_id: f.order_id, invoice_no: f.invoice_no, amount: Number(f.amount || 0) }],
     })
-    if (order) {
-      const paid = data.payments
-        .filter(p => String(p.order_id) === String(order.id) || p.invoice_no === order.invoice_no)
-        .reduce((s, p) => s + Number(p.amount || 0), 0) + amount
-      const total = Number(order.total || 0)
-      const status = paid <= 0 ? 'Unpaid' : paid >= total ? 'Paid' : 'Partial'
-      await updateRow('orders', order.id, { payment_status: status })
+  }
+
+  async function recordMultiPayment({ customer_id, payment_date, method, reference_no, note, allocations }) {
+    const items = (allocations || []).filter(a => Number(a.amount) > 0)
+    if (!items.length) return { error: 'Apply at least one payment amount.' }
+
+    setNotice('')
+
+    if (hasSupabaseConfig && session) {
+      for (const a of items) {
+        const order = data.orders.find(o => String(o.id) === String(a.order_id))
+        const { error } = await supabase.from('payments').insert({
+          customer_id: customer_id || order?.customer_id || null,
+          order_id: a.order_id || null,
+          invoice_no: a.invoice_no || order?.invoice_no || '',
+          payment_date: payment_date || today(),
+          amount: Number(a.amount),
+          method: method || 'Zelle',
+          reference_no: reference_no || '',
+          note: note || '',
+        })
+        if (error) {
+          setNotice(error.message)
+          return { error: error.message }
+        }
+      }
+      for (const a of items) {
+        const order = data.orders.find(o => String(o.id) === String(a.order_id))
+        if (!order) continue
+        const paid = orderPaidTotal(order) + Number(a.amount)
+        const total = Number(order.total || 0)
+        const status = paid <= 0 ? 'Unpaid' : paid >= total - 0.001 ? 'Paid' : 'Partial'
+        const { error } = await supabase.from('orders').update({ payment_status: status }).eq('id', order.id)
+        if (error) {
+          setNotice(error.message)
+          return { error: error.message }
+        }
+      }
+      await loadCloudData()
+    } else {
+      setLocalData(p => {
+        let payments = [...p.payments]
+        const orders = p.orders.map(o => {
+          const itemsForOrder = items.filter(a => String(a.order_id) === String(o.id))
+          if (!itemsForOrder.length) return o
+          for (const a of itemsForOrder) {
+            payments.unshift({
+              id: uid(),
+              created_at: new Date().toISOString(),
+              customer_id: customer_id || o.customer_id || null,
+              order_id: a.order_id,
+              invoice_no: a.invoice_no || o.invoice_no || '',
+              payment_date: payment_date || today(),
+              amount: Number(a.amount),
+              method: method || 'Zelle',
+              reference_no: reference_no || '',
+              note: note || '',
+            })
+          }
+          const paid = payments
+            .filter(pay => String(pay.order_id) === String(o.id) || pay.invoice_no === o.invoice_no)
+            .reduce((s, pay) => s + Number(pay.amount || 0), 0)
+          const total = Number(o.total || 0)
+          const status = paid <= 0 ? 'Unpaid' : paid >= total - 0.001 ? 'Paid' : 'Partial'
+          return { ...o, payment_status: status }
+        })
+        return { ...p, payments, orders }
+      })
     }
+
+    return { error: '' }
   }
 
   const stats = useMemo(() => calcStats(data), [data])
@@ -463,7 +523,7 @@ function App() {
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
-        {page === 'Payments' && <Payments data={data} recordPayment={recordPayment} deleteRow={deleteRow} onNavigate={openRecord}
+        {page === 'Payments' && <Payments data={data} recordMultiPayment={recordMultiPayment} deleteRow={deleteRow} onNavigate={openRecord}
           selectedPaymentId={selectedRecord.page === 'Payments' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Reports' && <Reports data={data} stats={stats} />}
         {page === 'Settings' && <Settings data={data} reload={loadCloudData} profile={profile} setProfile={setProfile} session={session} />}
@@ -1348,13 +1408,16 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
   )
 }
 
-function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentId, clearSelection }) {
-  const blank = { customer_id: '', order_id: '', invoice_no: '', payment_date: today(), amount: '', method: 'Zelle', reference_no: '', note: '' }
-  const [f, setF] = useState(blank)
+function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPaymentId, clearSelection }) {
+  const receiveBlank = {
+    customer_id: '', payment_date: today(), total_amount: '', method: 'Zelle', reference_no: '', note: '',
+  }
+  const [receive, setReceive] = useState(receiveBlank)
+  const [selectedIds, setSelectedIds] = useState([])
+  const [applyAmounts, setApplyAmounts] = useState({})
+  const [receiveError, setReceiveError] = useState('')
   const [highlightId, setHighlightId] = useState('')
   const [invoiceFilter, setInvoiceFilter] = useState('All')
-  const [showPaidInvoices, setShowPaidInvoices] = useState(false)
-  const [amountError, setAmountError] = useState('')
 
   function orderCustomerName(order) {
     if (order?.customer_name) return order.customer_name
@@ -1434,10 +1497,6 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
     return invoiceSortDateKey(a).localeCompare(invoiceSortDateKey(b))
   }
 
-  function invoiceOptionLabel(order) {
-    return `${order.invoice_no || '—'} - ${order.customer_name} - Balance ${money(order.balance)}`
-  }
-
   const invoiceRows = data.orders.map(order => {
     const paid = orderPaidAmount(order)
     const total = Number(order.total || 0)
@@ -1468,37 +1527,160 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
     return o.payment_status === 'Unpaid' || o.payment_status === 'Partial'
   })
 
-  const payableInvoices = invoiceRows
-    .filter(o => o.balance > 0 && (o.payment_status === 'Unpaid' || o.payment_status === 'Partial'))
-    .sort(comparePayableInvoices)
+  const customerOpenInvoices = receive.customer_id
+    ? invoiceRows
+      .filter(o =>
+        String(o.customer_id) === String(receive.customer_id)
+        && o.balance > 0
+        && (o.payment_status === 'Unpaid' || o.payment_status === 'Partial')
+      )
+      .sort(comparePayableInvoices)
+    : []
 
-  const paidInvoices = invoiceRows
-    .filter(o => o.payment_status === 'Paid' || o.balance <= 0)
-    .sort(comparePayableInvoices)
+  const customerPayments = receive.customer_id
+    ? (() => {
+      const customerOrders = data.orders.filter(o => String(o.customer_id) === String(receive.customer_id))
+      const orderIds = new Set(customerOrders.map(o => String(o.id)))
+      const invoiceNos = new Set(customerOrders.map(o => o.invoice_no).filter(Boolean))
+      return data.payments.filter(p =>
+        String(p.customer_id) === String(receive.customer_id)
+        || orderIds.has(String(p.order_id))
+        || (p.invoice_no && invoiceNos.has(p.invoice_no))
+      )
+    })()
+    : []
 
-  const selectedInvoice = invoiceRows.find(o => String(o.id) === String(f.order_id))
+  const customerSummary = {
+    openBalance: customerOpenInvoices.reduce((s, o) => s + o.balance, 0),
+    openCount: customerOpenInvoices.length,
+    oldestInvoice: customerOpenInvoices.length
+      ? customerOpenInvoices.reduce((min, o) => {
+        const key = invoiceSortDateKey(o)
+        return key < min ? key : min
+      }, '9999-99-99')
+      : '',
+    lastPayment: customerPayments.length
+      ? customerPayments.reduce((latest, p) => {
+        const key = localDateKey(p.payment_date)
+        return key > latest ? key : latest
+      }, '')
+      : '',
+  }
 
-  function validateAmount(orderId, amountValue) {
-    if (!orderId) {
-      setAmountError('')
-      return true
+  const selectedBalanceTotal = selectedIds.reduce((s, id) => {
+    const row = customerOpenInvoices.find(o => String(o.id) === String(id))
+    return s + (row?.balance || 0)
+  }, 0)
+
+  const totalApplied = selectedIds.reduce((s, id) => s + Number(applyAmounts[id] || 0), 0)
+  const totalPaymentAmount = Number(receive.total_amount || 0)
+  const remainingUnapplied = totalPaymentAmount - totalApplied
+
+  function resetReceiveSelection() {
+    setSelectedIds([])
+    setApplyAmounts({})
+    setReceiveError('')
+  }
+
+  function selectCustomer(id) {
+    setReceive({ ...receiveBlank, customer_id: id, payment_date: today(), method: receive.method || 'Zelle' })
+    resetReceiveSelection()
+  }
+
+  function toggleInvoice(id, checked) {
+    const row = customerOpenInvoices.find(o => String(o.id) === String(id))
+    if (!row) return
+    if (checked) {
+      setSelectedIds(prev => [...prev.filter(x => String(x) !== String(id)), String(id)])
+      setApplyAmounts(prev => ({ ...prev, [id]: String(row.balance) }))
+    } else {
+      setSelectedIds(prev => prev.filter(x => String(x) !== String(id)))
+      setApplyAmounts(prev => {
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
     }
-    const row = invoiceRows.find(o => String(o.id) === String(orderId))
-    if (!row) {
-      setAmountError('')
-      return true
+    setReceiveError('')
+  }
+
+  function updateApplyAmount(id, value) {
+    setApplyAmounts(prev => ({ ...prev, [id]: value }))
+    setReceiveError('')
+  }
+
+  function autoApplyPayment() {
+    const payment = Number(receive.total_amount || 0)
+    if (payment <= 0) {
+      setReceiveError('Enter a Total Payment Amount before using Auto Apply.')
+      return
     }
-    const amountNum = Number(amountValue || 0)
-    if (amountNum <= 0) {
-      setAmountError('Enter an amount greater than zero.')
-      return false
+    let remaining = payment
+    const sorted = customerOpenInvoices.filter(o => selectedIds.includes(String(o.id)))
+    const next = { ...applyAmounts }
+    for (const inv of sorted) {
+      if (remaining <= 0) {
+        next[inv.id] = '0'
+        continue
+      }
+      const apply = Math.min(remaining, inv.balance)
+      next[inv.id] = String(Number(apply.toFixed(2)))
+      remaining -= apply
     }
-    if (amountNum > row.balance + 0.001) {
-      setAmountError(`Amount cannot exceed remaining balance of ${money(row.balance)}.`)
-      return false
+    setApplyAmounts(next)
+    setReceiveError('')
+  }
+
+  function validateReceivePayment() {
+    if (!receive.customer_id) return 'Select a customer.'
+    if (totalPaymentAmount <= 0) return 'Total Payment Amount must be greater than zero.'
+    if (!selectedIds.length) return 'Select at least one invoice.'
+    const active = selectedIds.filter(id => Number(applyAmounts[id] || 0) > 0)
+    if (!active.length) return 'Apply at least one payment amount.'
+    if (totalApplied > totalPaymentAmount + 0.001) {
+      return 'Sum of Apply Amounts cannot exceed Total Payment Amount.'
     }
-    setAmountError('')
-    return true
+    for (const id of selectedIds) {
+      const row = customerOpenInvoices.find(o => String(o.id) === String(id))
+      const apply = Number(applyAmounts[id] || 0)
+      if (apply < 0) return `Apply Amount for ${row?.invoice_no || 'invoice'} cannot be negative.`
+      if (row && apply > row.balance + 0.001) {
+        return `Apply Amount for ${row.invoice_no || 'invoice'} cannot exceed balance of ${money(row.balance)}.`
+      }
+    }
+    return ''
+  }
+
+  async function saveReceivePayment() {
+    const err = validateReceivePayment()
+    if (err) {
+      setReceiveError(err)
+      return
+    }
+    const allocations = selectedIds
+      .map(id => {
+        const row = customerOpenInvoices.find(o => String(o.id) === String(id))
+        return {
+          order_id: id,
+          invoice_no: row?.invoice_no || '',
+          amount: Number(applyAmounts[id] || 0),
+        }
+      })
+      .filter(a => a.amount > 0)
+    const result = await recordMultiPayment({
+      customer_id: receive.customer_id,
+      payment_date: receive.payment_date,
+      method: receive.method,
+      reference_no: receive.reference_no,
+      note: receive.note,
+      allocations,
+    })
+    if (result?.error) {
+      setReceiveError(result.error)
+      return
+    }
+    setReceive(receiveBlank)
+    resetReceiveSelection()
   }
 
   const paymentRows = data.payments.map(p => ({ ...p, customer_name: paymentCustomerName(p) }))
@@ -1507,17 +1689,9 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
     if (!selectedPaymentId) return
     setHighlightId(selectedPaymentId)
     const payment = data.payments.find(p => String(p.id) === String(selectedPaymentId))
-    if (payment) {
-      setF({
-        customer_id: payment.customer_id || '',
-        order_id: payment.order_id || '',
-        invoice_no: payment.invoice_no || '',
-        payment_date: payment.payment_date || today(),
-        amount: payment.amount ?? '',
-        method: payment.method || 'Zelle',
-        reference_no: payment.reference_no || '',
-        note: payment.note || '',
-      })
+    if (payment?.customer_id) {
+      setReceive({ ...receiveBlank, customer_id: payment.customer_id, payment_date: payment.payment_date || today(), method: payment.method || 'Zelle' })
+      resetReceiveSelection()
     }
     clearSelection?.()
     requestAnimationFrame(() => {
@@ -1525,41 +1699,24 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
     })
   }, [selectedPaymentId, clearSelection, data.payments])
 
-  function chooseOrder(id) {
-    if (!id) {
-      setAmountError('')
-      setF({ ...f, order_id: '', customer_id: '', invoice_no: '', amount: '' })
-      return
-    }
-    const row = invoiceRows.find(x => String(x.id) === String(id))
-    if (!row || row.balance <= 0) return
-    const amount = row.balance > 0 ? String(row.balance) : ''
-    setF({
-      ...f,
-      order_id: id,
-      customer_id: row.customer_id || '',
-      invoice_no: row.invoice_no || '',
-      amount,
-    })
-    setAmountError('')
-  }
-
-  function updateAmount(value) {
-    setF({ ...f, amount: value })
-    validateAmount(f.order_id, value)
-  }
-
-  function savePayment() {
-    if (!f.order_id) return
-    if (!validateAmount(f.order_id, f.amount)) return
-    recordPayment(f)
-    setF(blank)
-    setAmountError('')
-  }
-
   function pickOpenInvoice(order) {
-    chooseOrder(order.id)
-    document.getElementById('add-payment-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setReceive({
+      ...receiveBlank,
+      customer_id: order.customer_id || '',
+      payment_date: today(),
+      total_amount: String(order.balance || ''),
+      method: 'Zelle',
+    })
+    setSelectedIds([String(order.id)])
+    setApplyAmounts({ [order.id]: String(order.balance) })
+    setReceiveError('')
+    document.getElementById('receive-payment-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  function formatSummaryDate(key) {
+    if (!key || key === '9999-99-99') return '—'
+    const [y, m, d] = key.split('-')
+    return `${m}/${d}/${y}`
   }
 
   return (
@@ -1646,53 +1803,121 @@ function Payments({ data, recordPayment, deleteRow, onNavigate, selectedPaymentI
         )}
       </div>
 
-      <div className="panel" id="add-payment-form">
-        <h2>Add Payment</h2>
+      <div className="panel" id="receive-payment-form">
+        <h2>Receive Payment</h2>
         <div className="form-grid payment-form">
-          <div className="payment-invoice-select">
-            <select value={f.order_id} onChange={e => chooseOrder(e.target.value)}>
-              <option value="">Select Invoice</option>
-              {payableInvoices.map(o => (
-                <option key={o.id} value={o.id}>{invoiceOptionLabel(o)}</option>
-              ))}
-              {showPaidInvoices && paidInvoices.map(o => (
-                <option key={`paid-${o.id}`} value={o.id} disabled>
-                  {invoiceOptionLabel(o)} (Paid)
-                </option>
-              ))}
-            </select>
-            <label className="check payment-show-paid">
-              <input
-                type="checkbox"
-                checked={showPaidInvoices}
-                onChange={e => setShowPaidInvoices(e.target.checked)}
-              />
-              Show Paid Invoices
-            </label>
-          </div>
-          <input type="date" value={f.payment_date} onChange={e => setF({ ...f, payment_date: e.target.value })} />
-          <div className="payment-amount-field">
-            <input
-              placeholder="Amount"
-              type="number"
-              min="0"
-              step="0.01"
-              max={selectedInvoice ? selectedInvoice.balance : undefined}
-              value={f.amount}
-              onChange={e => updateAmount(e.target.value)}
-            />
-            {amountError && <p className="field-error">{amountError}</p>}
-          </div>
-          <div className="method-boxes">
-            {PAYMENT_METHODS.map(m => (
-              <button key={m} type="button" className={f.method === m ? 'chosen' : ''} onClick={() => setF({ ...f, method: m })}>{m}</button>
+          <select value={receive.customer_id} onChange={e => selectCustomer(e.target.value)}>
+            <option value="">Select Customer</option>
+            {data.customers.map(c => (
+              <option key={c.id} value={c.id}>{c.company || c.name}</option>
             ))}
-          </div>
-          <input placeholder="Reference / Check #" value={f.reference_no} onChange={e => setF({ ...f, reference_no: e.target.value })} />
-          <input placeholder="Memo" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
-          <button type="button" onClick={savePayment} disabled={!f.order_id || Boolean(amountError)}>Save Payment</button>
+          </select>
         </div>
-        <p className="hint">Payment automatically updates invoice status (Paid / Partial / Unpaid) and reduces customer balance.</p>
+
+        {receive.customer_id && (
+          <>
+            <div className="mini-cards receive-summary">
+              <Card t="Open Balance" v={money(customerSummary.openBalance)} cls={customerSummary.openBalance > 0 ? 'card-warn' : ''} />
+              <Card t="Open Invoices" v={customerSummary.openCount} />
+              <Card t="Oldest Invoice" v={formatSummaryDate(customerSummary.oldestInvoice)} />
+              <Card t="Last Payment" v={formatSummaryDate(customerSummary.lastPayment)} />
+            </div>
+
+            {customerOpenInvoices.length === 0 ? (
+              <p className="hint">No open invoices for this customer.</p>
+            ) : (
+              <div className="table-wrap receive-invoices-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Select</th>
+                      <th>Invoice Date</th>
+                      <th>Invoice No</th>
+                      <th>Original Total</th>
+                      <th>Amount Paid</th>
+                      <th>Balance Due</th>
+                      <th>Apply Amount</th>
+                      <th>Payment Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerOpenInvoices.map(o => {
+                      const selected = selectedIds.includes(String(o.id))
+                      return (
+                        <tr key={o.id} className={selected ? 'sel' : ''}>
+                          <td>
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={e => toggleInvoice(o.id, e.target.checked)}
+                            />
+                          </td>
+                          <td>{o.invoice_date}</td>
+                          <td>{o.invoice_no || '—'}</td>
+                          <td>{money(o.total)}</td>
+                          <td>{money(o.paid)}</td>
+                          <td>{money(o.balance)}</td>
+                          <td>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              max={o.balance}
+                              disabled={!selected}
+                              value={selected ? (applyAmounts[o.id] ?? '') : ''}
+                              onChange={e => updateApplyAmount(o.id, e.target.value)}
+                              className="apply-amount-input"
+                            />
+                          </td>
+                          <td>
+                            <span className={`status-badge ${paymentBadgeClass(o.payment_status)}`}>
+                              {o.payment_status}
+                            </span>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className="receive-totals">
+              <p><b>Selected Balance Total:</b> {money(selectedBalanceTotal)}</p>
+              <p><b>Total Applied:</b> {money(totalApplied)}</p>
+              <p><b>Remaining Unapplied:</b> {money(remainingUnapplied)}</p>
+            </div>
+
+            <div className="form-grid payment-form receive-payment-fields">
+              <label className="order-field">
+                Total Payment Amount
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="Total Payment Amount"
+                  value={receive.total_amount}
+                  onChange={e => { setReceive({ ...receive, total_amount: e.target.value }); setReceiveError('') }}
+                />
+              </label>
+              <button type="button" className="soft auto-apply-btn" onClick={autoApplyPayment}>Auto Apply</button>
+              <input type="date" value={receive.payment_date} onChange={e => setReceive({ ...receive, payment_date: e.target.value })} />
+              <div className="method-boxes">
+                {PAYMENT_METHODS.map(m => (
+                  <button key={m} type="button" className={receive.method === m ? 'chosen' : ''} onClick={() => setReceive({ ...receive, method: m })}>{m}</button>
+                ))}
+              </div>
+              <input placeholder="Reference / Check #" value={receive.reference_no} onChange={e => setReceive({ ...receive, reference_no: e.target.value })} />
+              <input placeholder="Memo" value={receive.note} onChange={e => setReceive({ ...receive, note: e.target.value })} />
+              <button type="button" onClick={saveReceivePayment}>Save Payment</button>
+            </div>
+            {receiveError && <p className="field-error">{receiveError}</p>}
+            <p className="hint">Auto Apply pays oldest selected invoices first. Each invoice receives its own payment record.</p>
+          </>
+        )}
+      </div>
+
+      <div className="panel">
         <h2>Payment History</h2>
         <Table rows={paymentRows} cols={['payment_date', 'customer_name', 'invoice_no', 'amount', 'method', 'reference_no', 'note']}
           highlightId={highlightId} rowIdPrefix="payment-row-" onDelete={id => deleteRow('payments', id)} />

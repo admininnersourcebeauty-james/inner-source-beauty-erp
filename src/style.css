@@ -87,6 +87,14 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .payment-amount-field{display:flex;flex-direction:column;gap:4px}
 .field-error{color:#9b1c1c;font-size:13px;font-weight:700;margin:0}
 .payment-form button[disabled]{opacity:.55;cursor:not-allowed}
+.receive-summary{margin:16px 0}
+.receive-invoices-table{margin:16px 0}
+.receive-invoices-table .apply-amount-input{min-width:100px;padding:8px 10px}
+.receive-invoices-table input[type=checkbox]{width:auto}
+.receive-totals{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:14px 18px;margin:16px 0}
+.receive-totals p{margin:6px 0;font-size:14px}
+.receive-payment-fields{align-items:end}
+.auto-apply-btn{align-self:flex-end}
 
 /* Stock level colors */
 .stock-badge{padding:4px 10px;border-radius:8px;font-weight:700;font-size:13px;display:inline-block}

@@ -185,6 +185,26 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .report-row h3{margin:0 0 8px}
 .settings-row{margin:16px 0}
 .settings-row label{display:flex;flex-direction:column;gap:6px;font-weight:700;max-width:240px}
+.settings-page{display:flex;flex-direction:column;gap:18px}
+.backup-restore-panel .backup-warning{background:#fff8e6;border:1px solid #f0d58c;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.5;margin:12px 0}
+.backup-section{margin:20px 0;padding-top:8px;border-top:1px solid #e3e8f0}
+.backup-section h3{margin:0 0 12px;font-size:15px}
+.backup-export-buttons{display:flex;flex-wrap:wrap;gap:10px}
+.backup-status{margin:12px 0}
+.restore-controls{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:12px}
+.restore-file-label{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:700;color:#52607a}
+.restore-file-label input[type=file]{font-weight:400}
+.restore-preview{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-top:12px}
+.restore-preview h4{margin:0 0 10px}
+.restore-preview p{margin:6px 0;font-size:14px}
+.restore-mode{display:flex;flex-direction:column;gap:8px;margin:14px 0}
+.restore-mode label{font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px}
+.restore-mode input{width:auto}
+.restore-validation-errors{background:#fff5f5;border:1px solid #f5c6cb;border-radius:10px;padding:12px;margin:12px 0}
+.restore-validation-errors ul{margin:8px 0 0;padding-left:20px;font-size:13px}
+.restore-confirm{margin:14px 0}
+.restore-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}
+.restore-result{background:#eef4ff;border:1px solid #c9d2df;border-radius:10px;padding:12px;margin-top:12px}
 
 .link-cell{background:none;border:none;padding:0;color:#08142b;font-weight:700;text-decoration:underline;cursor:pointer;font:inherit}
 .link-cell:hover{color:#24324b}

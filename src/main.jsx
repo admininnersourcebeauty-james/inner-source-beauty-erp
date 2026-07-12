@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { supabase, hasSupabaseConfig } from './supabaseClient.js'
+import {
+  BACKUP_TABLES, createFullBackupZip, downloadCsv, readBackupZip,
+  saveLastBackupTime, getLastBackupTime, validateRestoreRows, executeRestore,
+} from './backupRestore.js'
 import './style.css'
 
 const TABLES = ['customers', 'inventory', 'orders', 'payments']
@@ -458,6 +462,66 @@ function App() {
     return { error: '' }
   }
 
+  async function fetchProfilesForBackup() {
+    if (hasSupabaseConfig && session) {
+      const { data: rows, error } = await supabase.from('profiles').select('id, email, role, created_at')
+      if (error) throw new Error(error.message)
+      return rows || []
+    }
+    return [{
+      id: profile.id || session?.user?.id || '',
+      email: profile.email || session?.user?.email || '',
+      role: profile.role || 'Admin',
+    }]
+  }
+
+  async function restoreBackupData(parsed, mode, onProgress) {
+    let localState = null
+
+    const result = await executeRestore({
+      parsed,
+      mode,
+      existingData: data,
+      onProgress,
+      persistTable: async (table, row, { exists, mode: rowMode }) => {
+        if (hasSupabaseConfig && session) {
+          if (rowMode === 'insert_missing' && exists) return 'skipped'
+          const { error } = await supabase.from(table).upsert(row, { onConflict: 'id' })
+          if (error) throw new Error(error.message)
+          return exists ? 'updated' : 'inserted'
+        }
+        if (!localState) {
+          localState = {
+            customers: [...(data.customers || [])],
+            inventory: [...(data.inventory || [])],
+            orders: [...(data.orders || [])],
+            payments: [...(data.payments || [])],
+          }
+        }
+        if (rowMode === 'insert_missing' && exists) return 'skipped'
+        const idx = localState[table].findIndex(x => String(x.id) === String(row.id))
+        if (idx >= 0) {
+          localState[table][idx] = { ...localState[table][idx], ...row }
+          return 'updated'
+        }
+        localState[table].push(row)
+        return 'inserted'
+      },
+    })
+
+    const hadChanges = (result.stats?.inserted || 0) + (result.stats?.updated || 0) > 0
+
+    if (result.ok || hadChanges) {
+      if (hasSupabaseConfig && session) {
+        await loadCloudData()
+      } else if (localState) {
+        setLocalData(p => ({ ...p, ...localState }))
+      }
+    }
+
+    return result
+  }
+
   const stats = useMemo(() => calcStats(data), [data])
   const searchResults = useMemo(() => globalSearch ? runGlobalSearch(data, globalSearch) : null, [data, globalSearch])
 
@@ -526,7 +590,8 @@ function App() {
         {page === 'Payments' && <Payments data={data} recordMultiPayment={recordMultiPayment} deleteRow={deleteRow} onNavigate={openRecord}
           selectedPaymentId={selectedRecord.page === 'Payments' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Reports' && <Reports data={data} stats={stats} />}
-        {page === 'Settings' && <Settings data={data} reload={loadCloudData} profile={profile} setProfile={setProfile} session={session} />}
+        {page === 'Settings' && <Settings data={data} reload={loadCloudData} profile={profile} setProfile={setProfile} session={session}
+          fetchProfilesForBackup={fetchProfilesForBackup} restoreBackupData={restoreBackupData} setLocalData={setLocalData} />}
       </main>
     </div>
   )
@@ -1973,13 +2038,22 @@ function Reports({ data, stats }) {
   )
 }
 
-function Settings({ data, reload, profile, setProfile, session }) {
-  function backup() {
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = 'inner-source-beauty-backup.json'
-    a.click()
+function Settings({ data, reload, profile, setProfile, session, fetchProfilesForBackup, restoreBackupData, setLocalData }) {
+  const isAdmin = (profile.role || 'Admin') === 'Admin'
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState('')
+  const [statusError, setStatusError] = useState(false)
+  const [lastBackup, setLastBackup] = useState(getLastBackupTime())
+  const [restoreFile, setRestoreFile] = useState(null)
+  const [restorePreview, setRestorePreview] = useState(null)
+  const [restoreMode, setRestoreMode] = useState('upsert')
+  const [restoreConfirm, setRestoreConfirm] = useState(false)
+  const [restoreErrors, setRestoreErrors] = useState([])
+  const [restoreStats, setRestoreStats] = useState(null)
+
+  function setStatusMsg(msg, isError = false) {
+    setStatus(msg)
+    setStatusError(isError)
   }
 
   async function updateRole(newRole) {
@@ -1988,20 +2062,227 @@ function Settings({ data, reload, profile, setProfile, session }) {
     setProfile({ ...profile, role: newRole })
   }
 
+  async function runBackupAll() {
+    setBusy(true)
+    setRestoreStats(null)
+    try {
+      const profiles = await fetchProfilesForBackup()
+      const { blob, filename } = await createFullBackupZip({
+        data,
+        profiles,
+        exportedBy: session?.user?.email || profile.email || '',
+        onProgress: setStatusMsg,
+      })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = filename
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+      saveLastBackupTime()
+      setLastBackup(getLastBackupTime())
+      setStatusError(false)
+    } catch (err) {
+      setStatusMsg(err.message || 'Backup failed.', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function exportTable(table) {
+    setBusy(true)
+    try {
+      downloadCsv(`${table}.csv`, data[table] || [])
+      setStatusMsg(`Exported ${table}.csv`)
+      setStatusError(false)
+    } catch (err) {
+      setStatusMsg(err.message || 'Export failed.', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function previewRestore() {
+    if (!restoreFile) {
+      setStatusMsg('Choose a backup ZIP file first.', true)
+      return
+    }
+    setBusy(true)
+    setRestoreStats(null)
+    setRestoreErrors([])
+    try {
+      const parsed = await readBackupZip(restoreFile)
+      const errors = validateRestoreRows(parsed, data)
+      setRestorePreview(parsed)
+      setRestoreErrors(errors)
+      setStatusMsg(errors.length ? 'Preview loaded — validation issues found.' : 'Preview loaded — ready to restore.')
+      setStatusError(errors.length > 0)
+    } catch (err) {
+      setRestorePreview(null)
+      setStatusMsg(err.message || 'Could not read backup file.', true)
+      setStatusError(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function runRestore() {
+    if (!restorePreview) {
+      setStatusMsg('Preview the backup before restoring.', true)
+      return
+    }
+    if (!restoreConfirm) {
+      setStatusMsg('Check the confirmation box before restoring.', true)
+      return
+    }
+    if (restoreErrors.length) {
+      setStatusMsg('Fix validation errors before restoring.', true)
+      return
+    }
+    if (!confirm('Restore this backup now?')) return
+
+    setBusy(true)
+    setRestoreStats(null)
+    try {
+      const result = await restoreBackupData(restorePreview, restoreMode, setStatusMsg)
+      if (!result.ok) {
+        setRestoreErrors(result.errors || [])
+        setRestoreStats(result.stats)
+        setStatusMsg(`Restore finished with errors. Inserted: ${result.stats?.inserted ?? 0}, Updated: ${result.stats?.updated ?? 0}, Failed: ${result.stats?.failed ?? 0}`, true)
+        return
+      }
+      setRestoreStats(result.stats)
+      setRestorePreview(null)
+      setRestoreFile(null)
+      setRestoreConfirm(false)
+      setRestoreErrors([])
+      setStatusMsg(`Restore complete. Inserted: ${result.stats.inserted}, Updated: ${result.stats.updated}, Failed: ${result.stats.failed}`)
+      setStatusError(result.stats.failed > 0)
+    } catch (err) {
+      setStatusMsg(err.message || 'Restore failed.', true)
+      setStatusError(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function formatBackupTime(iso) {
+    if (!iso) return 'Never'
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    return d.toLocaleString()
+  }
+
   return (
-    <div className="panel">
-      <h2>Settings</h2>
-      <p>INNER SOURCE BEAUTY ERP v2 — Supabase Cloud</p>
-      <div className="settings-row">
-        <label>Your Role
-          <select value={profile.role || 'Admin'} onChange={e => updateRole(e.target.value)}>
-            {ROLES.map(r => <option key={r}>{r}</option>)}
-          </select>
-        </label>
+    <div className="settings-page">
+      <div className="panel">
+        <h2>Settings</h2>
+        <p>INNER SOURCE BEAUTY ERP v2 — Supabase Cloud</p>
+        <div className="settings-row">
+          <label>Your Role
+            <select value={profile.role || 'Admin'} onChange={e => updateRole(e.target.value)}>
+              {ROLES.map(r => <option key={r}>{r}</option>)}
+            </select>
+          </label>
+        </div>
+        <p className="hint">Admin: all features · Staff: orders &amp; customers · Warehouse: inventory only</p>
+        <button type="button" onClick={reload} disabled={busy}>Reload Cloud Data</button>
       </div>
-      <p className="hint">Admin: all features · Staff: orders &amp; customers · Warehouse: inventory only</p>
-      <button onClick={backup}>Download Backup JSON</button>
-      <button onClick={reload}>Reload Cloud Data</button>
+
+      {isAdmin && (
+        <div className="panel backup-restore-panel">
+          <h2>Backup &amp; Restore</h2>
+          <p className="backup-warning">
+            Backups contain confidential business data. Store ZIP files securely. Files are downloaded to your device only — not saved on the server.
+          </p>
+          <p className="hint">Last Local Backup: <strong>{formatBackupTime(lastBackup)}</strong> (stored in this browser only)</p>
+
+          {status && <p className={statusError ? 'field-error backup-status' : 'hint backup-status'}>{status}</p>}
+
+          <div className="backup-section">
+            <h3>Database Backup</h3>
+            <button type="button" onClick={runBackupAll} disabled={busy}>Backup Everything</button>
+          </div>
+
+          <div className="backup-section">
+            <h3>Individual Exports</h3>
+            <div className="backup-export-buttons">
+              {BACKUP_TABLES.map(t => (
+                <button key={t} type="button" className="soft" onClick={() => exportTable(t)} disabled={busy}>
+                  Export {t.charAt(0).toUpperCase() + t.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="backup-section">
+            <h3>Restore Backup</h3>
+            <div className="restore-controls">
+              <label className="restore-file-label">
+                Choose ZIP File
+                <input
+                  type="file"
+                  accept=".zip,application/zip"
+                  disabled={busy}
+                  onChange={e => {
+                    setRestoreFile(e.target.files?.[0] || null)
+                    setRestorePreview(null)
+                    setRestoreErrors([])
+                    setRestoreStats(null)
+                    setStatusMsg('')
+                  }}
+                />
+              </label>
+              <button type="button" className="soft" onClick={previewRestore} disabled={busy || !restoreFile}>Preview Backup</button>
+            </div>
+
+            {restorePreview && (
+              <div className="restore-preview">
+                <h4>Backup Preview</h4>
+                <p><b>Backup Date:</b> {restorePreview.manifest?.exported_at ? formatBackupTime(restorePreview.manifest.exported_at) : '—'}</p>
+                <p><b>Customers rows:</b> {restorePreview.customers?.length ?? 0}</p>
+                <p><b>Inventory rows:</b> {restorePreview.inventory?.length ?? 0}</p>
+                <p><b>Orders rows:</b> {restorePreview.orders?.length ?? 0}</p>
+                <p><b>Payments rows:</b> {restorePreview.payments?.length ?? 0}</p>
+                <p><b>Exported by:</b> {restorePreview.manifest?.exported_by || '—'}</p>
+
+                <div className="restore-mode">
+                  <label><input type="radio" name="restoreMode" value="upsert" checked={restoreMode === 'upsert'} onChange={() => setRestoreMode('upsert')} disabled={busy} /> Safe Upsert (recommended)</label>
+                  <label><input type="radio" name="restoreMode" value="insert_missing" checked={restoreMode === 'insert_missing'} onChange={() => setRestoreMode('insert_missing')} disabled={busy} /> Insert Missing Only</label>
+                </div>
+
+                {restoreErrors.length > 0 && (
+                  <div className="restore-validation-errors">
+                    <h4>Validation Issues</h4>
+                    <ul>
+                      {restoreErrors.slice(0, 20).map((e, i) => (
+                        <li key={i}>{e.table} row {e.rowNum}: {e.reason}</li>
+                      ))}
+                    </ul>
+                    {restoreErrors.length > 20 && <p className="hint">…and {restoreErrors.length - 20} more issues.</p>}
+                  </div>
+                )}
+
+                <label className="check restore-confirm">
+                  <input type="checkbox" checked={restoreConfirm} onChange={e => setRestoreConfirm(e.target.checked)} disabled={busy || restoreErrors.length > 0} />
+                  I understand that restoring data may update existing records.
+                </label>
+
+                <div className="restore-actions">
+                  <button type="button" className="soft" onClick={() => { setRestorePreview(null); setRestoreFile(null); setRestoreConfirm(false); setRestoreErrors([]) }} disabled={busy}>Cancel</button>
+                  <button type="button" onClick={runRestore} disabled={busy || !restoreConfirm || restoreErrors.length > 0}>Restore Backup</button>
+                </div>
+              </div>
+            )}
+
+            {restoreStats && (
+              <div className="restore-result">
+                <p><b>Restore complete</b></p>
+                <p>Inserted: {restoreStats.inserted} · Updated: {restoreStats.updated} · Failed: {restoreStats.failed}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

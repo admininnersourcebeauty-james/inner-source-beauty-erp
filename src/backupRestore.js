@@ -1,0 +1,335 @@
+import JSZip from 'jszip'
+
+export const BACKUP_TABLES = ['customers', 'inventory', 'orders', 'payments']
+export const BACKUP_VERSION = 1
+export const APP_NAME = 'INNER SOURCE BEAUTY ERP'
+export const PROJECT_VERSION = '2'
+export const LAST_BACKUP_KEY = 'isb_last_backup_at'
+
+const PROFILE_SAFE_KEYS = ['id', 'email', 'role', 'created_at']
+const SENSITIVE_KEY = /password|token|secret|api_key|service_role|anon_key|env/i
+
+const TABLE_REQUIRED = {
+  customers: ['id'],
+  inventory: ['id'],
+  orders: ['id', 'invoice_no'],
+  payments: ['id'],
+}
+
+const TABLE_NUMERIC = {
+  customers: [],
+  inventory: ['qty', 'buying_price', 'selling_price', 'cost', 'price', 'retail', 'low_stock', 'shipping_cost'],
+  orders: ['customer_id', 'inventory_id', 'qty', 'price', 'buying_price', 'profit', 'shipping', 'discount', 'total', 'shipping_cost'],
+  payments: ['customer_id', 'order_id', 'amount'],
+}
+
+const TABLE_DATES = {
+  customers: ['created_at'],
+  inventory: ['created_at', 'expiration_date'],
+  orders: ['created_at', 'due_date', 'order_date'],
+  payments: ['created_at', 'payment_date'],
+}
+
+export function backupZipFilename() {
+  const d = new Date()
+  const pad = n => String(n).padStart(2, '0')
+  return `INNER_SOURCE_BEAUTY_ERP_Backup_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.zip`
+}
+
+export function csvCell(value) {
+  if (value == null) return ''
+  const s = String(value)
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+export function collectHeaders(rows) {
+  const keys = new Set()
+  for (const row of rows) Object.keys(row || {}).forEach(k => keys.add(k))
+  const list = [...keys]
+  list.sort((a, b) => {
+    if (a === 'id') return -1
+    if (b === 'id') return 1
+    if (a === 'created_at') return -1
+    if (b === 'created_at') return 1
+    return a.localeCompare(b)
+  })
+  return list
+}
+
+export function rowsToCsv(rows) {
+  if (!rows?.length) {
+    const headers = ['id']
+    return `\uFEFF${headers.join(',')}\r\n`
+  }
+  const headers = collectHeaders(rows)
+  const lines = [headers.map(csvCell).join(',')]
+  for (const row of rows) {
+    lines.push(headers.map(h => csvCell(row[h])).join(','))
+  }
+  return `\uFEFF${lines.join('\r\n')}`
+}
+
+export function parseCsvLine(line) {
+  const out = []
+  let cur = ''
+  let inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++ }
+        else inQuotes = false
+      } else cur += ch
+    } else if (ch === '"') inQuotes = true
+    else if (ch === ',') { out.push(cur); cur = '' }
+    else cur += ch
+  }
+  out.push(cur)
+  return out
+}
+
+export function parseCsv(text) {
+  const src = String(text || '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  if (!src.trim()) return []
+  const lines = []
+  let cur = ''
+  let inQuotes = false
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') { cur += '"'; i++ }
+        else inQuotes = false
+      } else cur += ch
+    } else if (ch === '"') inQuotes = true
+    else if (ch === '\n') { lines.push(cur); cur = '' }
+    else cur += ch
+  }
+  if (cur.length || src.endsWith('\n')) lines.push(cur)
+  if (!lines.length) return []
+  const headers = parseCsvLine(lines[0])
+  const rows = []
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue
+    const cells = parseCsvLine(lines[i])
+    const row = {}
+    headers.forEach((h, idx) => { row[h] = cells[idx] ?? '' })
+    rows.push(row)
+  }
+  return rows
+}
+
+export function sanitizeProfiles(rows) {
+  return (rows || []).map(row => {
+    const out = {}
+    for (const k of PROFILE_SAFE_KEYS) {
+      if (row[k] != null && row[k] !== '' && !SENSITIVE_KEY.test(k)) out[k] = row[k]
+    }
+    return out
+  })
+}
+
+export function buildManifest({ exportedBy, rowCounts }) {
+  return {
+    app_name: APP_NAME,
+    backup_version: BACKUP_VERSION,
+    exported_at: new Date().toISOString(),
+    exported_by: exportedBy || '',
+    tables: [...BACKUP_TABLES],
+    row_counts: rowCounts,
+    project_version: PROJECT_VERSION,
+  }
+}
+
+function downloadBlob(blob, filename) {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+}
+
+export function downloadCsv(filename, rows) {
+  const blob = new Blob([rowsToCsv(rows)], { type: 'text/csv;charset=utf-8' })
+  downloadBlob(blob, filename)
+}
+
+export async function createFullBackupZip({ data, profiles, exportedBy, onProgress }) {
+  onProgress?.('Preparing backup...')
+  const rowCounts = {}
+  const zip = new JSZip()
+  for (const table of BACKUP_TABLES) {
+    onProgress?.(`Exporting ${table}...`)
+    const rows = data[table] || []
+    rowCounts[table] = rows.length
+    zip.file(`${table}.csv`, rowsToCsv(rows))
+  }
+  const safeProfiles = sanitizeProfiles(profiles)
+  zip.file('profiles_reference_only.csv', rowsToCsv(safeProfiles))
+  const manifest = buildManifest({ exportedBy, rowCounts })
+  zip.file('backup_manifest.json', JSON.stringify(manifest, null, 2))
+  onProgress?.('Creating ZIP...')
+  const blob = await zip.generateAsync({ type: 'blob' })
+  onProgress?.('Backup complete.')
+  return { blob, manifest, filename: backupZipFilename() }
+}
+
+export function saveLastBackupTime() {
+  try { localStorage.setItem(LAST_BACKUP_KEY, new Date().toISOString()) } catch { /* ignore */ }
+}
+
+export function getLastBackupTime() {
+  try { return localStorage.getItem(LAST_BACKUP_KEY) || '' } catch { return '' }
+}
+
+function isValidDateValue(v) {
+  if (v == null || v === '') return true
+  const s = String(v).trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return true
+  const d = new Date(s)
+  return !Number.isNaN(d.getTime())
+}
+
+function isValidNumberValue(v) {
+  if (v == null || v === '') return true
+  return Number.isFinite(Number(v))
+}
+
+function isValidId(v) {
+  if (v == null || String(v).trim() === '') return false
+  return Number.isFinite(Number(v)) || String(v).trim().length > 0
+}
+
+export function validateRestoreRows(parsed, existingData = {}) {
+  const errors = []
+  const customerIds = new Set([
+    ...(parsed.customers || []).map(r => String(r.id)),
+    ...(existingData.customers || []).map(r => String(r.id)),
+  ])
+  const inventoryIds = new Set([
+    ...(parsed.inventory || []).map(r => String(r.id)),
+    ...(existingData.inventory || []).map(r => String(r.id)),
+  ])
+  const orderIds = new Set([
+    ...(parsed.orders || []).map(r => String(r.id)),
+    ...(existingData.orders || []).map(r => String(r.id)),
+  ])
+
+  for (const table of BACKUP_TABLES) {
+    const rows = parsed[table] || []
+    const required = TABLE_REQUIRED[table] || ['id']
+    const numeric = TABLE_NUMERIC[table] || []
+    const dates = TABLE_DATES[table] || []
+
+    rows.forEach((row, idx) => {
+      const rowNum = idx + 2
+      for (const col of required) {
+        if (row[col] == null || String(row[col]).trim() === '') {
+          errors.push({ table, rowNum, reason: `Missing required column "${col}".` })
+        }
+      }
+      if (!isValidId(row.id)) {
+        errors.push({ table, rowNum, reason: 'Invalid or missing ID.' })
+      }
+      for (const col of numeric) {
+        if (!isValidNumberValue(row[col])) {
+          errors.push({ table, rowNum, reason: `Invalid numeric value in "${col}": ${row[col]}` })
+        }
+      }
+      for (const col of dates) {
+        if (!isValidDateValue(row[col])) {
+          errors.push({ table, rowNum, reason: `Invalid date value in "${col}": ${row[col]}` })
+        }
+      }
+      if (table === 'orders') {
+        if (row.invoice_no != null && String(row.invoice_no).length > 200) {
+          errors.push({ table, rowNum, reason: 'Invoice number is too long.' })
+        }
+        if (row.customer_id && String(row.customer_id).trim() && !customerIds.has(String(row.customer_id))) {
+          errors.push({ table, rowNum, reason: `customer_id ${row.customer_id} not found in backup or current data.` })
+        }
+        if (row.inventory_id && String(row.inventory_id).trim() && !inventoryIds.has(String(row.inventory_id))) {
+          errors.push({ table, rowNum, reason: `inventory_id ${row.inventory_id} not found in backup or current data.` })
+        }
+      }
+      if (table === 'payments') {
+        if (row.customer_id && String(row.customer_id).trim() && !customerIds.has(String(row.customer_id))) {
+          errors.push({ table, rowNum, reason: `customer_id ${row.customer_id} not found in backup or current data.` })
+        }
+        if (row.order_id && String(row.order_id).trim() && !orderIds.has(String(row.order_id))) {
+          errors.push({ table, rowNum, reason: `order_id ${row.order_id} not found in backup or current data.` })
+        }
+      }
+    })
+  }
+  return errors
+}
+
+export async function readBackupZip(file) {
+  if (!file) throw new Error('No file selected.')
+  const zip = await JSZip.loadAsync(file)
+  const manifestFile = zip.file('backup_manifest.json')
+  if (!manifestFile) throw new Error('Missing backup_manifest.json in ZIP.')
+  const manifest = JSON.parse(await manifestFile.async('string'))
+  if (manifest.backup_version !== BACKUP_VERSION) {
+    throw new Error(`Unsupported backup version: ${manifest.backup_version}`)
+  }
+  for (const table of BACKUP_TABLES) {
+    if (!zip.file(`${table}.csv`)) throw new Error(`Missing required file: ${table}.csv`)
+  }
+  const parsed = { manifest }
+  for (const table of BACKUP_TABLES) {
+    const text = await zip.file(`${table}.csv`).async('string')
+    parsed[table] = parseCsv(text)
+  }
+  return parsed
+}
+
+function coerceRow(row) {
+  const out = { ...row }
+  for (const k of Object.keys(out)) {
+    if (out[k] === '') out[k] = null
+  }
+  return out
+}
+
+export async function executeRestore({ parsed, mode, existingData, persistTable, onProgress }) {
+  const validationErrors = validateRestoreRows(parsed, existingData)
+  if (validationErrors.length) {
+    return { ok: false, errors: validationErrors, stats: { inserted: 0, updated: 0, failed: 0 } }
+  }
+
+  const stats = { inserted: 0, updated: 0, failed: 0 }
+  const rowErrors = []
+  const safeUpsert = mode === 'upsert'
+
+  for (const table of BACKUP_TABLES) {
+    onProgress?.(`Restoring ${table}...`)
+    const rows = (parsed[table] || []).map(coerceRow)
+    const existingIds = new Set((existingData[table] || []).map(r => String(r.id)))
+
+    for (const row of rows) {
+      const id = String(row.id)
+      const exists = existingIds.has(id)
+      if (!safeUpsert && exists) continue
+      try {
+        const result = await persistTable(table, row, { exists, mode: safeUpsert ? 'upsert' : 'insert_missing' })
+        if (result === 'updated') stats.updated++
+        else if (result === 'inserted') stats.inserted++
+        else if (result === 'skipped') { /* no-op */ }
+        else stats.inserted++
+        if (!exists) existingIds.add(id)
+      } catch (err) {
+        stats.failed++
+        rowErrors.push({ table, rowNum: id, reason: err.message || String(err) })
+      }
+    }
+  }
+
+  onProgress?.('Restore complete.')
+  if (rowErrors.length) {
+    return { ok: false, errors: rowErrors, stats }
+  }
+  return { ok: true, errors: [], stats }
+}

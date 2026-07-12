@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { supabase, hasSupabaseConfig } from './supabaseClient.js'
 import {
-  BACKUP_TABLES, createFullBackupZip, downloadCsv, readBackupZip,
+  BACKUP_TABLES, createFullBackupZip, downloadJson, readBackupZip,
   saveLastBackupTime, getLastBackupTime, validateRestoreRows, executeRestore,
 } from './backupRestore.js'
 import './style.css'
@@ -2091,8 +2091,8 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
   function exportTable(table) {
     setBusy(true)
     try {
-      downloadCsv(`${table}.csv`, data[table] || [])
-      setStatusMsg(`Exported ${table}.csv`)
+      downloadJson(`${table}.json`, data[table] || [])
+      setStatusMsg(`Exported ${table}.json`)
       setStatusError(false)
     } catch (err) {
       setStatusMsg(err.message || 'Export failed.', true)
@@ -2100,6 +2100,8 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
       setBusy(false)
     }
   }
+
+  const exportLabels = { customers: 'Customers', inventory: 'Inventory', orders: 'Orders', payments: 'Payments' }
 
   async function previewRestore() {
     if (!restoreFile) {
@@ -2192,9 +2194,9 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
         <div className="panel backup-restore-panel">
           <h2>Backup &amp; Restore</h2>
           <p className="backup-warning">
-            Backups contain confidential business data. Store ZIP files securely. Files are downloaded to your device only — not saved on the server.
+            Backup files contain confidential business data. Store them securely.
           </p>
-          <p className="hint">Last Local Backup: <strong>{formatBackupTime(lastBackup)}</strong> (stored in this browser only)</p>
+          <p className="hint">Last Local Backup: <strong>{formatBackupTime(lastBackup)}</strong></p>
 
           {status && <p className={statusError ? 'field-error backup-status' : 'hint backup-status'}>{status}</p>}
 
@@ -2208,7 +2210,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
             <div className="backup-export-buttons">
               {BACKUP_TABLES.map(t => (
                 <button key={t} type="button" className="soft" onClick={() => exportTable(t)} disabled={busy}>
-                  Export {t.charAt(0).toUpperCase() + t.slice(1)}
+                  {exportLabels[t] || t}
                 </button>
               ))}
             </div>
@@ -2239,10 +2241,10 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
               <div className="restore-preview">
                 <h4>Backup Preview</h4>
                 <p><b>Backup Date:</b> {restorePreview.manifest?.exported_at ? formatBackupTime(restorePreview.manifest.exported_at) : '—'}</p>
-                <p><b>Customers rows:</b> {restorePreview.customers?.length ?? 0}</p>
-                <p><b>Inventory rows:</b> {restorePreview.inventory?.length ?? 0}</p>
-                <p><b>Orders rows:</b> {restorePreview.orders?.length ?? 0}</p>
-                <p><b>Payments rows:</b> {restorePreview.payments?.length ?? 0}</p>
+                <p><b>Customers count:</b> {restorePreview.customers?.length ?? 0}</p>
+                <p><b>Inventory count:</b> {restorePreview.inventory?.length ?? 0}</p>
+                <p><b>Orders count:</b> {restorePreview.orders?.length ?? 0}</p>
+                <p><b>Payments count:</b> {restorePreview.payments?.length ?? 0}</p>
                 <p><b>Exported by:</b> {restorePreview.manifest?.exported_by || '—'}</p>
 
                 <div className="restore-mode">

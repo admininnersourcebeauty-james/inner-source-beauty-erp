@@ -3,7 +3,6 @@ import JSZip from 'jszip'
 export const BACKUP_TABLES = ['customers', 'inventory', 'orders', 'payments']
 export const BACKUP_VERSION = 1
 export const APP_NAME = 'INNER SOURCE BEAUTY ERP'
-export const PROJECT_VERSION = '2'
 export const LAST_BACKUP_KEY = 'isb_last_backup_at'
 
 const PROFILE_SAFE_KEYS = ['id', 'email', 'role', 'created_at']
@@ -36,88 +35,19 @@ export function backupZipFilename() {
   return `INNER_SOURCE_BEAUTY_ERP_Backup_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}.zip`
 }
 
-export function csvCell(value) {
-  if (value == null) return ''
-  const s = String(value)
-  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
-  return s
+export function rowsToJson(rows) {
+  return JSON.stringify(rows || [], null, 2)
 }
 
-export function collectHeaders(rows) {
-  const keys = new Set()
-  for (const row of rows) Object.keys(row || {}).forEach(k => keys.add(k))
-  const list = [...keys]
-  list.sort((a, b) => {
-    if (a === 'id') return -1
-    if (b === 'id') return 1
-    if (a === 'created_at') return -1
-    if (b === 'created_at') return 1
-    return a.localeCompare(b)
-  })
-  return list
-}
-
-export function rowsToCsv(rows) {
-  if (!rows?.length) {
-    const headers = ['id']
-    return `\uFEFF${headers.join(',')}\r\n`
+export function parseJsonTable(text, label) {
+  let parsed
+  try {
+    parsed = JSON.parse(String(text || '[]'))
+  } catch {
+    throw new Error(`Invalid JSON in ${label}.`)
   }
-  const headers = collectHeaders(rows)
-  const lines = [headers.map(csvCell).join(',')]
-  for (const row of rows) {
-    lines.push(headers.map(h => csvCell(row[h])).join(','))
-  }
-  return `\uFEFF${lines.join('\r\n')}`
-}
-
-export function parseCsvLine(line) {
-  const out = []
-  let cur = ''
-  let inQuotes = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
-    if (inQuotes) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') { cur += '"'; i++ }
-        else inQuotes = false
-      } else cur += ch
-    } else if (ch === '"') inQuotes = true
-    else if (ch === ',') { out.push(cur); cur = '' }
-    else cur += ch
-  }
-  out.push(cur)
-  return out
-}
-
-export function parseCsv(text) {
-  const src = String(text || '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  if (!src.trim()) return []
-  const lines = []
-  let cur = ''
-  let inQuotes = false
-  for (let i = 0; i < src.length; i++) {
-    const ch = src[i]
-    if (inQuotes) {
-      if (ch === '"') {
-        if (src[i + 1] === '"') { cur += '"'; i++ }
-        else inQuotes = false
-      } else cur += ch
-    } else if (ch === '"') inQuotes = true
-    else if (ch === '\n') { lines.push(cur); cur = '' }
-    else cur += ch
-  }
-  if (cur.length || src.endsWith('\n')) lines.push(cur)
-  if (!lines.length) return []
-  const headers = parseCsvLine(lines[0])
-  const rows = []
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue
-    const cells = parseCsvLine(lines[i])
-    const row = {}
-    headers.forEach((h, idx) => { row[h] = cells[idx] ?? '' })
-    rows.push(row)
-  }
-  return rows
+  if (!Array.isArray(parsed)) throw new Error(`${label} must be a JSON array.`)
+  return parsed
 }
 
 export function sanitizeProfiles(rows) {
@@ -138,7 +68,6 @@ export function buildManifest({ exportedBy, rowCounts }) {
     exported_by: exportedBy || '',
     tables: [...BACKUP_TABLES],
     row_counts: rowCounts,
-    project_version: PROJECT_VERSION,
   }
 }
 
@@ -150,8 +79,8 @@ function downloadBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000)
 }
 
-export function downloadCsv(filename, rows) {
-  const blob = new Blob([rowsToCsv(rows)], { type: 'text/csv;charset=utf-8' })
+export function downloadJson(filename, rows) {
+  const blob = new Blob([rowsToJson(rows)], { type: 'application/json;charset=utf-8' })
   downloadBlob(blob, filename)
 }
 
@@ -163,10 +92,10 @@ export async function createFullBackupZip({ data, profiles, exportedBy, onProgre
     onProgress?.(`Exporting ${table}...`)
     const rows = data[table] || []
     rowCounts[table] = rows.length
-    zip.file(`${table}.csv`, rowsToCsv(rows))
+    zip.file(`${table}.json`, rowsToJson(rows))
   }
   const safeProfiles = sanitizeProfiles(profiles)
-  zip.file('profiles_reference_only.csv', rowsToCsv(safeProfiles))
+  zip.file('profiles_reference_only.json', rowsToJson(safeProfiles))
   const manifest = buildManifest({ exportedBy, rowCounts })
   zip.file('backup_manifest.json', JSON.stringify(manifest, null, 2))
   onProgress?.('Creating ZIP...')
@@ -223,10 +152,10 @@ export function validateRestoreRows(parsed, existingData = {}) {
     const dates = TABLE_DATES[table] || []
 
     rows.forEach((row, idx) => {
-      const rowNum = idx + 2
+      const rowNum = idx + 1
       for (const col of required) {
         if (row[col] == null || String(row[col]).trim() === '') {
-          errors.push({ table, rowNum, reason: `Missing required column "${col}".` })
+          errors.push({ table, rowNum, reason: `Missing required field "${col}".` })
         }
       }
       if (!isValidId(row.id)) {
@@ -276,12 +205,12 @@ export async function readBackupZip(file) {
     throw new Error(`Unsupported backup version: ${manifest.backup_version}`)
   }
   for (const table of BACKUP_TABLES) {
-    if (!zip.file(`${table}.csv`)) throw new Error(`Missing required file: ${table}.csv`)
+    if (!zip.file(`${table}.json`)) throw new Error(`Missing required file: ${table}.json`)
   }
   const parsed = { manifest }
   for (const table of BACKUP_TABLES) {
-    const text = await zip.file(`${table}.csv`).async('string')
-    parsed[table] = parseCsv(text)
+    const text = await zip.file(`${table}.json`).async('string')
+    parsed[table] = parseJsonTable(text, `${table}.json`)
   }
   return parsed
 }

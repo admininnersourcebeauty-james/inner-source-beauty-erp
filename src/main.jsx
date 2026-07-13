@@ -10,6 +10,7 @@ import './style.css'
 const TABLES = ['customers', 'inventory', 'orders', 'payments']
 const EMPTY = { customers: [], inventory: [], orders: [], payments: [] }
 const PAYMENT_METHODS = ['Zelle', 'Venmo', 'Cash', 'Credit Card', 'Check', 'ACH/Wire']
+const SHIPPING_METHODS = ['UPS Next Day', 'UPS 2nd Day', 'UPS 3 Day', 'UPS Ground', 'USPS Ground', 'USPS Priority']
 const TERMS = ['COD', 'NET 15', 'NET 30', 'NET 45', 'NET 60']
 const STATUSES = ['Active', 'Hold', 'VIP']
 const ROLES = ['Admin', 'Staff', 'Warehouse']
@@ -299,6 +300,7 @@ function App() {
       style: item?.style || f.style,
       qty, price, buying_price: buying, shipping_cost: inboundShipping, profit,
       shipping, discount, total,
+      shipping_method: f.shipping_method || '',
       invoice_no: nextInvoiceNo(data.orders, f.invoice_no),
       status: f.status || 'Open',
       payment_status: 'Unpaid',
@@ -345,6 +347,7 @@ function App() {
       style: item?.style || f.style || existing.style,
       qty, price, buying_price: buying, shipping_cost: inboundShipping, profit,
       shipping, discount, total,
+      shipping_method: f.shipping_method || '',
       invoice_no: existing.invoice_no,
       status: f.status || 'Open',
       payment_status,
@@ -1186,7 +1189,7 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
 function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, clearSelection }) {
   const blank = {
     customer_id: '', inventory_id: '', customer_name: '', style: '', qty: '', price: '',
-    shipping: '0', discount: '0', status: 'Open', note: '', tracking: '', due_date: '', order_date: '',
+    shipping_method: '', shipping: '0', discount: '0', status: 'Open', note: '', tracking: '', due_date: '', order_date: '',
   }
   const [f, setF] = useState(blank)
   const [highlightId, setHighlightId] = useState('')
@@ -1222,6 +1225,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
       style: order.style || '',
       qty: order.qty ?? '',
       price: order.price ?? '',
+      shipping_method: order.shipping_method || '',
       shipping: order.shipping ?? '0',
       discount: order.discount ?? '0',
       status: order.status || 'Open',
@@ -1303,8 +1307,15 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
         <input placeholder="Selling Price (auto)" value={f.price} onChange={e => setF({ ...f, price: e.target.value })} />
         <div className="profit-preview">Profit: <strong>{money(lineProfit)}</strong></div>
         <label className="order-field">
-          Shipping Cost
-          <input placeholder="Shipping Cost" type="number" min="0" step="0.01" value={f.shipping} onChange={e => setF({ ...f, shipping: e.target.value })} />
+          Shipping Method
+          <select value={f.shipping_method} onChange={e => setF({ ...f, shipping_method: e.target.value })}>
+            <option value="">Select Shipping Method</option>
+            {SHIPPING_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </label>
+        <label className="order-field">
+          Shipping Charge
+          <input placeholder="Shipping Charge" type="number" min="0" step="0.01" value={f.shipping} onChange={e => setF({ ...f, shipping: e.target.value })} />
         </label>
         <label className="order-field">
           Discount
@@ -1336,6 +1347,8 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
               <th>Style</th>
               <th>Qty</th>
               <th>Price</th>
+              <th>Shipping Method</th>
+              <th>Shipping Charge</th>
               <th>Total</th>
               <th>Profit</th>
               <th>Status</th>
@@ -1356,6 +1369,8 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
                 <td>{o.style || '—'}</td>
                 <td>{o.qty ?? 0}</td>
                 <td>{money(o.price)}</td>
+                <td>{o.shipping_method || '—'}</td>
+                <td>{money(o.shipping)}</td>
                 <td>{money(o.total)}</td>
                 <td>{money(o.profit)}</td>
                 <td>{o.status || '—'}</td>
@@ -1395,6 +1410,9 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
     .filter(p => String(p.order_id) === String(o.id) || p.invoice_no === o.invoice_no)
     .reduce((s, p) => s + Number(p.amount || 0), 0)
   const due = Number(o.total || 0) - paid
+  const subtotal = Number(o.qty || 0) * Number(o.price || 0)
+  const shippingCharge = Number(o.shipping || 0)
+  const discount = Number(o.discount || 0)
   const company = c?.company || o.customer_name || ''
   const contact = c?.name && c.name !== company ? c.name : ''
   const billLines = addressLines(c?.billing_address || c?.address)
@@ -1418,6 +1436,7 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
               <b>Date:</b> {dateOnly(o.created_at) || today()}<br />
               <b>Due Date:</b> {o.due_date || calcDueDate(c?.payment_terms, o.created_at)}<br />
               <b>Status:</b> {o.payment_status}<br />
+              <b>Shipping Method:</b> {o.shipping_method || '—'}<br />
               <b>Tracking:</b> {o.tracking || '—'}</p>
           </div>
         </div>
@@ -1444,14 +1463,17 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
           <p>{c?.payment_terms || 'COD'}<br />Preferred: {c?.preferred_payment || '—'}</p>
         </div>
         <table className="invoice-table">
-          <thead><tr><th>Style</th><th>Qty</th><th>Unit Price</th><th>Shipping</th><th>Discount</th><th>Total</th></tr></thead>
+          <thead><tr><th>Style</th><th>Qty</th><th>Unit Price</th><th>Line Total</th></tr></thead>
           <tbody><tr>
-            <td>{o.style}</td><td>{o.qty}</td><td>{money(o.price)}</td>
-            <td>{money(o.shipping)}</td><td>{money(o.discount)}</td><td>{money(o.total)}</td>
+            <td>{o.style}</td><td>{o.qty}</td><td>{money(o.price)}</td><td>{money(subtotal)}</td>
           </tr></tbody>
         </table>
         <div className="invoice-totals">
-          <p><b>Total Due:</b> {money(o.total)}</p>
+          <p><b>Subtotal:</b> {money(subtotal)}</p>
+          <p><b>Shipping Method:</b> {o.shipping_method || '—'}</p>
+          <p><b>Shipping Charge:</b> {money(shippingCharge)}</p>
+          <p><b>Discount:</b> {money(discount)}</p>
+          <p className="invoice-grand-total"><b>Total:</b> {money(o.total)}</p>
           <p><b>Amount Paid:</b> {money(paid)}</p>
           <p className="balance-due"><b>Balance Due:</b> {money(due)}</p>
         </div>

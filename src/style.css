@@ -171,6 +171,7 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .invoice-table td{padding:12px;border-bottom:1px solid #e2e8f0}
 .invoice-totals{text-align:right;margin:20px 0;font-size:15px}
 .invoice-totals p{margin:6px 0}
+.invoice-grand-total{font-size:16px;margin-top:10px!important;padding-top:8px;border-top:1px solid #e2e8f0}
 .balance-due{font-size:20px;color:#08142b;border-top:2px solid #08142b;padding-top:10px;margin-top:10px!important}
 .terms{font-size:11px;color:#4c5870;border-top:1px solid #ddd;padding-top:16px;margin-top:24px;line-height:1.5}
 .signature-line{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin:40px 0 20px}

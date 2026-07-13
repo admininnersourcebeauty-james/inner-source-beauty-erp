@@ -5,6 +5,11 @@ import {
   BACKUP_TABLES, createFullBackupZip, downloadJson, readBackupZip,
   saveLastBackupTime, getLastBackupTime, validateRestoreRows, executeRestore,
 } from './backupRestore.js'
+import {
+  ORDER_STATUSES, calcAllocation, deriveCreateStatus, normalizeFulfillment, unshippedAllocated,
+  backOrderedQtyForProduct, activeBackorderOrders, backOrderDashboardStats, activeBackorderAlerts,
+  backOrderReports, validateShipStatus, resolveShippedQty, buildAllocationPlan,
+} from './backorder.js'
 import './style.css'
 
 const TABLES = ['customers', 'inventory', 'orders', 'payments']
@@ -227,6 +232,23 @@ function App() {
     }
   }
 
+  async function adjustInventoryQty(inventoryId, delta) {
+    if (!inventoryId || !delta) return
+    if (hasSupabaseConfig && session) {
+      const inv = data.inventory.find(i => String(i.id) === String(inventoryId))
+      if (!inv) return
+      const next = Math.max(Number(inv.qty || 0) + delta, 0)
+      await updateRow('inventory', inv.id, { qty: next })
+    } else {
+      setLocalData(p => ({
+        ...p,
+        inventory: p.inventory.map(i => String(i.id) === String(inventoryId)
+          ? { ...i, qty: Math.max(Number(i.qty || 0) + delta, 0) }
+          : i),
+      }))
+    }
+  }
+
   async function deleteOrder(id) {
     const order = data.orders.find(o => String(o.id) === String(id))
     if (!order) return false
@@ -246,19 +268,11 @@ function App() {
     }
 
     setNotice('')
-    const restoreQty = Number(order.qty || 0)
+    const restoreQty = unshippedAllocated(order)
     const inventoryId = order.inventory_id
 
     if (hasSupabaseConfig && session) {
-      if (inventoryId && restoreQty > 0) {
-        const inv = data.inventory.find(i => String(i.id) === String(inventoryId))
-        if (inv) {
-          const { error } = await supabase.from('inventory')
-            .update({ qty: Number(inv.qty || 0) + restoreQty })
-            .eq('id', inv.id)
-          if (error) return setNotice(error.message), false
-        }
-      }
+      if (inventoryId && restoreQty > 0) await adjustInventoryQty(inventoryId, restoreQty)
       for (const p of relatedPayments) {
         const { error } = await supabase.from('payments').delete().eq('id', p.id)
         if (error) return setNotice(error.message), false
@@ -272,7 +286,7 @@ function App() {
         ...p,
         inventory: inventoryId && restoreQty > 0
           ? p.inventory.map(i => String(i.id) === String(inventoryId)
-            ? { ...i, qty: Number(i.qty || 0) + restoreQty }
+            ? { ...i, qty: Math.max(Number(i.qty || 0) + restoreQty, 0) }
             : i)
           : p.inventory,
         payments: p.payments.filter(x => !paymentIds.has(String(x.id))),
@@ -293,6 +307,9 @@ function App() {
     const total = qty * price + shipping - discount
     const profit = total - (qty * (buying + inboundShipping))
     const dueDate = toDbDate(f.due_date || calcDueDate(customer?.payment_terms, today()))
+    const physicalStock = Math.max(Number(item?.qty || 0), 0)
+    const { allocated_qty, backorder_qty } = calcAllocation(qty, physicalStock)
+    const status = deriveCreateStatus(allocated_qty, backorder_qty)
     const payload = {
       customer_id: f.customer_id || null,
       inventory_id: f.inventory_id || null,
@@ -301,17 +318,18 @@ function App() {
       qty, price, buying_price: buying, shipping_cost: inboundShipping, profit,
       shipping, discount, total,
       shipping_method: f.shipping_method || '',
+      allocated_qty, backorder_qty, shipped_qty: 0,
       invoice_no: nextInvoiceNo(data.orders, f.invoice_no),
-      status: f.status || 'Open',
+      status,
       payment_status: 'Unpaid',
       note: f.note || '',
       due_date: dueDate,
       tracking: f.tracking || '',
+      order_date: toDbDate(f.order_date || today()),
     }
     await addRow('orders', payload)
-    if (item) {
-      const newQty = Number(item.qty || 0) - qty
-      await updateRow('inventory', item.id, { qty: newQty })
+    if (item && allocated_qty > 0) {
+      await adjustInventoryQty(item.id, -allocated_qty)
     }
   }
 
@@ -339,6 +357,41 @@ function App() {
       return { error: 'Invoice total cannot be less than the amount already paid.' }
     }
 
+    const prevAllocated = Number(original?.allocated_qty ?? existing.allocated_qty ?? existing.qty ?? 0)
+    const prevShipped = Number(original?.shipped_qty ?? existing.shipped_qty ?? 0)
+    const restoreQty = Math.max(prevAllocated - prevShipped, 0)
+    const oldInventoryId = original?.inventory_id ?? existing.inventory_id
+    const newInventoryId = f.inventory_id
+
+    let allocated_qty = 0
+    let backorder_qty = 0
+    let status = f.status || existing.status || 'Open'
+    let shipped_qty = Number(existing.shipped_qty ?? 0)
+
+    if (status === 'Cancelled') {
+      allocated_qty = 0
+      backorder_qty = 0
+      shipped_qty = prevShipped
+    } else {
+      const invItem = data.inventory.find(i => String(i.id) === String(newInventoryId))
+      const sameProduct = String(oldInventoryId || '') === String(newInventoryId || '')
+      const availableStock = Math.max(
+        Number(invItem?.qty || 0) + (sameProduct ? restoreQty : 0),
+        0,
+      )
+      ;({ allocated_qty, backorder_qty } = calcAllocation(qty, availableStock))
+
+      const shipError = validateShipStatus(status, backorder_qty)
+      if (shipError) return { error: shipError }
+
+      shipped_qty = resolveShippedQty(status, allocated_qty, shipped_qty, backorder_qty)
+
+      if (status !== 'Shipped' && status !== 'Partially Shipped' && status !== 'Ready to Ship') {
+        if (backorder_qty > 0) status = 'Back Order'
+        else if (backorder_qty === 0 && allocated_qty > 0 && status === 'Back Order') status = 'Open'
+      }
+    }
+
     const payment_status = paid <= 0 ? 'Unpaid' : paid >= total ? 'Paid' : 'Partial'
     const payload = {
       customer_id: f.customer_id || null,
@@ -348,8 +401,9 @@ function App() {
       qty, price, buying_price: buying, shipping_cost: inboundShipping, profit,
       shipping, discount, total,
       shipping_method: f.shipping_method || '',
+      allocated_qty, backorder_qty, shipped_qty,
       invoice_no: existing.invoice_no,
-      status: f.status || 'Open',
+      status,
       payment_status,
       note: f.note || '',
       due_date: toDbDate(f.due_date || existing.due_date),
@@ -358,29 +412,41 @@ function App() {
     }
     await updateRow('orders', orderId, payload)
 
-    const oldInventoryId = original?.inventory_id
-    const newInventoryId = f.inventory_id
-    const oldQty = Number(original?.qty || 0)
-    const newQty = qty
-
     if (String(oldInventoryId || '') === String(newInventoryId || '')) {
-      const diff = newQty - oldQty
-      if (oldInventoryId && diff !== 0) {
-        const inv = data.inventory.find(i => String(i.id) === String(oldInventoryId))
-        if (inv) await updateRow('inventory', inv.id, { qty: Number(inv.qty || 0) - diff })
+      if (oldInventoryId) {
+        if (status === 'Cancelled') {
+          if (restoreQty > 0) await adjustInventoryQty(oldInventoryId, restoreQty)
+        } else {
+          const netDelta = restoreQty - allocated_qty
+          if (netDelta !== 0) await adjustInventoryQty(oldInventoryId, netDelta)
+        }
       }
     } else {
-      if (oldInventoryId && oldQty > 0) {
-        const oldInv = data.inventory.find(i => String(i.id) === String(oldInventoryId))
-        if (oldInv) await updateRow('inventory', oldInv.id, { qty: Number(oldInv.qty || 0) + oldQty })
-      }
-      if (newInventoryId && newQty > 0) {
-        const newInv = data.inventory.find(i => String(i.id) === String(newInventoryId))
-        if (newInv) await updateRow('inventory', newInv.id, { qty: Number(newInv.qty || 0) - newQty })
+      if (oldInventoryId && restoreQty > 0) await adjustInventoryQty(oldInventoryId, restoreQty)
+      if (newInventoryId && status !== 'Cancelled' && allocated_qty > 0) {
+        await adjustInventoryQty(newInventoryId, -allocated_qty)
       }
     }
 
     return { error: '' }
+  }
+
+  async function allocateBackOrdersForProduct(inventoryId, stockIncrease, savedQty) {
+    const orders = activeBackorderOrders(data.orders, inventoryId)
+    const { plan, stockUsed } = buildAllocationPlan(orders, stockIncrease)
+    if (!plan.length) return []
+
+    for (const step of plan) {
+      await updateRow('orders', step.orderId, {
+        allocated_qty: step.newAllocated,
+        backorder_qty: step.remainingBackOrder,
+        status: step.newStatus,
+      })
+    }
+
+    const finalQty = Math.max(Number(savedQty) - stockUsed, 0)
+    await updateRow('inventory', inventoryId, { qty: finalQty })
+    return plan
   }
 
   async function recordPayment(f) {
@@ -582,10 +648,11 @@ function App() {
         )}
         {notice && <div className="notice" onClick={() => setNotice('')}>{notice}</div>}
         {loading && <div className="panel">Loading...</div>}
-        {page === 'Dashboard' && <Dashboard data={data} stats={stats} />}
+        {page === 'Dashboard' && <Dashboard data={data} stats={stats} onNavigate={openRecord} />}
         {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} onNavigate={openRecord}
           selectedCustomerId={selectedRecord.page === 'Customers' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
-        {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} />}
+        {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow}
+          allocateBackOrders={allocateBackOrdersForProduct} />}
         {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteOrder={deleteOrder}
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
@@ -710,9 +777,16 @@ function inventoryUnitCost(i) {
   return itemUnitCost(i)
 }
 
-function Dashboard({ data, stats }) {
+function OrderStatusBadge({ status, backorderQty = 0 }) {
+  const isBackOrder = status === 'Back Order' || backorderQty > 0
+  return <span className={isBackOrder ? 'status-badge backorder-badge' : 'status-badge'}>{status || '—'}</span>
+}
+
+function Dashboard({ data, stats, onNavigate }) {
   const todayOrders = data.orders.filter(isOrderDateToday)
   const monthOrders = data.orders.filter(isOrderDateThisMonth)
+  const boStats = backOrderDashboardStats(data.orders)
+  const backorderAlerts = activeBackorderAlerts(data.orders, 10)
 
   const todaySales = todayOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   const todayProfit = todayOrders.reduce((s, o) => s + orderProfit(o), 0)
@@ -759,6 +833,21 @@ function Dashboard({ data, stats }) {
     return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
   }
 
+  function formatAlertOrder(o) {
+    const f = normalizeFulfillment(o)
+    return {
+      id: o.id,
+      order_date: formatDashboardDate(o.order_date || o.created_at),
+      invoice_no: o.invoice_no || '—',
+      customer_name: o.customer_name || '—',
+      style: o.style || '—',
+      qty: f.qty,
+      allocated_qty: f.allocated_qty,
+      backorder_qty: f.backorder_qty,
+      status: o.status || '—',
+    }
+  }
+
   const recentOrders = data.orders.slice(0, 5).map(o => ({
     id: o.id,
     order_date: formatDashboardDate(o.order_date || o.created_at),
@@ -790,6 +879,55 @@ function Dashboard({ data, stats }) {
           <Card t="Low Stock Items" v={lowStockItems.length} cls={lowStockItems.length > 0 ? 'card-warn' : ''} />
           <Card t="Out of Stock Items" v={outOfStockItems.length} cls={outOfStockItems.length > 0 ? 'card-warn' : ''} />
         </div>
+        <div className="cards dashboard-row">
+          <Card t="Back Order Items" v={boStats.items} cls={boStats.items > 0 ? 'card-warn' : ''} />
+          <Card t="Back Order Units" v={boStats.units} cls={boStats.units > 0 ? 'card-warn' : ''} />
+        </div>
+      </div>
+
+      <div className="panel">
+        <h2>Back Order Alerts</h2>
+        {backorderAlerts.length === 0 ? (
+          <p className="hint">No active back orders.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Customer Name</th>
+                  <th>Invoice No</th>
+                  <th>Product</th>
+                  <th>Order Qty</th>
+                  <th>Allocated Qty</th>
+                  <th>Back Order Qty</th>
+                  <th>Order Date</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {backorderAlerts.map(o => {
+                  const row = formatAlertOrder(o)
+                  return (
+                    <tr key={o.id}>
+                      <td>{row.customer_name}</td>
+                      <td>
+                        <button type="button" className="link-cell" onClick={() => onNavigate?.('Invoice', o.id)}>
+                          {row.invoice_no}
+                        </button>
+                      </td>
+                      <td>{row.style}</td>
+                      <td>{row.qty}</td>
+                      <td>{row.allocated_qty}</td>
+                      <td><span className="backorder-badge">{row.backorder_qty}</span></td>
+                      <td>{row.order_date}</td>
+                      <td><OrderStatusBadge status={row.status} backorderQty={row.backorder_qty} /></td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div className="panel">
@@ -1064,10 +1202,12 @@ function CustomerDetail({ customer, data, deleteRow, onNavigate }) {
   )
 }
 
-function Inventory({ data, addRow, updateRow, deleteRow }) {
+function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
   const blank = { style: '', brand: '', category: '', qty: '', buying_price: '', shipping_cost: '', selling_price: '', low_stock: 5 }
   const [f, setF] = useState(blank)
   const [editingId, setEditingId] = useState(null)
+  const [allocPrompt, setAllocPrompt] = useState(null)
+  const [allocSummary, setAllocSummary] = useState(null)
   const margin = formatMargin(f.buying_price, f.selling_price, f.shipping_cost)
   const profit = calcProfit(f.buying_price, f.selling_price, f.shipping_cost)
 
@@ -1090,6 +1230,12 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
     setF(blank)
   }
 
+  async function performSave(row) {
+    if (editingId) await updateRow('inventory', editingId, row)
+    else await addRow('inventory', row)
+    cancelEdit()
+  }
+
   async function save() {
     const buying = Number(f.buying_price) || 0, shippingCost = Number(f.shipping_cost) || 0
     const selling = Number(f.selling_price) || 0
@@ -1098,20 +1244,48 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
       qty: Number(f.qty) || 0, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
       cost: buying, price: selling, low_stock: Number(f.low_stock) || 5,
     }
-    if (editingId) await updateRow('inventory', editingId, row)
-    else await addRow('inventory', row)
-    cancelEdit()
+    const oldItem = editingId ? data.inventory.find(i => String(i.id) === String(editingId)) : null
+    const oldQty = Number(oldItem?.qty || 0)
+    const stockIncrease = editingId ? Math.max(row.qty - oldQty, 0) : 0
+    const backorders = editingId ? activeBackorderOrders(data.orders, editingId) : []
+
+    if (stockIncrease > 0 && backorders.length > 0) {
+      setAllocPrompt({ row, stockIncrease, inventoryId: editingId })
+      return
+    }
+
+    await performSave(row)
+  }
+
+  async function saveWithoutAllocation() {
+    if (!allocPrompt) return
+    await performSave(allocPrompt.row)
+    setAllocPrompt(null)
+  }
+
+  async function saveWithAllocation() {
+    if (!allocPrompt) return
+    const { row, stockIncrease, inventoryId } = allocPrompt
+    await performSave(row)
+    const summary = await allocateBackOrders(inventoryId, stockIncrease, row.qty)
+    setAllocSummary(summary)
+    setAllocPrompt(null)
   }
 
   const rows = data.inventory.map(item => {
     const buying = itemBuying(item), shippingCost = itemShipping(item), selling = itemSelling(item)
     const ri = reorderInfo(item, data.orders)
+    const stockOnHand = Math.max(Number(item.qty) || 0, 0)
+    const backOrdered = backOrderedQtyForProduct(data.orders, item.id)
     return {
       ...item, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
       profit: calcProfit(buying, selling, shippingCost),
       margin: formatMargin(buying, selling, shippingCost),
-      stock: stockLevel(item.qty),
+      stock: stockLevel(stockOnHand),
       reorder: ri,
+      stockOnHand,
+      backOrdered,
+      available: stockOnHand,
     }
   })
 
@@ -1146,6 +1320,38 @@ function Inventory({ data, addRow, updateRow, deleteRow }) {
         </div>
       </div>
       <h2>Inventory</h2>
+      {allocPrompt && (
+        <div className="alloc-prompt panel-inline">
+          <p><strong>New stock is available for existing Back Orders.</strong><br />Would you like to allocate it now?</p>
+          <div className="alloc-prompt-actions">
+            <button type="button" className="soft" onClick={saveWithoutAllocation}>Not Now</button>
+            <button type="button" onClick={saveWithAllocation}>Allocate Back Orders</button>
+          </div>
+        </div>
+      )}
+      {allocSummary?.length > 0 && (
+        <div className="alloc-summary panel-inline">
+          <h3>Allocation Summary</h3>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Invoice No</th><th>Customer</th><th>Previously Back Ordered</th><th>Allocated Now</th><th>Remaining Back Order</th></tr>
+              </thead>
+              <tbody>
+                {allocSummary.map((s, i) => (
+                  <tr key={i}>
+                    <td>{s.invoice_no || '—'}</td>
+                    <td>{s.customer_name || '—'}</td>
+                    <td>{s.previouslyBackOrdered}</td>
+                    <td>{s.allocatedNow}</td>
+                    <td>{s.remainingBackOrder}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
       <InventoryTable rows={rows} editingId={editingId} onEdit={loadItem} onDelete={id => deleteRow('inventory', id)} />
     </div>
   )
@@ -1156,7 +1362,8 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
     <div className="table-wrap inventory-table">
       <table>
         <thead><tr>
-          <th>Style</th><th>Brand</th><th>Category</th><th>Qty</th>
+          <th>Style</th><th>Brand</th><th>Category</th>
+          <th>Stock On Hand</th><th>Back Ordered</th><th>Available</th>
           <th>Buying</th><th>Shipping</th><th>Selling</th><th>Profit $</th><th>Margin</th><th>Reorder</th><th>Edit</th><th>Delete</th>
         </tr></thead>
         <tbody>{rows.map(r => (
@@ -1164,7 +1371,9 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
             <td><b>{r.style || '—'}</b></td>
             <td>{r.brand || '—'}</td>
             <td>{r.category || '—'}</td>
-            <td><span className={`stock-badge ${r.stock.cls}`}>{r.stock.label}</span></td>
+            <td><span className={`stock-badge ${r.stock.cls}`}>{r.stockOnHand}</span></td>
+            <td>{r.backOrdered > 0 ? <span className="backorder-badge">{r.backOrdered}</span> : '0'}</td>
+            <td>{r.available}</td>
             <td>{money(r.buying_price)}</td>
             <td>{money(r.shipping_cost)}</td>
             <td>{money(r.selling_price)}</td>
@@ -1196,6 +1405,9 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
   const [editingId, setEditingId] = useState(null)
   const [editSnapshot, setEditSnapshot] = useState(null)
   const [editError, setEditError] = useState('')
+  const [statusFilter, setStatusFilter] = useState('All')
+  const [showBackorderConfirm, setShowBackorderConfirm] = useState(false)
+  const [shipWarning, setShipWarning] = useState('')
 
   useEffect(() => {
     if (!selectedOrderId) return
@@ -1210,13 +1422,20 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
     setEditingId(null)
     setEditSnapshot(null)
     setEditError('')
+    setShipWarning('')
     setF(blank)
   }
 
   function loadOrderForEdit(order) {
     setEditingId(order.id)
-    setEditSnapshot({ inventory_id: order.inventory_id, qty: Number(order.qty || 0) })
+    const f0 = normalizeFulfillment(order)
+    setEditSnapshot({
+      inventory_id: order.inventory_id,
+      allocated_qty: f0.allocated_qty,
+      shipped_qty: f0.shipped_qty,
+    })
     setEditError('')
+    setShipWarning('')
     setHighlightId(order.id)
     setF({
       customer_id: order.customer_id || '',
@@ -1241,6 +1460,13 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
 
   async function handleSave() {
     if (editingId) {
+      const preview = previewAllocation()
+      const warn = validateShipStatus(f.status, preview.backorder_qty)
+      if (warn) {
+        setShipWarning(warn)
+        setEditError(warn)
+        return
+      }
       const result = await updateOrder(editingId, f, editSnapshot)
       if (result?.error) {
         setEditError(result.error)
@@ -1249,6 +1475,17 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
       cancelEdit()
       return
     }
+    const preview = previewAllocation()
+    if (preview.backorder_qty > 0) {
+      setShowBackorderConfirm(true)
+      return
+    }
+    await createOrder(f)
+    setF(blank)
+  }
+
+  async function confirmCreateWithBackorder() {
+    setShowBackorderConfirm(false)
     await createOrder(f)
     setF(blank)
   }
@@ -1273,6 +1510,24 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
   const outboundShipping = Number(f.shipping || 0), discount = Number(f.discount || 0)
   const unitCost = item ? itemUnitCost(item) : 0
   const lineProfit = qty * price + outboundShipping - discount - qty * unitCost
+
+  function previewAllocation() {
+    const orderQty = Number(f.qty || 0)
+    const stock = Math.max(Number(item?.qty || 0), 0)
+    if (editingId && editSnapshot) {
+      const sameProduct = String(editSnapshot.inventory_id || '') === String(f.inventory_id || '')
+      const restoreQty = Math.max(Number(editSnapshot.allocated_qty || 0) - Number(editSnapshot.shipped_qty || 0), 0)
+      const available = sameProduct ? stock + restoreQty : stock
+      return { currentStock: stock, orderQty, ...calcAllocation(orderQty, available) }
+    }
+    return { currentStock: stock, orderQty, ...calcAllocation(orderQty, stock) }
+  }
+
+  const allocPreview = previewAllocation()
+  const filteredOrders = data.orders.filter(o => {
+    if (statusFilter === 'All') return true
+    return (o.status || 'Open') === statusFilter
+  })
 
   function formatOrderDate(order) {
     const raw = order.order_date || order.created_at
@@ -1302,7 +1557,21 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
             <option key={i.id} value={i.id}>{i.style}{i.brand ? ` · ${i.brand}` : ''} — Stock {i.qty}</option>
           ))}
         </select>
-        {item && <div className="stock-info">Current Stock: <strong>{item.qty}</strong></div>}
+        {item && qty > 0 && (
+          <div className="order-stock-preview">
+            <p>Current Stock: <strong>{allocPreview.currentStock}</strong></p>
+            <p>Order Qty: <strong>{allocPreview.orderQty}</strong></p>
+            <p>Allocated Now: <strong>{allocPreview.allocated_qty}</strong></p>
+            <p>Back Order: <strong>{allocPreview.backorder_qty}</strong></p>
+            {allocPreview.backorder_qty > 0 && !editingId && (
+              <p className="field-error backorder-warning">
+                Only {allocPreview.allocated_qty} unit{allocPreview.allocated_qty === 1 ? '' : 's'} are currently available.
+                {' '}{allocPreview.backorder_qty} unit{allocPreview.backorder_qty === 1 ? '' : 's'} will be placed on Back Order.
+              </p>
+            )}
+          </div>
+        )}
+        {item && <div className="stock-info">Physical Stock: <strong>{item.qty}</strong></div>}
         <input placeholder="Qty" type="number" min="1" value={f.qty} onChange={e => setF({ ...f, qty: e.target.value })} />
         <input placeholder="Selling Price (auto)" value={f.price} onChange={e => setF({ ...f, price: e.target.value })} />
         <div className="profit-preview">Profit: <strong>{money(lineProfit)}</strong></div>
@@ -1327,16 +1596,42 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
           <input type="date" value={f.order_date} onChange={e => setF({ ...f, order_date: e.target.value })} />
         </label>
         <input type="date" placeholder="Due Date" value={f.due_date} onChange={e => setF({ ...f, due_date: e.target.value })} />
-        <select value={f.status} onChange={e => setF({ ...f, status: e.target.value })}>
-          {['Open', 'Pending', 'Shipped', 'Cancelled'].map(x => <option key={x}>{x}</option>)}
+        <select value={f.status} onChange={e => {
+          setF({ ...f, status: e.target.value })
+          setShipWarning('')
+          const preview = previewAllocation()
+          const warn = validateShipStatus(e.target.value, preview.backorder_qty)
+          if (warn) setShipWarning(warn)
+        }}>
+          {ORDER_STATUSES.map(x => <option key={x}>{x}</option>)}
         </select>
+        {shipWarning && <p className="field-error order-edit-error">{shipWarning}</p>}
         <input placeholder="Order Note" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
         <div className="order-form-actions">
           <button type="button" onClick={handleSave}>{editingId ? 'Update Invoice' : 'Create Invoice'}</button>
           {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel Edit</button>}
         </div>
       </div>
+      {showBackorderConfirm && (
+        <div className="restore-dialog-overlay" onClick={() => setShowBackorderConfirm(false)}>
+          <div className="restore-dialog" onClick={e => e.stopPropagation()}>
+            <p className="restore-dialog-text">
+              Only {allocPreview.allocated_qty} unit{allocPreview.allocated_qty === 1 ? '' : 's'} are currently available.
+              {' '}{allocPreview.backorder_qty} unit{allocPreview.backorder_qty === 1 ? '' : 's'} will be placed on Back Order.
+            </p>
+            <div className="restore-dialog-actions">
+              <button type="button" className="soft" onClick={() => setShowBackorderConfirm(false)}>Cancel</button>
+              <button type="button" onClick={confirmCreateWithBackorder}>Create Invoice with Back Order</button>
+            </div>
+          </div>
+        </div>
+      )}
       <h2>Orders</h2>
+      <div className="order-filters">
+        {['All', ...ORDER_STATUSES].map(s => (
+          <button key={s} type="button" className={statusFilter === s ? 'filter-btn active' : 'filter-btn soft'} onClick={() => setStatusFilter(s)}>{s}</button>
+        ))}
+      </div>
       <div className="table-wrap orders-table">
         <table>
           <thead>
@@ -1346,6 +1641,9 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
               <th>Customer Name</th>
               <th>Style</th>
               <th>Qty</th>
+              <th>Allocated</th>
+              <th>Back Order</th>
+              <th>Shipped</th>
               <th>Price</th>
               <th>Shipping Method</th>
               <th>Shipping Charge</th>
@@ -1357,7 +1655,9 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
             </tr>
           </thead>
           <tbody>
-            {data.orders.map(o => (
+            {filteredOrders.map(o => {
+              const ff = normalizeFulfillment(o)
+              return (
               <tr
                 key={o.id}
                 id={`order-row-${o.id}`}
@@ -1367,20 +1667,23 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
                 <td>{o.invoice_no || '—'}</td>
                 <td>{o.customer_name || '—'}</td>
                 <td>{o.style || '—'}</td>
-                <td>{o.qty ?? 0}</td>
+                <td>{ff.qty}</td>
+                <td>{ff.allocated_qty}</td>
+                <td>{ff.backorder_qty > 0 ? <span className="backorder-badge">{ff.backorder_qty}</span> : ff.backorder_qty}</td>
+                <td>{ff.shipped_qty}</td>
                 <td>{money(o.price)}</td>
                 <td>{o.shipping_method || '—'}</td>
                 <td>{money(o.shipping)}</td>
                 <td>{money(o.total)}</td>
                 <td>{money(o.profit)}</td>
-                <td>{o.status || '—'}</td>
+                <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
                 <td>{o.payment_status || '—'}</td>
                 <td className="row-actions">
                   <button type="button" className="soft" onClick={() => loadOrderForEdit(o)}>Edit</button>
                   <button type="button" className="danger" onClick={() => handleDeleteOrder(o.id)}>Delete</button>
                 </td>
               </tr>
-            ))}
+            )})}
           </tbody>
         </table>
       </div>
@@ -1413,6 +1716,7 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
   const subtotal = Number(o.qty || 0) * Number(o.price || 0)
   const shippingCharge = Number(o.shipping || 0)
   const discount = Number(o.discount || 0)
+  const fulfillment = normalizeFulfillment(o)
   const company = c?.company || o.customer_name || ''
   const contact = c?.name && c.name !== company ? c.name : ''
   const billLines = addressLines(c?.billing_address || c?.address)
@@ -1476,6 +1780,16 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
           <p className="invoice-grand-total"><b>Total:</b> {money(o.total)}</p>
           <p><b>Amount Paid:</b> {money(paid)}</p>
           <p className="balance-due"><b>Balance Due:</b> {money(due)}</p>
+        </div>
+        <div className="invoice-fulfillment">
+          <h3>Fulfillment</h3>
+          <p><b>Ordered Qty:</b> {fulfillment.qty}</p>
+          <p><b>Allocated Qty:</b> {fulfillment.allocated_qty}</p>
+          <p><b>Back Order Qty:</b> {fulfillment.backorder_qty}</p>
+          <p><b>Shipped Qty:</b> {fulfillment.shipped_qty}</p>
+          {fulfillment.backorder_qty > 0 && (
+            <p className="invoice-backorder-flag">BACK ORDER: {fulfillment.backorder_qty}</p>
+          )}
         </div>
         <p className="terms">ALL RETURNS ARE STORE CREDIT ONLY. RETURNS MUST BE DONE WITHIN 10 BUSINESS DAYS. 20% RESTOCKING FEE MAY APPLY. SHIPPING AND HANDLING ARE NOT REFUNDABLE BOTH WAYS.</p>
         <div className="signature-line">
@@ -2015,6 +2329,7 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
 
 function Reports({ data, stats }) {
   const ranked = [...data.customers].map(c => ({ ...c, ...customerStats(c, data) })).sort((a, b) => b.sales - a.sales)
+  const boReport = backOrderReports(data.orders)
   const monthlyBreakdown = {}
   data.orders.forEach(o => {
     const m = localDateKey(o.created_at).slice(0, 7)
@@ -2056,6 +2371,30 @@ function Reports({ data, stats }) {
         <div><h3>Best Seller</h3><p>{best ? `${best[0]} — ${best[1].qty} units · ${money(best[1].profit)} profit` : '—'}</p></div>
         <div><h3>Worst Seller</h3><p>{worst && sorted.length > 1 ? `${worst[0]} — ${worst[1].qty} units · ${money(worst[1].profit)} profit` : '—'}</p></div>
       </div>
+
+      <h3>Back Order Reports</h3>
+      <div className="cards">
+        <Card t="Total Back Order Units" v={boReport.totalUnits} cls={boReport.totalUnits > 0 ? 'card-warn' : ''} />
+        <Card t="Total Back Order Value" v={money(boReport.totalValue)} cls={boReport.totalValue > 0 ? 'card-warn' : ''} />
+      </div>
+      <h4>Open Back Orders by Customer</h4>
+      {boReport.byCustomer.length === 0 ? (
+        <p className="hint">No open back orders.</p>
+      ) : (
+        <table><thead><tr><th>Customer</th><th>Orders</th><th>Units</th><th>Value</th></tr></thead>
+          <tbody>{boReport.byCustomer.map(r => (
+            <tr key={r.customer}><td>{r.customer}</td><td>{r.orders}</td><td>{r.units}</td><td>{money(r.value)}</td></tr>
+          ))}</tbody></table>
+      )}
+      <h4>Open Back Orders by Product</h4>
+      {boReport.byProduct.length === 0 ? (
+        <p className="hint">No open back orders.</p>
+      ) : (
+        <table><thead><tr><th>Product</th><th>Orders</th><th>Units</th><th>Value</th></tr></thead>
+          <tbody>{boReport.byProduct.map(r => (
+            <tr key={r.product}><td>{r.product}</td><td>{r.orders}</td><td>{r.units}</td><td>{money(r.value)}</td></tr>
+          ))}</tbody></table>
+      )}
     </div>
   )
 }

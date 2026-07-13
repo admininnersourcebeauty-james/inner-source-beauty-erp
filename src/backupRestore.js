@@ -18,7 +18,7 @@ const TABLE_REQUIRED = {
 const TABLE_NUMERIC = {
   customers: [],
   inventory: ['qty', 'buying_price', 'selling_price', 'cost', 'price', 'retail', 'low_stock', 'shipping_cost'],
-  orders: ['customer_id', 'inventory_id', 'qty', 'price', 'buying_price', 'profit', 'shipping', 'discount', 'total', 'shipping_cost'],
+  orders: ['customer_id', 'inventory_id', 'qty', 'price', 'buying_price', 'profit', 'shipping', 'discount', 'total', 'shipping_cost', 'allocated_qty', 'backorder_qty', 'shipped_qty'],
   payments: ['customer_id', 'order_id', 'amount'],
 }
 

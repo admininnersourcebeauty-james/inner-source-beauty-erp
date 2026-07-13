@@ -1,5 +1,19 @@
 export const ORDER_STATUSES = ['Open', 'Back Order', 'Ready to Ship', 'Partially Shipped', 'Shipped', 'Cancelled']
 
+export function isValidDbDate(value) {
+  if (value == null || String(value).trim() === '') return false
+  const s = String(value).trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false
+  const [y, m, d] = s.split('-').map(Number)
+  const dt = new Date(y, m - 1, d)
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d
+}
+
+export function inventoryStockView(item) {
+  const raw = Number(item?.qty ?? 0)
+  return { raw, display: Math.max(raw, 0), isNegative: raw < 0 }
+}
+
 export function calcAllocation(orderQty, physicalStock) {
   const qty = Math.max(Number(orderQty) || 0, 0)
   const available_stock = Math.max(Number(physicalStock) || 0, 0)

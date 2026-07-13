@@ -9,6 +9,7 @@ import {
   ORDER_STATUSES, calcAllocation, deriveCreateStatus, normalizeFulfillment, unshippedAllocated,
   backOrderedQtyForProduct, activeBackorderOrders, backOrderDashboardStats, activeBackorderAlerts,
   backOrderReports, validateShipStatus, resolveShippedQty, buildAllocationPlan,
+  isValidDbDate, inventoryStockView,
 } from './backorder.js'
 import './style.css'
 
@@ -232,6 +233,45 @@ function App() {
     }
   }
 
+  async function insertOrderRow(payload) {
+    if (hasSupabaseConfig && session) {
+      const { data: rows, error } = await supabase.from('orders').insert(payload).select('id')
+      if (error) return { ok: false, error: error.message }
+      return { ok: true, id: rows?.[0]?.id }
+    }
+    const id = uid()
+    setLocalData(p => ({
+      ...p,
+      orders: [{ id, created_at: new Date().toISOString(), ...payload }, ...p.orders],
+    }))
+    return { ok: true, id }
+  }
+
+  async function deleteOrderRowSilent(id) {
+    if (!id) return { ok: false, error: 'Missing order id.' }
+    if (hasSupabaseConfig && session) {
+      const { error } = await supabase.from('orders').delete().eq('id', id)
+      if (error) return { ok: false, error: error.message }
+      return { ok: true }
+    }
+    setLocalData(p => ({ ...p, orders: p.orders.filter(o => String(o.id) !== String(id)) }))
+    return { ok: true }
+  }
+
+  async function setInventoryQtyAbsolute(inventoryId, qty) {
+    const safeQty = Math.max(Number(qty) || 0, 0)
+    if (hasSupabaseConfig && session) {
+      const { error } = await supabase.from('inventory').update({ qty: safeQty }).eq('id', inventoryId)
+      if (error) return { ok: false, error: error.message }
+      return { ok: true }
+    }
+    setLocalData(p => ({
+      ...p,
+      inventory: p.inventory.map(i => String(i.id) === String(inventoryId) ? { ...i, qty: safeQty } : i),
+    }))
+    return { ok: true }
+  }
+
   async function adjustInventoryQty(inventoryId, delta) {
     if (!inventoryId || !delta) return
     if (hasSupabaseConfig && session) {
@@ -298,18 +338,38 @@ function App() {
   }
 
   async function createOrder(f) {
+    if (!f.customer_id) return { error: 'Select a customer.' }
+    if (!f.inventory_id) return { error: 'Select a product.' }
+
+    const qty = Number(f.qty || 0)
+    if (!Number.isFinite(qty) || qty <= 0) return { error: 'Enter a valid order quantity.' }
+
     const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
+    if (!item) return { error: 'Product not found.' }
+
     const customer = data.customers.find(c => String(c.id) === String(f.customer_id))
-    const qty = Number(f.qty || 0), price = Number(f.price || 0)
-    const shipping = Number(f.shipping || 0), discount = Number(f.discount || 0)
-    const buying = item ? itemBuying(item) : 0
-    const inboundShipping = item ? itemShipping(item) : 0
+    const price = Number(f.price || 0)
+    const shipping = Number(f.shipping || 0)
+    const discount = Number(f.discount || 0)
+    if (!Number.isFinite(price) || price < 0) return { error: 'Enter a valid selling price.' }
+    if (!Number.isFinite(shipping) || shipping < 0) return { error: 'Enter a valid shipping charge.' }
+    if (!Number.isFinite(discount) || discount < 0) return { error: 'Enter a valid discount.' }
+
+    const orderDate = toDbDate(f.order_date || today())
+    const dueDate = toDbDate(f.due_date || calcDueDate(customer?.payment_terms, orderDate))
+    if (!isValidDbDate(orderDate)) return { error: 'Invalid order date. Use the date picker.' }
+    if (!isValidDbDate(dueDate)) return { error: 'Invalid due date. Use the date picker.' }
+
+    const buying = itemBuying(item)
+    const inboundShipping = itemShipping(item)
     const total = qty * price + shipping - discount
     const profit = total - (qty * (buying + inboundShipping))
-    const dueDate = toDbDate(f.due_date || calcDueDate(customer?.payment_terms, today()))
-    const physicalStock = Math.max(Number(item?.qty || 0), 0)
-    const { allocated_qty, backorder_qty } = calcAllocation(qty, physicalStock)
+    const available_stock = Math.max(Number(item.qty) || 0, 0)
+    const allocated_qty = Math.min(qty, available_stock)
+    const backorder_qty = Math.max(qty - available_stock, 0)
     const status = deriveCreateStatus(allocated_qty, backorder_qty)
+    const newInventoryQty = Math.max(available_stock - allocated_qty, 0)
+
     const payload = {
       customer_id: f.customer_id || null,
       inventory_id: f.inventory_id || null,
@@ -325,11 +385,59 @@ function App() {
       note: f.note || '',
       due_date: dueDate,
       tracking: f.tracking || '',
-      order_date: toDbDate(f.order_date || today()),
+      order_date: orderDate,
     }
-    await addRow('orders', payload)
-    if (item && allocated_qty > 0) {
-      await adjustInventoryQty(item.id, -allocated_qty)
+
+    setNotice('')
+    const inserted = await insertOrderRow(payload)
+    if (!inserted.ok) {
+      setNotice(inserted.error)
+      return { error: inserted.error }
+    }
+
+    if (allocated_qty > 0) {
+      const invResult = await setInventoryQtyAbsolute(item.id, newInventoryQty)
+      if (!invResult.ok) {
+        const rollback = await deleteOrderRowSilent(inserted.id)
+        if (hasSupabaseConfig && session) await loadCloudData()
+        const msg = rollback.ok
+          ? `Inventory update failed: ${invResult.error}. The order was rolled back.`
+          : `Inventory update failed and rollback may be incomplete: ${invResult.error}. Check orders and inventory.`
+        setNotice(msg)
+        return { error: msg }
+      }
+    }
+
+    if (hasSupabaseConfig && session) await loadCloudData()
+    return { error: '' }
+  }
+
+  async function repairNegativeInventory() {
+    const negative = data.inventory.filter(i => Number(i.qty) < 0)
+    if (!negative.length) {
+      return { repaired: [], message: 'No negative inventory quantities found.' }
+    }
+    const repaired = []
+    for (const item of negative) {
+      repaired.push({
+        id: item.id,
+        style: item.style || '—',
+        brand: item.brand || '',
+        previousQty: Number(item.qty),
+      })
+      const result = await setInventoryQtyAbsolute(item.id, 0)
+      if (!result.ok) {
+        return {
+          repaired,
+          message: `Repair stopped: ${result.error}`,
+          error: result.error,
+        }
+      }
+    }
+    if (hasSupabaseConfig && session) await loadCloudData()
+    return {
+      repaired,
+      message: `Repaired ${repaired.length} inventory item(s).`,
     }
   }
 
@@ -661,7 +769,8 @@ function App() {
           selectedPaymentId={selectedRecord.page === 'Payments' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Reports' && <Reports data={data} stats={stats} />}
         {page === 'Settings' && <Settings data={data} reload={loadCloudData} profile={profile} setProfile={setProfile} session={session}
-          fetchProfilesForBackup={fetchProfilesForBackup} restoreBackupData={restoreBackupData} setLocalData={setLocalData} />}
+          fetchProfilesForBackup={fetchProfilesForBackup} restoreBackupData={restoreBackupData} setLocalData={setLocalData}
+          repairNegativeInventory={repairNegativeInventory} />}
       </main>
     </div>
   )
@@ -1275,17 +1384,19 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
   const rows = data.inventory.map(item => {
     const buying = itemBuying(item), shippingCost = itemShipping(item), selling = itemSelling(item)
     const ri = reorderInfo(item, data.orders)
-    const stockOnHand = Math.max(Number(item.qty) || 0, 0)
+    const stockOnHand = inventoryStockView(item)
     const backOrdered = backOrderedQtyForProduct(data.orders, item.id)
     return {
       ...item, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
       profit: calcProfit(buying, selling, shippingCost),
       margin: formatMargin(buying, selling, shippingCost),
-      stock: stockLevel(stockOnHand),
+      stock: stockLevel(stockOnHand.display),
       reorder: ri,
-      stockOnHand,
+      stockOnHand: stockOnHand.display,
+      stockRaw: stockOnHand.raw,
+      stockNegative: stockOnHand.isNegative,
       backOrdered,
-      available: stockOnHand,
+      available: stockOnHand.display,
     }
   })
 
@@ -1371,7 +1482,7 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
             <td><b>{r.style || '—'}</b></td>
             <td>{r.brand || '—'}</td>
             <td>{r.category || '—'}</td>
-            <td><span className={`stock-badge ${r.stock.cls}`}>{r.stockOnHand}</span></td>
+            <td><span className={`stock-badge ${r.stock.cls}`}>{r.stockOnHand}</span>{r.stockNegative && <span className="negative-stock-warn" title={`Stored qty: ${r.stockRaw}`}> ⚠</span>}</td>
             <td>{r.backOrdered > 0 ? <span className="backorder-badge">{r.backOrdered}</span> : '0'}</td>
             <td>{r.available}</td>
             <td>{money(r.buying_price)}</td>
@@ -1480,13 +1591,23 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
       setShowBackorderConfirm(true)
       return
     }
-    await createOrder(f)
+    const result = await createOrder(f)
+    if (result?.error) {
+      setEditError(result.error)
+      return
+    }
+    setEditError('')
     setF(blank)
   }
 
   async function confirmCreateWithBackorder() {
     setShowBackorderConfirm(false)
-    await createOrder(f)
+    const result = await createOrder(f)
+    if (result?.error) {
+      setEditError(result.error)
+      return
+    }
+    setEditError('')
     setF(blank)
   }
 
@@ -1506,6 +1627,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
   }
 
   const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
+  const itemStock = inventoryStockView(item)
   const qty = Number(f.qty || 0), price = Number(f.price || 0)
   const outboundShipping = Number(f.shipping || 0), discount = Number(f.discount || 0)
   const unitCost = item ? itemUnitCost(item) : 0
@@ -1513,14 +1635,14 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
 
   function previewAllocation() {
     const orderQty = Number(f.qty || 0)
-    const stock = Math.max(Number(item?.qty || 0), 0)
+    const stock = itemStock.display
     if (editingId && editSnapshot) {
       const sameProduct = String(editSnapshot.inventory_id || '') === String(f.inventory_id || '')
       const restoreQty = Math.max(Number(editSnapshot.allocated_qty || 0) - Number(editSnapshot.shipped_qty || 0), 0)
       const available = sameProduct ? stock + restoreQty : stock
-      return { currentStock: stock, orderQty, ...calcAllocation(orderQty, available) }
+      return { currentStock: stock, orderQty, stockRaw: itemStock.raw, stockNegative: itemStock.isNegative, ...calcAllocation(orderQty, available) }
     }
-    return { currentStock: stock, orderQty, ...calcAllocation(orderQty, stock) }
+    return { currentStock: stock, orderQty, stockRaw: itemStock.raw, stockNegative: itemStock.isNegative, ...calcAllocation(orderQty, stock) }
   }
 
   const allocPreview = previewAllocation()
@@ -1571,7 +1693,14 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
             )}
           </div>
         )}
-        {item && <div className="stock-info">Physical Stock: <strong>{item.qty}</strong></div>}
+        {item && (
+          <div className="stock-info">
+            Physical Stock: <strong>{itemStock.display}</strong>
+            {itemStock.isNegative && (
+              <span className="negative-stock-warn"> Warning: stored qty is {itemStock.raw}. Use Repair Negative Inventory in Settings.</span>
+            )}
+          </div>
+        )}
         <input placeholder="Qty" type="number" min="1" value={f.qty} onChange={e => setF({ ...f, qty: e.target.value })} />
         <input placeholder="Selling Price (auto)" value={f.price} onChange={e => setF({ ...f, price: e.target.value })} />
         <div className="profit-preview">Profit: <strong>{money(lineProfit)}</strong></div>
@@ -2399,9 +2528,10 @@ function Reports({ data, stats }) {
   )
 }
 
-function Settings({ data, reload, profile, setProfile, session, fetchProfilesForBackup, restoreBackupData, setLocalData }) {
+function Settings({ data, reload, profile, setProfile, session, fetchProfilesForBackup, restoreBackupData, setLocalData, repairNegativeInventory }) {
   const isAdmin = (profile.role || 'Admin') === 'Admin'
   const [busy, setBusy] = useState(false)
+  const [repairSummary, setRepairSummary] = useState(null)
   const [status, setStatus] = useState('')
   const [statusError, setStatusError] = useState(false)
   const [lastBackup, setLastBackup] = useState(getLastBackupTime())
@@ -2590,6 +2720,34 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
         <p className="hint">Admin: all features · Staff: orders &amp; customers · Warehouse: inventory only</p>
         <button type="button" onClick={reload} disabled={busy}>Reload Cloud Data</button>
       </div>
+
+      {isAdmin && (
+        <div className="panel">
+          <h2>Inventory Repair</h2>
+          <p className="hint">Reset stored inventory quantities below zero back to 0. Orders are not changed.</p>
+          <button type="button" className="soft" disabled={busy} onClick={async () => {
+            setBusy(true)
+            try {
+              const result = await repairNegativeInventory()
+              setRepairSummary(result)
+            } finally {
+              setBusy(false)
+            }
+          }}>Repair Negative Inventory</button>
+          {repairSummary && (
+            <div className="repair-summary panel-inline">
+              <p>{repairSummary.message}</p>
+              {repairSummary.repaired?.length > 0 && (
+                <ul>
+                  {repairSummary.repaired.map(r => (
+                    <li key={r.id}>{r.style}{r.brand ? ` · ${r.brand}` : ''}: {r.previousQty} → 0</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {isAdmin && (
         <div className="panel backup-restore-panel">

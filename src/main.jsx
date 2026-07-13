@@ -2056,6 +2056,27 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
     setStatusError(isError)
   }
 
+  const exportLabels = { customers: 'Customers', inventory: 'Inventory', orders: 'Orders', payments: 'Payments' }
+
+  function formatLocalBackupDisplay(iso) {
+    if (!iso) return 'Never'
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return 'Never'
+    const pad = n => String(n).padStart(2, '0')
+    const mm = pad(d.getMonth() + 1)
+    const dd = pad(d.getDate())
+    const yyyy = d.getFullYear()
+    let hours = d.getHours()
+    const ampm = hours >= 12 ? 'PM' : 'AM'
+    hours = hours % 12 || 12
+    return `${mm}/${dd}/${yyyy} ${hours}:${pad(d.getMinutes())} ${ampm}`
+  }
+
+  function formatBackupDate(iso) {
+    if (!iso) return '—'
+    return formatLocalBackupDisplay(iso)
+  }
+
   async function updateRole(newRole) {
     if (!hasSupabaseConfig || !session?.user?.id) { setProfile({ ...profile, role: newRole }); return }
     await supabase.from('profiles').upsert({ id: session.user.id, email: session.user.email, role: newRole })
@@ -2080,6 +2101,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
       setTimeout(() => URL.revokeObjectURL(a.href), 2000)
       saveLastBackupTime()
       setLastBackup(getLastBackupTime())
+      setStatusMsg(`Backup completed successfully.\n${filename}`)
       setStatusError(false)
     } catch (err) {
       setStatusMsg(err.message || 'Backup failed.', true)
@@ -2092,16 +2114,14 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
     setBusy(true)
     try {
       downloadJson(`${table}.json`, data[table] || [])
-      setStatusMsg(`Exported ${table}.json`)
+      setStatusMsg(`${exportLabels[table] || table} export downloaded.`)
       setStatusError(false)
     } catch (err) {
-      setStatusMsg(err.message || 'Export failed.', true)
+      setStatusMsg(`${exportLabels[table] || table} export failed: ${err.message || 'Download error.'}`, true)
     } finally {
       setBusy(false)
     }
   }
-
-  const exportLabels = { customers: 'Customers', inventory: 'Inventory', orders: 'Orders', payments: 'Payments' }
 
   async function previewRestore() {
     if (!restoreFile) {
@@ -2116,7 +2136,8 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
       const errors = validateRestoreRows(parsed, data)
       setRestorePreview(parsed)
       setRestoreErrors(errors)
-      setStatusMsg(errors.length ? 'Preview loaded — validation issues found.' : 'Preview loaded — ready to restore.')
+      setRestoreConfirm(false)
+      setStatusMsg(errors.length ? 'Preview loaded — fix validation issues before restoring.' : 'Preview loaded — ready to restore.')
       setStatusError(errors.length > 0)
     } catch (err) {
       setRestorePreview(null)
@@ -2149,7 +2170,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
       if (!result.ok) {
         setRestoreErrors(result.errors || [])
         setRestoreStats(result.stats)
-        setStatusMsg(`Restore finished with errors. Inserted: ${result.stats?.inserted ?? 0}, Updated: ${result.stats?.updated ?? 0}, Failed: ${result.stats?.failed ?? 0}`, true)
+        setStatusError((result.stats?.failed ?? 0) > 0)
         return
       }
       setRestoreStats(result.stats)
@@ -2157,7 +2178,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
       setRestoreFile(null)
       setRestoreConfirm(false)
       setRestoreErrors([])
-      setStatusMsg(`Restore complete. Inserted: ${result.stats.inserted}, Updated: ${result.stats.updated}, Failed: ${result.stats.failed}`)
+      setStatusMsg('')
       setStatusError(result.stats.failed > 0)
     } catch (err) {
       setStatusMsg(err.message || 'Restore failed.', true)
@@ -2167,12 +2188,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
     }
   }
 
-  function formatBackupTime(iso) {
-    if (!iso) return 'Never'
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
-    return d.toLocaleString()
-  }
+  const canRestore = restorePreview && restoreErrors.length === 0
 
   return (
     <div className="settings-page">
@@ -2196,9 +2212,9 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
           <p className="backup-warning">
             Backup files contain confidential business data. Store them securely.
           </p>
-          <p className="hint">Last Local Backup: <strong>{formatBackupTime(lastBackup)}</strong></p>
+          <p className="hint last-backup-line">Last Local Backup: <strong>{formatLocalBackupDisplay(lastBackup)}</strong></p>
 
-          {status && <p className={statusError ? 'field-error backup-status' : 'hint backup-status'}>{status}</p>}
+          {status && <p className={statusError ? 'field-error backup-status' : 'hint backup-status backup-status-msg'}>{status}</p>}
 
           <div className="backup-section">
             <h3>Database Backup</h3>
@@ -2240,17 +2256,12 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
             {restorePreview && (
               <div className="restore-preview">
                 <h4>Backup Preview</h4>
-                <p><b>Backup Date:</b> {restorePreview.manifest?.exported_at ? formatBackupTime(restorePreview.manifest.exported_at) : '—'}</p>
-                <p><b>Customers count:</b> {restorePreview.customers?.length ?? 0}</p>
-                <p><b>Inventory count:</b> {restorePreview.inventory?.length ?? 0}</p>
-                <p><b>Orders count:</b> {restorePreview.orders?.length ?? 0}</p>
-                <p><b>Payments count:</b> {restorePreview.payments?.length ?? 0}</p>
-                <p><b>Exported by:</b> {restorePreview.manifest?.exported_by || '—'}</p>
-
-                <div className="restore-mode">
-                  <label><input type="radio" name="restoreMode" value="upsert" checked={restoreMode === 'upsert'} onChange={() => setRestoreMode('upsert')} disabled={busy} /> Safe Upsert (recommended)</label>
-                  <label><input type="radio" name="restoreMode" value="insert_missing" checked={restoreMode === 'insert_missing'} onChange={() => setRestoreMode('insert_missing')} disabled={busy} /> Insert Missing Only</label>
-                </div>
+                <p><b>Backup Date:</b> {formatBackupDate(restorePreview.manifest?.exported_at)}</p>
+                <p><b>Customers row count:</b> {restorePreview.customers?.length ?? 0}</p>
+                <p><b>Inventory row count:</b> {restorePreview.inventory?.length ?? 0}</p>
+                <p><b>Orders row count:</b> {restorePreview.orders?.length ?? 0}</p>
+                <p><b>Payments row count:</b> {restorePreview.payments?.length ?? 0}</p>
+                <p><b>Backup Version:</b> {restorePreview.manifest?.backup_version ?? '—'}</p>
 
                 {restoreErrors.length > 0 && (
                   <div className="restore-validation-errors">
@@ -2264,24 +2275,45 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
                   </div>
                 )}
 
-                <label className="check restore-confirm">
-                  <input type="checkbox" checked={restoreConfirm} onChange={e => setRestoreConfirm(e.target.checked)} disabled={busy || restoreErrors.length > 0} />
-                  I understand that restoring data may update existing records.
-                </label>
+                {canRestore && (
+                  <>
+                    <div className="restore-mode">
+                      <label><input type="radio" name="restoreMode" value="upsert" checked={restoreMode === 'upsert'} onChange={() => setRestoreMode('upsert')} disabled={busy} /> Safe Upsert (recommended)</label>
+                      <label><input type="radio" name="restoreMode" value="insert_missing" checked={restoreMode === 'insert_missing'} onChange={() => setRestoreMode('insert_missing')} disabled={busy} /> Insert Missing Only</label>
+                    </div>
 
-                <div className="restore-actions">
-                  <button type="button" className="soft" onClick={() => { setRestorePreview(null); setRestoreFile(null); setRestoreConfirm(false); setRestoreErrors([]) }} disabled={busy}>Cancel</button>
-                  <button type="button" onClick={runRestore} disabled={busy || !restoreConfirm || restoreErrors.length > 0}>Restore Backup</button>
-                </div>
+                    <label className="check restore-confirm">
+                      <input type="checkbox" checked={restoreConfirm} onChange={e => setRestoreConfirm(e.target.checked)} disabled={busy} />
+                      I understand that restoring data may update existing records.
+                    </label>
+
+                    <div className="restore-actions">
+                      <button type="button" className="soft" onClick={() => { setRestorePreview(null); setRestoreFile(null); setRestoreConfirm(false); setRestoreErrors([]); setStatusMsg('') }} disabled={busy}>Cancel</button>
+                      <button type="button" onClick={runRestore} disabled={busy || !restoreConfirm}>Restore Backup</button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
 
             {restoreStats && (
               <div className="restore-result">
                 <p><b>Restore complete</b></p>
-                <p>Inserted: {restoreStats.inserted} · Updated: {restoreStats.updated} · Failed: {restoreStats.failed}</p>
+                <p>Inserted: {restoreStats.inserted}</p>
+                <p>Updated: {restoreStats.updated}</p>
+                <p>Failed: {restoreStats.failed}</p>
               </div>
             )}
+          </div>
+
+          <div className="backup-section auto-backup-section">
+            <h3>Automatic Backup</h3>
+            <div className="auto-backup-options">
+              <label><input type="radio" name="autoBackup" value="off" checked readOnly disabled /> Off</label>
+              <label><input type="radio" name="autoBackup" value="daily" disabled /> Daily</label>
+              <label><input type="radio" name="autoBackup" value="weekly" disabled /> Weekly</label>
+            </div>
+            <p className="auto-backup-note">Automatic cloud backup will be available in a future update.</p>
           </div>
         </div>
       )}

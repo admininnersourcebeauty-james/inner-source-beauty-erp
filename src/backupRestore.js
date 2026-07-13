@@ -100,7 +100,7 @@ export async function createFullBackupZip({ data, profiles, exportedBy, onProgre
   zip.file('backup_manifest.json', JSON.stringify(manifest, null, 2))
   onProgress?.('Creating ZIP...')
   const blob = await zip.generateAsync({ type: 'blob' })
-  onProgress?.('Backup complete.')
+  onProgress?.('Backup completed successfully.')
   return { blob, manifest, filename: backupZipFilename() }
 }
 

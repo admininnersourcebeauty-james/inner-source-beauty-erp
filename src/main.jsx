@@ -2050,6 +2050,8 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
   const [restoreConfirm, setRestoreConfirm] = useState(false)
   const [restoreErrors, setRestoreErrors] = useState([])
   const [restoreStats, setRestoreStats] = useState(null)
+  const [backupDetails, setBackupDetails] = useState(null)
+  const [showRestoreDialog, setShowRestoreDialog] = useState(false)
 
   function setStatusMsg(msg, isError = false) {
     setStatus(msg)
@@ -2077,6 +2079,13 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
     return formatLocalBackupDisplay(iso)
   }
 
+  function formatFileSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return '—'
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  }
+
   async function updateRole(newRole) {
     if (!hasSupabaseConfig || !session?.user?.id) { setProfile({ ...profile, role: newRole }); return }
     await supabase.from('profiles').upsert({ id: session.user.id, email: session.user.email, role: newRole })
@@ -2086,6 +2095,8 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
   async function runBackupAll() {
     setBusy(true)
     setRestoreStats(null)
+    setBackupDetails(null)
+    setStatusMsg('Preparing backup...')
     try {
       const profiles = await fetchProfilesForBackup()
       const { blob, filename } = await createFullBackupZip({
@@ -2099,11 +2110,18 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
       a.download = filename
       a.click()
       setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+      const backupAt = new Date().toISOString()
       saveLastBackupTime()
       setLastBackup(getLastBackupTime())
-      setStatusMsg(`Backup completed successfully.\n${filename}`)
+      setStatusMsg('')
+      setBackupDetails({
+        filename,
+        size: formatFileSize(blob.size),
+        date: formatLocalBackupDisplay(backupAt),
+      })
       setStatusError(false)
     } catch (err) {
+      setBackupDetails(null)
       setStatusMsg(err.message || 'Backup failed.', true)
     } finally {
       setBusy(false)
@@ -2112,9 +2130,10 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
 
   function exportTable(table) {
     setBusy(true)
+    setBackupDetails(null)
     try {
       downloadJson(`${table}.json`, data[table] || [])
-      setStatusMsg(`${exportLabels[table] || table} export downloaded.`)
+      setStatusMsg(`${exportLabels[table] || table} export downloaded successfully.`)
       setStatusError(false)
     } catch (err) {
       setStatusMsg(`${exportLabels[table] || table} export failed: ${err.message || 'Download error.'}`, true)
@@ -2148,7 +2167,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
     }
   }
 
-  async function runRestore() {
+  function requestRestore() {
     if (!restorePreview) {
       setStatusMsg('Preview the backup before restoring.', true)
       return
@@ -2161,15 +2180,20 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
       setStatusMsg('Fix validation errors before restoring.', true)
       return
     }
-    if (!confirm('Restore this backup now?')) return
+    setShowRestoreDialog(true)
+  }
 
+  async function confirmRestore() {
+    setShowRestoreDialog(false)
     setBusy(true)
     setRestoreStats(null)
+    setStatusMsg('Restoring customers...')
     try {
       const result = await restoreBackupData(restorePreview, restoreMode, setStatusMsg)
       if (!result.ok) {
         setRestoreErrors(result.errors || [])
         setRestoreStats(result.stats)
+        setStatusMsg('')
         setStatusError((result.stats?.failed ?? 0) > 0)
         return
       }
@@ -2214,11 +2238,20 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
           </p>
           <p className="hint last-backup-line">Last Local Backup: <strong>{formatLocalBackupDisplay(lastBackup)}</strong></p>
 
-          {status && <p className={statusError ? 'field-error backup-status' : 'hint backup-status backup-status-msg'}>{status}</p>}
+          {status && <p className={statusError ? 'field-error backup-status backup-status-msg' : 'hint backup-status backup-status-msg'}>{status}</p>}
+
+          {backupDetails && (
+            <div className="backup-result">
+              <p className="backup-result-title">Backup completed successfully.</p>
+              <p><span className="backup-result-label">Filename:</span><br />{backupDetails.filename}</p>
+              <p><span className="backup-result-label">File Size:</span> {backupDetails.size}</p>
+              <p><span className="backup-result-label">Backup Date:</span> {backupDetails.date}</p>
+            </div>
+          )}
 
           <div className="backup-section">
             <h3>Database Backup</h3>
-            <button type="button" onClick={runBackupAll} disabled={busy}>Backup Everything</button>
+            <button type="button" onClick={runBackupAll} disabled={busy}>Download Full Backup</button>
           </div>
 
           <div className="backup-section">
@@ -2234,9 +2267,9 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
 
           <div className="backup-section">
             <h3>Restore Backup</h3>
-            <div className="restore-controls">
+            <div className="restore-controls-vertical">
+              <p className="restore-step-label">Choose ZIP File</p>
               <label className="restore-file-label">
-                Choose ZIP File
                 <input
                   type="file"
                   accept=".zip,application/zip"
@@ -2246,22 +2279,26 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
                     setRestorePreview(null)
                     setRestoreErrors([])
                     setRestoreStats(null)
+                    setRestoreConfirm(false)
+                    setShowRestoreDialog(false)
                     setStatusMsg('')
                   }}
                 />
               </label>
-              <button type="button" className="soft" onClick={previewRestore} disabled={busy || !restoreFile}>Preview Backup</button>
+              <button type="button" className="soft restore-preview-btn" onClick={previewRestore} disabled={busy || !restoreFile}>Preview Backup</button>
             </div>
 
             {restorePreview && (
-              <div className="restore-preview">
-                <h4>Backup Preview</h4>
-                <p><b>Backup Date:</b> {formatBackupDate(restorePreview.manifest?.exported_at)}</p>
-                <p><b>Customers row count:</b> {restorePreview.customers?.length ?? 0}</p>
-                <p><b>Inventory row count:</b> {restorePreview.inventory?.length ?? 0}</p>
-                <p><b>Orders row count:</b> {restorePreview.orders?.length ?? 0}</p>
-                <p><b>Payments row count:</b> {restorePreview.payments?.length ?? 0}</p>
-                <p><b>Backup Version:</b> {restorePreview.manifest?.backup_version ?? '—'}</p>
+              <div className="restore-summary">
+                <h4>Restore Summary</h4>
+                <div className="restore-summary-grid">
+                  <p><span className="summary-label">Backup Date:</span> {formatBackupDate(restorePreview.manifest?.exported_at)}</p>
+                  <p><span className="summary-label">Backup Version:</span> {restorePreview.manifest?.backup_version ?? '—'}</p>
+                  <p><span className="summary-label">Customers:</span> {restorePreview.customers?.length ?? 0} rows</p>
+                  <p><span className="summary-label">Inventory:</span> {restorePreview.inventory?.length ?? 0} rows</p>
+                  <p><span className="summary-label">Orders:</span> {restorePreview.orders?.length ?? 0} rows</p>
+                  <p><span className="summary-label">Payments:</span> {restorePreview.payments?.length ?? 0} rows</p>
+                </div>
 
                 {restoreErrors.length > 0 && (
                   <div className="restore-validation-errors">
@@ -2277,10 +2314,18 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
 
                 {canRestore && (
                   <>
-                    <div className="restore-mode">
-                      <label><input type="radio" name="restoreMode" value="upsert" checked={restoreMode === 'upsert'} onChange={() => setRestoreMode('upsert')} disabled={busy} /> Safe Upsert (recommended)</label>
-                      <label><input type="radio" name="restoreMode" value="insert_missing" checked={restoreMode === 'insert_missing'} onChange={() => setRestoreMode('insert_missing')} disabled={busy} /> Insert Missing Only</label>
+                    <div className="restore-mode-section">
+                      <p className="restore-mode-heading">Restore Mode:</p>
+                      <div className="restore-mode">
+                        <label><input type="radio" name="restoreMode" value="upsert" checked={restoreMode === 'upsert'} onChange={() => setRestoreMode('upsert')} disabled={busy} /> Safe Upsert</label>
+                        <label><input type="radio" name="restoreMode" value="insert_missing" checked={restoreMode === 'insert_missing'} onChange={() => setRestoreMode('insert_missing')} disabled={busy} /> Insert Missing Only</label>
+                      </div>
                     </div>
+
+                    <p className="restore-notice">
+                      Existing records will not be deleted.<br />
+                      Safe Upsert may update matching records and insert missing records.
+                    </p>
 
                     <label className="check restore-confirm">
                       <input type="checkbox" checked={restoreConfirm} onChange={e => setRestoreConfirm(e.target.checked)} disabled={busy} />
@@ -2288,8 +2333,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
                     </label>
 
                     <div className="restore-actions">
-                      <button type="button" className="soft" onClick={() => { setRestorePreview(null); setRestoreFile(null); setRestoreConfirm(false); setRestoreErrors([]); setStatusMsg('') }} disabled={busy}>Cancel</button>
-                      <button type="button" onClick={runRestore} disabled={busy || !restoreConfirm}>Restore Backup</button>
+                      <button type="button" onClick={requestRestore} disabled={busy || !restoreConfirm}>Restore Now</button>
                     </div>
                   </>
                 )}
@@ -2298,7 +2342,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
 
             {restoreStats && (
               <div className="restore-result">
-                <p><b>Restore complete</b></p>
+                <p className="restore-result-title">Restore complete</p>
                 <p>Inserted: {restoreStats.inserted}</p>
                 <p>Updated: {restoreStats.updated}</p>
                 <p>Failed: {restoreStats.failed}</p>
@@ -2307,14 +2351,26 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
           </div>
 
           <div className="backup-section auto-backup-section">
-            <h3>Automatic Backup</h3>
-            <div className="auto-backup-options">
-              <label><input type="radio" name="autoBackup" value="off" checked readOnly disabled /> Off</label>
-              <label><input type="radio" name="autoBackup" value="daily" disabled /> Daily</label>
-              <label><input type="radio" name="autoBackup" value="weekly" disabled /> Weekly</label>
+            <div className="auto-backup-card">
+              <div className="auto-backup-card-header">
+                <strong>Automatic Cloud Backup</strong>
+                <span className="coming-soon-badge">Coming Soon</span>
+              </div>
+              <p className="auto-backup-note">Daily and weekly automatic cloud backups will be available in a future update.</p>
             </div>
-            <p className="auto-backup-note">Automatic cloud backup will be available in a future update.</p>
           </div>
+
+          {showRestoreDialog && (
+            <div className="restore-dialog-overlay" onClick={() => setShowRestoreDialog(false)}>
+              <div className="restore-dialog" onClick={e => e.stopPropagation()}>
+                <p className="restore-dialog-text">Restore this backup now?</p>
+                <div className="restore-dialog-actions">
+                  <button type="button" className="soft" onClick={() => setShowRestoreDialog(false)}>Cancel</button>
+                  <button type="button" onClick={confirmRestore}>Restore Backup</button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

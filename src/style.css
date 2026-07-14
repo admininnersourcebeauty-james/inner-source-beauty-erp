@@ -259,6 +259,11 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 
 .link-cell{background:none;border:none;padding:0;color:#08142b;font-weight:700;text-decoration:underline;cursor:pointer;font:inherit}
 .link-cell:hover{color:#24324b}
+.invoice-link{color:#2563eb;text-decoration:underline;font-weight:700}
+.invoice-link:hover{color:#1d4ed8}
+.rtf-alerts-table{margin-top:8px}
+.rtf-alerts-table .fulfill-open-btn{padding:6px 10px;font-size:12px;line-height:1.2;white-space:nowrap}
+.fulfillment-method-field{scroll-margin-top:80px}
 select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
 .invoice-highlight{outline:2px solid #2563eb;outline-offset:4px;border-radius:8px}
 .detail-nav-table .clickable-row{cursor:pointer}
@@ -300,6 +305,8 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .order-filters .filter-btn{width:100%}
   .alloc-prompt-actions{flex-direction:column}
   .alloc-prompt-actions button{width:100%}
+  .rtf-alerts-table table{min-width:760px}
+  .rtf-alerts-table .fulfill-open-btn{padding:5px 8px;font-size:11px}
 }
 
 @media print{

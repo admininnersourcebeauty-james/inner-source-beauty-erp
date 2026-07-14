@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { supabase, hasSupabaseConfig } from './supabaseClient.js'
 import {
@@ -143,7 +143,7 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [globalSearch, setGlobalSearch] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
-  const [selectedRecord, setSelectedRecord] = useState({ page: '', id: '' })
+  const [selectedRecord, setSelectedRecord] = useState({ page: '', id: '', focusFulfillment: false })
 
   const data = hasSupabaseConfig && session ? cloudData : localData
   const role = profile.role || 'Admin'
@@ -751,14 +751,18 @@ function App() {
     setMenuOpen(false)
   }
 
-  function openRecord(targetPage, id) {
-    setSelectedRecord({ page: targetPage, id: String(id) })
+  function openRecord(targetPage, id, options = {}) {
+    setSelectedRecord({
+      page: targetPage,
+      id: String(id),
+      focusFulfillment: !!options.focusFulfillment,
+    })
     setPage(targetPage)
     setMenuOpen(false)
   }
 
   function clearSelectedRecord() {
-    setSelectedRecord({ page: '', id: '' })
+    setSelectedRecord({ page: '', id: '', focusFulfillment: false })
   }
 
   if (!session) return (
@@ -804,7 +808,9 @@ function App() {
           allocateBackOrders={allocateBackOrdersForProduct} />}
         {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteOrder={deleteOrder}
           completeFulfillment={completeFulfillment}
-          selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
+          selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''}
+          focusFulfillment={selectedRecord.page === 'Orders' && selectedRecord.focusFulfillment}
+          clearSelection={clearSelectedRecord} />}
         {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Payments' && <Payments data={data} recordMultiPayment={recordMultiPayment} deleteRow={deleteRow} onNavigate={openRecord}
@@ -944,6 +950,10 @@ function Dashboard({ data, stats, onNavigate }) {
   const deliveryCount = companyDeliveryCount(data.orders)
   const rtfAlerts = readyToFulfillAlerts(data.orders, 10)
 
+  function openOrderForEdit(orderId, focusFulfillment = false) {
+    onNavigate?.('Orders', orderId, { focusFulfillment })
+  }
+
   const todaySales = todayOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   const todayProfit = todayOrders.reduce((s, o) => s + orderProfit(o), 0)
   const ordersToday = todayOrders.length
@@ -1048,7 +1058,7 @@ function Dashboard({ data, stats, onNavigate }) {
         {rtfAlerts.length === 0 ? (
           <p className="hint">No orders ready to fulfill.</p>
         ) : (
-          <div className="table-wrap">
+          <div className="table-wrap rtf-alerts-table">
             <table>
               <thead>
                 <tr>
@@ -1059,6 +1069,7 @@ function Dashboard({ data, stats, onNavigate }) {
                   <th>Fulfillment Method</th>
                   <th>Tracking / Handled By</th>
                   <th>Status</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -1067,7 +1078,7 @@ function Dashboard({ data, stats, onNavigate }) {
                   return (
                     <tr key={o.id}>
                       <td>
-                        <button type="button" className="link-cell" onClick={() => onNavigate?.('Invoice', o.id)}>
+                        <button type="button" className="link-cell invoice-link" onClick={() => openOrderForEdit(o.id)}>
                           {o.invoice_no || '—'}
                         </button>
                       </td>
@@ -1077,6 +1088,11 @@ function Dashboard({ data, stats, onNavigate }) {
                       <td>{o.shipping_method || '—'}</td>
                       <td>{fulfillmentHandledBy(o)}</td>
                       <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
+                      <td>
+                        <button type="button" className="soft fulfill-open-btn" onClick={() => openOrderForEdit(o.id, true)}>
+                          Open Fulfillment
+                        </button>
+                      </td>
                     </tr>
                   )
                 })}
@@ -1601,7 +1617,7 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
   )
 }
 
-function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillment, selectedOrderId, clearSelection }) {
+function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillment, selectedOrderId, focusFulfillment, clearSelection }) {
   const blank = {
     customer_id: '', inventory_id: '', customer_name: '', style: '', qty: '', price: '',
     shipping_method: '', shipping: '0', discount: '0', status: 'Open', note: '', tracking: '',
@@ -1625,15 +1641,21 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
   const editingOrder = editingId ? data.orders.find(o => String(o.id) === String(editingId)) : null
   const editingStatus = normalizeOrderStatus(editingOrder?.status || f.status)
   const canCompleteFulfillment = editingId && editingStatus === 'Ready to Fulfill'
+  const lastNavRef = useRef('')
 
   useEffect(() => {
-    if (!selectedOrderId) return
-    setHighlightId(selectedOrderId)
+    if (!selectedOrderId) {
+      lastNavRef.current = ''
+      return
+    }
+    const navKey = `${selectedOrderId}:${focusFulfillment ? '1' : '0'}`
+    if (lastNavRef.current === navKey) return
+    const order = data.orders.find(o => String(o.id) === String(selectedOrderId))
+    if (!order) return
+    lastNavRef.current = navKey
+    loadOrderForEdit(order, focusFulfillment)
     clearSelection?.()
-    requestAnimationFrame(() => {
-      document.getElementById(`order-row-${selectedOrderId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    })
-  }, [selectedOrderId, clearSelection])
+  }, [selectedOrderId, focusFulfillment, data.orders])
 
   function cancelEdit() {
     setEditingId(null)
@@ -1644,7 +1666,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
     setF(blank)
   }
 
-  function loadOrderForEdit(order) {
+  function loadOrderForEdit(order, scrollToFulfillment = false) {
     setEditingId(order.id)
     const f0 = normalizeFulfillment(order)
     setEditSnapshot({
@@ -1679,6 +1701,16 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
     })
     requestAnimationFrame(() => {
       document.getElementById('order-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      if (!scrollToFulfillment) return
+      requestAnimationFrame(() => {
+        if (order.shipping_method) {
+          document.getElementById('fulfillment-fields')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        } else {
+          const methodSelect = document.getElementById('fulfillment-method-select')
+          methodSelect?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          methodSelect?.focus()
+        }
+      })
     })
   }
 
@@ -1835,9 +1867,9 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
         <input placeholder="Qty" type="number" min="1" value={f.qty} onChange={e => setF({ ...f, qty: e.target.value })} />
         <input placeholder="Selling Price (auto)" value={f.price} onChange={e => setF({ ...f, price: e.target.value })} />
         <div className="profit-preview">Profit: <strong>{money(lineProfit)}</strong></div>
-        <label className="order-field">
+        <label className="order-field fulfillment-method-field" id="fulfillment-method-field">
           Fulfillment Method
-          <select value={f.shipping_method} onChange={e => setF({ ...f, shipping_method: e.target.value })}>
+          <select id="fulfillment-method-select" value={f.shipping_method} onChange={e => setF({ ...f, shipping_method: e.target.value })}>
             <option value="">Select Fulfillment Method</option>
             {FULFILLMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
@@ -1868,7 +1900,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
         <input placeholder="Order Note" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
 
         {(showCarrierFields || showDeliveryFields || showPickupFields) && (
-          <div className="fulfillment-fields">
+          <div className="fulfillment-fields" id="fulfillment-fields">
             <h3>Fulfillment Details</h3>
             {showCarrierFields && (
               <>

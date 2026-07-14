@@ -6,17 +6,18 @@ import {
   saveLastBackupTime, getLastBackupTime, validateRestoreRows, executeRestore,
 } from './backupRestore.js'
 import {
-  ORDER_STATUSES, calcAllocation, deriveCreateStatus, normalizeFulfillment, unshippedAllocated,
+  ORDER_STATUSES, FULFILLMENT_METHODS, calcAllocation, deriveCreateStatus, normalizeFulfillment, unshippedAllocated,
   backOrderedQtyForProduct, activeBackorderOrders, backOrderDashboardStats, activeBackorderAlerts,
-  backOrderReports, validateShipStatus, resolveShippedQty, buildAllocationPlan,
-  isValidDbDate, inventoryStockView,
+  backOrderReports, validateFulfillmentStatus, resolveFulfilledQty, buildAllocationPlan,
+  isValidDbDate, inventoryStockView, normalizeOrderStatus, statusMatchesFilter, countOrdersByStatus,
+  fulfillmentHandledBy, readyToFulfillAlerts, awaitingPickupCount, companyDeliveryCount,
+  validateCompleteFulfillment, isCarrierMethod, isCompanyDelivery, isCustomerPickup, formatFulfillmentDate,
 } from './backorder.js'
 import './style.css'
 
 const TABLES = ['customers', 'inventory', 'orders', 'payments']
 const EMPTY = { customers: [], inventory: [], orders: [], payments: [] }
 const PAYMENT_METHODS = ['Zelle', 'Venmo', 'Cash', 'Credit Card', 'Check', 'ACH/Wire']
-const SHIPPING_METHODS = ['UPS Next Day', 'UPS 2nd Day', 'UPS 3 Day', 'UPS Ground', 'USPS Ground', 'USPS Priority']
 const TERMS = ['COD', 'NET 15', 'NET 30', 'NET 45', 'NET 60']
 const STATUSES = ['Active', 'Hold', 'VIP']
 const ROLES = ['Admin', 'Staff', 'Warehouse']
@@ -473,7 +474,7 @@ function App() {
 
     let allocated_qty = 0
     let backorder_qty = 0
-    let status = f.status || existing.status || 'Open'
+    let status = normalizeOrderStatus(f.status || existing.status || 'Open')
     let shipped_qty = Number(existing.shipped_qty ?? 0)
 
     if (status === 'Cancelled') {
@@ -489,12 +490,13 @@ function App() {
       )
       ;({ allocated_qty, backorder_qty } = calcAllocation(qty, availableStock))
 
-      const shipError = validateShipStatus(status, backorder_qty)
+      const shipError = validateFulfillmentStatus(status, backorder_qty)
       if (shipError) return { error: shipError }
 
-      shipped_qty = resolveShippedQty(status, allocated_qty, shipped_qty, backorder_qty)
+      shipped_qty = resolveFulfilledQty(status, allocated_qty, shipped_qty, backorder_qty)
+      status = normalizeOrderStatus(status)
 
-      if (status !== 'Shipped' && status !== 'Partially Shipped' && status !== 'Ready to Ship') {
+      if (status !== 'Completed' && status !== 'Partially Fulfilled' && status !== 'Ready to Fulfill') {
         if (backorder_qty > 0) status = 'Back Order'
         else if (backorder_qty === 0 && allocated_qty > 0 && status === 'Back Order') status = 'Open'
       }
@@ -517,6 +519,11 @@ function App() {
       due_date: toDbDate(f.due_date || existing.due_date),
       tracking: f.tracking || '',
       order_date: toDbDate(f.order_date || existing.order_date || existing.created_at),
+      fulfillment_date: f.fulfillment_date ? toDbDate(f.fulfillment_date) : (existing.fulfillment_date || null),
+      delivered_by: f.delivered_by || '',
+      picked_up_by: f.picked_up_by || '',
+      fulfillment_note: f.fulfillment_note || '',
+      signature_name: f.signature_name || '',
     }
     await updateRow('orders', orderId, payload)
 
@@ -555,6 +562,40 @@ function App() {
     const finalQty = Math.max(Number(savedQty) - stockUsed, 0)
     await updateRow('inventory', inventoryId, { qty: finalQty })
     return plan
+  }
+
+  async function completeFulfillment(orderId, form) {
+    const order = data.orders.find(o => String(o.id) === String(orderId))
+    if (!order) return { error: 'Order not found.' }
+
+    const validation = validateCompleteFulfillment(order, form)
+    if (validation.error) return validation
+
+    const { allocated_qty } = normalizeFulfillment(order)
+    const payload = {
+      status: 'Completed',
+      shipped_qty: allocated_qty,
+      shipping_method: form.shipping_method || order.shipping_method || '',
+      tracking: form.tracking || '',
+      fulfillment_date: form.fulfillment_date ? toDbDate(form.fulfillment_date) : null,
+      delivered_by: form.delivered_by || '',
+      picked_up_by: form.picked_up_by || '',
+      fulfillment_note: form.fulfillment_note || '',
+      signature_name: form.signature_name || '',
+    }
+
+    setNotice('')
+    if (hasSupabaseConfig && session) {
+      const { error } = await supabase.from('orders').update(payload).eq('id', orderId)
+      if (error) {
+        setNotice(error.message)
+        return { error: error.message }
+      }
+      await loadCloudData()
+    } else {
+      await updateRow('orders', orderId, payload)
+    }
+    return { error: '' }
   }
 
   async function recordPayment(f) {
@@ -762,6 +803,7 @@ function App() {
         {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow}
           allocateBackOrders={allocateBackOrdersForProduct} />}
         {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteOrder={deleteOrder}
+          completeFulfillment={completeFulfillment}
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
@@ -887,8 +929,9 @@ function inventoryUnitCost(i) {
 }
 
 function OrderStatusBadge({ status, backorderQty = 0 }) {
-  const isBackOrder = status === 'Back Order' || backorderQty > 0
-  return <span className={isBackOrder ? 'status-badge backorder-badge' : 'status-badge'}>{status || '—'}</span>
+  const label = normalizeOrderStatus(status)
+  const isBackOrder = label === 'Back Order' || backorderQty > 0
+  return <span className={isBackOrder ? 'status-badge backorder-badge' : 'status-badge'}>{label || '—'}</span>
 }
 
 function Dashboard({ data, stats, onNavigate }) {
@@ -896,6 +939,10 @@ function Dashboard({ data, stats, onNavigate }) {
   const monthOrders = data.orders.filter(isOrderDateThisMonth)
   const boStats = backOrderDashboardStats(data.orders)
   const backorderAlerts = activeBackorderAlerts(data.orders, 10)
+  const rtfCount = countOrdersByStatus(data.orders, 'Ready to Fulfill')
+  const pickupCount = awaitingPickupCount(data.orders)
+  const deliveryCount = companyDeliveryCount(data.orders)
+  const rtfAlerts = readyToFulfillAlerts(data.orders, 10)
 
   const todaySales = todayOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   const todayProfit = todayOrders.reduce((s, o) => s + orderProfit(o), 0)
@@ -953,7 +1000,7 @@ function Dashboard({ data, stats, onNavigate }) {
       qty: f.qty,
       allocated_qty: f.allocated_qty,
       backorder_qty: f.backorder_qty,
-      status: o.status || '—',
+      status: normalizeOrderStatus(o.status),
     }
   }
 
@@ -989,9 +1036,54 @@ function Dashboard({ data, stats, onNavigate }) {
           <Card t="Out of Stock Items" v={outOfStockItems.length} cls={outOfStockItems.length > 0 ? 'card-warn' : ''} />
         </div>
         <div className="cards dashboard-row">
-          <Card t="Back Order Items" v={boStats.items} cls={boStats.items > 0 ? 'card-warn' : ''} />
           <Card t="Back Order Units" v={boStats.units} cls={boStats.units > 0 ? 'card-warn' : ''} />
+          <Card t="Ready to Fulfill Orders" v={rtfCount} cls={rtfCount > 0 ? 'card-warn' : ''} />
+          <Card t="Awaiting Pickup" v={pickupCount} cls={pickupCount > 0 ? 'card-warn' : ''} />
+          <Card t="Company Deliveries" v={deliveryCount} cls={deliveryCount > 0 ? 'card-warn' : ''} />
         </div>
+      </div>
+
+      <div className="panel">
+        <h2>Ready to Fulfill Alerts</h2>
+        {rtfAlerts.length === 0 ? (
+          <p className="hint">No orders ready to fulfill.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Invoice No</th>
+                  <th>Customer</th>
+                  <th>Product</th>
+                  <th>Qty</th>
+                  <th>Fulfillment Method</th>
+                  <th>Tracking / Handled By</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rtfAlerts.map(o => {
+                  const ff = normalizeFulfillment(o)
+                  return (
+                    <tr key={o.id}>
+                      <td>
+                        <button type="button" className="link-cell" onClick={() => onNavigate?.('Invoice', o.id)}>
+                          {o.invoice_no || '—'}
+                        </button>
+                      </td>
+                      <td>{o.customer_name || '—'}</td>
+                      <td>{o.style || '—'}</td>
+                      <td>{ff.qty}</td>
+                      <td>{o.shipping_method || '—'}</td>
+                      <td>{fulfillmentHandledBy(o)}</td>
+                      <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       <div className="panel">
@@ -1244,7 +1336,10 @@ function CustomerDetail({ customer, data, deleteRow, onNavigate }) {
   if (!customer) return <div className="panel detail"><h2>Customer Detail</h2><p>Select a customer.</p></div>
   const s = customerStats(customer, data)
   const moneyCols = ['total', 'amount']
-  const cellValue = (r, c) => moneyCols.includes(c) ? money(r[c]) : c === 'created_at' ? dateOnly(r[c]) : String(r[c] ?? '')
+  const cellValue = (r, c) => {
+    if (c === 'status') return normalizeOrderStatus(r[c])
+    return moneyCols.includes(c) ? money(r[c]) : c === 'created_at' ? dateOnly(r[c]) : String(r[c] ?? '')
+  }
 
   return (
     <div className="panel detail">
@@ -1446,16 +1541,16 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>Invoice No</th><th>Customer</th><th>Previously Back Ordered</th><th>Allocated Now</th><th>Remaining Back Order</th></tr>
+                <tr><th>Invoice No</th><th>Customer</th><th>Allocated Now</th><th>Remaining Back Order</th><th>New Status</th></tr>
               </thead>
               <tbody>
                 {allocSummary.map((s, i) => (
                   <tr key={i}>
                     <td>{s.invoice_no || '—'}</td>
                     <td>{s.customer_name || '—'}</td>
-                    <td>{s.previouslyBackOrdered}</td>
                     <td>{s.allocatedNow}</td>
                     <td>{s.remainingBackOrder}</td>
+                    <td>{s.newStatus}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1506,19 +1601,30 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
   )
 }
 
-function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, clearSelection }) {
+function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillment, selectedOrderId, clearSelection }) {
   const blank = {
     customer_id: '', inventory_id: '', customer_name: '', style: '', qty: '', price: '',
-    shipping_method: '', shipping: '0', discount: '0', status: 'Open', note: '', tracking: '', due_date: '', order_date: '',
+    shipping_method: '', shipping: '0', discount: '0', status: 'Open', note: '', tracking: '',
+    due_date: '', order_date: '', fulfillment_date: '', delivered_by: '', picked_up_by: '',
+    fulfillment_note: '', signature_name: '',
   }
   const [f, setF] = useState(blank)
   const [highlightId, setHighlightId] = useState('')
   const [editingId, setEditingId] = useState(null)
   const [editSnapshot, setEditSnapshot] = useState(null)
   const [editError, setEditError] = useState('')
+  const [fulfillError, setFulfillError] = useState('')
   const [statusFilter, setStatusFilter] = useState('All')
   const [showBackorderConfirm, setShowBackorderConfirm] = useState(false)
   const [shipWarning, setShipWarning] = useState('')
+
+  const method = f.shipping_method || ''
+  const showCarrierFields = isCarrierMethod(method)
+  const showDeliveryFields = isCompanyDelivery(method)
+  const showPickupFields = isCustomerPickup(method)
+  const editingOrder = editingId ? data.orders.find(o => String(o.id) === String(editingId)) : null
+  const editingStatus = normalizeOrderStatus(editingOrder?.status || f.status)
+  const canCompleteFulfillment = editingId && editingStatus === 'Ready to Fulfill'
 
   useEffect(() => {
     if (!selectedOrderId) return
@@ -1533,6 +1639,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
     setEditingId(null)
     setEditSnapshot(null)
     setEditError('')
+    setFulfillError('')
     setShipWarning('')
     setF(blank)
   }
@@ -1546,6 +1653,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
       shipped_qty: f0.shipped_qty,
     })
     setEditError('')
+    setFulfillError('')
     setShipWarning('')
     setHighlightId(order.id)
     setF({
@@ -1558,11 +1666,16 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
       shipping_method: order.shipping_method || '',
       shipping: order.shipping ?? '0',
       discount: order.discount ?? '0',
-      status: order.status || 'Open',
+      status: normalizeOrderStatus(order.status || 'Open'),
       note: order.note || '',
       tracking: order.tracking || '',
       due_date: toDbDate(order.due_date || ''),
       order_date: toDbDate(order.order_date || order.created_at || ''),
+      fulfillment_date: toDbDate(order.fulfillment_date || ''),
+      delivered_by: order.delivered_by || '',
+      picked_up_by: order.picked_up_by || '',
+      fulfillment_note: order.fulfillment_note || '',
+      signature_name: order.signature_name || '',
     })
     requestAnimationFrame(() => {
       document.getElementById('order-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -1572,7 +1685,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
   async function handleSave() {
     if (editingId) {
       const preview = previewAllocation()
-      const warn = validateShipStatus(f.status, preview.backorder_qty)
+      const warn = validateFulfillmentStatus(f.status, preview.backorder_qty)
       if (warn) {
         setShipWarning(warn)
         setEditError(warn)
@@ -1598,6 +1711,17 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
     }
     setEditError('')
     setF(blank)
+  }
+
+  async function handleCompleteFulfillment() {
+    if (!editingId) return
+    setFulfillError('')
+    const result = await completeFulfillment(editingId, f)
+    if (result?.error) {
+      setFulfillError(result.error)
+      return
+    }
+    cancelEdit()
   }
 
   async function confirmCreateWithBackorder() {
@@ -1646,10 +1770,14 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
   }
 
   const allocPreview = previewAllocation()
-  const filteredOrders = data.orders.filter(o => {
-    if (statusFilter === 'All') return true
-    return (o.status || 'Open') === statusFilter
-  })
+  const filteredOrders = data.orders.filter(o => statusMatchesFilter(o, statusFilter))
+
+  function filterLabel(s) {
+    if (s === 'All') return 'All'
+    const count = countOrdersByStatus(data.orders, s)
+    if (['Back Order', 'Ready to Fulfill', 'Completed'].includes(s)) return `${s} (${count})`
+    return s
+  }
 
   function formatOrderDate(order) {
     const raw = order.order_date || order.created_at
@@ -1658,6 +1786,9 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
     if (Number.isNaN(dt.getTime())) return '—'
     return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
   }
+
+  const dateFieldLabel = showDeliveryFields ? 'Delivery Date' : showPickupFields ? 'Pickup Date' : 'Fulfillment Date'
+  const noteFieldLabel = showDeliveryFields ? 'Delivery Note' : showPickupFields ? 'Pickup Note' : 'Fulfillment Note'
 
   return (
     <div className="panel">
@@ -1705,10 +1836,10 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
         <input placeholder="Selling Price (auto)" value={f.price} onChange={e => setF({ ...f, price: e.target.value })} />
         <div className="profit-preview">Profit: <strong>{money(lineProfit)}</strong></div>
         <label className="order-field">
-          Shipping Method
+          Fulfillment Method
           <select value={f.shipping_method} onChange={e => setF({ ...f, shipping_method: e.target.value })}>
-            <option value="">Select Shipping Method</option>
-            {SHIPPING_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+            <option value="">Select Fulfillment Method</option>
+            {FULFILLMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
         </label>
         <label className="order-field">
@@ -1719,7 +1850,6 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
           Discount
           <input placeholder="Discount" type="number" min="0" step="0.01" value={f.discount} onChange={e => setF({ ...f, discount: e.target.value })} />
         </label>
-        <input placeholder="Tracking #" value={f.tracking} onChange={e => setF({ ...f, tracking: e.target.value })} />
         <label className="order-field">
           Order Date
           <input type="date" value={f.order_date} onChange={e => setF({ ...f, order_date: e.target.value })} />
@@ -1729,17 +1859,94 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
           setF({ ...f, status: e.target.value })
           setShipWarning('')
           const preview = previewAllocation()
-          const warn = validateShipStatus(e.target.value, preview.backorder_qty)
+          const warn = validateFulfillmentStatus(e.target.value, preview.backorder_qty)
           if (warn) setShipWarning(warn)
         }}>
           {ORDER_STATUSES.map(x => <option key={x}>{x}</option>)}
         </select>
         {shipWarning && <p className="field-error order-edit-error">{shipWarning}</p>}
         <input placeholder="Order Note" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
+
+        {(showCarrierFields || showDeliveryFields || showPickupFields) && (
+          <div className="fulfillment-fields">
+            <h3>Fulfillment Details</h3>
+            {showCarrierFields && (
+              <>
+                <label className="order-field">
+                  Tracking Number
+                  <input placeholder="Tracking Number" value={f.tracking} onChange={e => setF({ ...f, tracking: e.target.value })} />
+                </label>
+                <label className="order-field">
+                  Fulfillment Date
+                  <input type="date" value={f.fulfillment_date} onChange={e => setF({ ...f, fulfillment_date: e.target.value })} />
+                </label>
+              </>
+            )}
+            {showDeliveryFields && (
+              <>
+                <label className="order-field">
+                  Delivery Date
+                  <input type="date" value={f.fulfillment_date} onChange={e => setF({ ...f, fulfillment_date: e.target.value })} />
+                </label>
+                <label className="order-field">
+                  Delivered By
+                  <input placeholder="Delivered By" value={f.delivered_by} onChange={e => setF({ ...f, delivered_by: e.target.value })} />
+                </label>
+                <label className="order-field">
+                  Delivery Note
+                  <input placeholder="Delivery Note" value={f.fulfillment_note} onChange={e => setF({ ...f, fulfillment_note: e.target.value })} />
+                </label>
+                <label className="order-field">
+                  Signature Name <span className="hint-inline">(optional)</span>
+                  <input placeholder="Signature Name" value={f.signature_name} onChange={e => setF({ ...f, signature_name: e.target.value })} />
+                </label>
+              </>
+            )}
+            {showPickupFields && (
+              <>
+                <label className="order-field">
+                  Pickup Date
+                  <input type="date" value={f.fulfillment_date} onChange={e => setF({ ...f, fulfillment_date: e.target.value })} />
+                </label>
+                <label className="order-field">
+                  Picked Up By
+                  <input placeholder="Picked Up By" value={f.picked_up_by} onChange={e => setF({ ...f, picked_up_by: e.target.value })} />
+                </label>
+                <label className="order-field">
+                  Pickup Note
+                  <input placeholder="Pickup Note" value={f.fulfillment_note} onChange={e => setF({ ...f, fulfillment_note: e.target.value })} />
+                </label>
+                <label className="order-field">
+                  Signature Name <span className="hint-inline">(optional)</span>
+                  <input placeholder="Signature Name" value={f.signature_name} onChange={e => setF({ ...f, signature_name: e.target.value })} />
+                </label>
+              </>
+            )}
+            {!showCarrierFields && !showDeliveryFields && !showPickupFields && method && (
+              <p className="hint">{dateFieldLabel} and {noteFieldLabel.toLowerCase()} available when a fulfillment method is selected.</p>
+            )}
+          </div>
+        )}
+
         <div className="order-form-actions">
           <button type="button" onClick={handleSave}>{editingId ? 'Update Invoice' : 'Create Invoice'}</button>
           {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel Edit</button>}
         </div>
+
+        {canCompleteFulfillment && (
+          <div className="fulfillment-complete panel-inline">
+            <h3>Complete Fulfillment</h3>
+            {allocPreview.backorder_qty > 0 ? (
+              <p className="field-error">This order still has {allocPreview.backorder_qty} units on Back Order.</p>
+            ) : (
+              <>
+                <p className="hint">Fill in the required fulfillment details above, then complete this order.</p>
+                {fulfillError && <p className="field-error order-edit-error">{fulfillError}</p>}
+                <button type="button" className="fulfill-btn" onClick={handleCompleteFulfillment}>Complete Fulfillment</button>
+              </>
+            )}
+          </div>
+        )}
       </div>
       {showBackorderConfirm && (
         <div className="restore-dialog-overlay" onClick={() => setShowBackorderConfirm(false)}>
@@ -1758,7 +1965,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
       <h2>Orders</h2>
       <div className="order-filters">
         {['All', ...ORDER_STATUSES].map(s => (
-          <button key={s} type="button" className={statusFilter === s ? 'filter-btn active' : 'filter-btn soft'} onClick={() => setStatusFilter(s)}>{s}</button>
+          <button key={s} type="button" className={statusFilter === s ? 'filter-btn active' : 'filter-btn soft'} onClick={() => setStatusFilter(s)}>{filterLabel(s)}</button>
         ))}
       </div>
       <div className="table-wrap orders-table">
@@ -1768,19 +1975,17 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
               <th>Order Date</th>
               <th>Invoice No</th>
               <th>Customer Name</th>
-              <th>Style</th>
+              <th>Product</th>
               <th>Qty</th>
               <th>Allocated</th>
               <th>Back Order</th>
-              <th>Shipped</th>
-              <th>Price</th>
-              <th>Shipping Method</th>
-              <th>Shipping Charge</th>
-              <th>Total</th>
-              <th>Profit</th>
+              <th>Fulfilled</th>
+              <th>Fulfillment Method</th>
+              <th>Tracking / Handled By</th>
               <th>Status</th>
               <th>Payment Status</th>
-              <th></th>
+              <th>Edit</th>
+              <th>Delete</th>
             </tr>
           </thead>
           <tbody>
@@ -1799,16 +2004,15 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, selectedOrderId, 
                 <td>{ff.qty}</td>
                 <td>{ff.allocated_qty}</td>
                 <td>{ff.backorder_qty > 0 ? <span className="backorder-badge">{ff.backorder_qty}</span> : ff.backorder_qty}</td>
-                <td>{ff.shipped_qty}</td>
-                <td>{money(o.price)}</td>
+                <td>{ff.fulfilled_qty}</td>
                 <td>{o.shipping_method || '—'}</td>
-                <td>{money(o.shipping)}</td>
-                <td>{money(o.total)}</td>
-                <td>{money(o.profit)}</td>
+                <td>{fulfillmentHandledBy(o)}</td>
                 <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
                 <td>{o.payment_status || '—'}</td>
                 <td className="row-actions">
                   <button type="button" className="soft" onClick={() => loadOrderForEdit(o)}>Edit</button>
+                </td>
+                <td className="row-actions">
                   <button type="button" className="danger" onClick={() => handleDeleteOrder(o.id)}>Delete</button>
                 </td>
               </tr>
@@ -1846,6 +2050,10 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
   const shippingCharge = Number(o.shipping || 0)
   const discount = Number(o.discount || 0)
   const fulfillment = normalizeFulfillment(o)
+  const method = o.shipping_method || ''
+  const fulfillmentDateLabel = isCompanyDelivery(method) ? 'Delivery Date' : isCustomerPickup(method) ? 'Pickup Date' : 'Fulfillment Date'
+  const handledByLabel = isCarrierMethod(method) ? 'Tracking Number' : isCompanyDelivery(method) ? 'Delivered By' : isCustomerPickup(method) ? 'Picked Up By' : 'Tracking / Handled By'
+  const handledByValue = fulfillmentHandledBy(o)
   const company = c?.company || o.customer_name || ''
   const contact = c?.name && c.name !== company ? c.name : ''
   const billLines = addressLines(c?.billing_address || c?.address)
@@ -1868,9 +2076,9 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
             <p><b>Invoice #:</b> {o.invoice_no}<br />
               <b>Date:</b> {dateOnly(o.created_at) || today()}<br />
               <b>Due Date:</b> {o.due_date || calcDueDate(c?.payment_terms, o.created_at)}<br />
-              <b>Status:</b> {o.payment_status}<br />
-              <b>Shipping Method:</b> {o.shipping_method || '—'}<br />
-              <b>Tracking:</b> {o.tracking || '—'}</p>
+              <b>Payment Status:</b> {o.payment_status}<br />
+              <b>Fulfillment Status:</b> {normalizeOrderStatus(o.status)}<br />
+              <b>Fulfillment Method:</b> {o.shipping_method || '—'}</p>
           </div>
         </div>
         <div className="address-grid">
@@ -1903,7 +2111,6 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
         </table>
         <div className="invoice-totals">
           <p><b>Subtotal:</b> {money(subtotal)}</p>
-          <p><b>Shipping Method:</b> {o.shipping_method || '—'}</p>
           <p><b>Shipping Charge:</b> {money(shippingCharge)}</p>
           <p><b>Discount:</b> {money(discount)}</p>
           <p className="invoice-grand-total"><b>Total:</b> {money(o.total)}</p>
@@ -1912,10 +2119,20 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
         </div>
         <div className="invoice-fulfillment">
           <h3>Fulfillment</h3>
+          <p><b>Fulfillment Method:</b> {o.shipping_method || '—'}</p>
+          {method && (
+            <>
+              {isCarrierMethod(method) && o.tracking && <p><b>Tracking Number:</b> {o.tracking}</p>}
+              {!isCarrierMethod(method) && handledByValue !== '—' && <p><b>{handledByLabel}:</b> {handledByValue}</p>}
+              {o.fulfillment_date && <p><b>{fulfillmentDateLabel}:</b> {formatFulfillmentDate(o)}</p>}
+              {isCompanyDelivery(method) && o.delivered_by && <p><b>Delivered By:</b> {o.delivered_by}</p>}
+              {isCustomerPickup(method) && o.picked_up_by && <p><b>Picked Up By:</b> {o.picked_up_by}</p>}
+            </>
+          )}
           <p><b>Ordered Qty:</b> {fulfillment.qty}</p>
           <p><b>Allocated Qty:</b> {fulfillment.allocated_qty}</p>
           <p><b>Back Order Qty:</b> {fulfillment.backorder_qty}</p>
-          <p><b>Shipped Qty:</b> {fulfillment.shipped_qty}</p>
+          <p><b>Fulfilled Qty:</b> {fulfillment.fulfilled_qty}</p>
           {fulfillment.backorder_qty > 0 && (
             <p className="invoice-backorder-flag">BACK ORDER: {fulfillment.backorder_qty}</p>
           )}

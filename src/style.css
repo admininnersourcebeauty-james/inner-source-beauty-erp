@@ -182,6 +182,13 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .order-stock-preview{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px 14px;grid-column:1/-1}
 .order-stock-preview p{margin:4px 0;font-size:14px}
 .backorder-warning{margin-top:8px!important}
+.fulfillment-fields{grid-column:1/-1;padding:14px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;display:grid;gap:12px}
+.fulfillment-fields h3{margin:0 0 4px;font-size:15px;grid-column:1/-1}
+.fulfillment-complete{grid-column:1/-1;margin-top:8px;padding:14px 16px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:10px}
+.fulfillment-complete h3{margin:0 0 8px;font-size:15px}
+.fulfill-btn{background:#059669;color:#fff;border:none}
+.fulfill-btn:hover{background:#047857}
+.hint-inline{font-weight:normal;color:#64748b;font-size:12px}
 .order-filters{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
 .filter-btn{padding:8px 12px;font-size:13px}
 .filter-btn.active{background:#08142b;color:#fff;border-color:#08142b}

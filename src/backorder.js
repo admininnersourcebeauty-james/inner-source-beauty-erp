@@ -1,4 +1,39 @@
-export const ORDER_STATUSES = ['Open', 'Back Order', 'Ready to Ship', 'Partially Shipped', 'Shipped', 'Cancelled']
+export const ORDER_STATUSES = ['Open', 'Back Order', 'Ready to Fulfill', 'Partially Fulfilled', 'Completed', 'Cancelled']
+
+export const FULFILLMENT_METHODS = [
+  'UPS Next Day',
+  'UPS 2nd Day',
+  'UPS 3 Day',
+  'UPS Ground',
+  'USPS Ground',
+  'USPS Priority',
+  'Company Delivery',
+  'Customer Pickup',
+]
+
+export const STATUS_MIGRATION = {
+  'Ready to Ship': 'Ready to Fulfill',
+  'Partially Shipped': 'Partially Fulfilled',
+  Shipped: 'Completed',
+}
+
+export function normalizeOrderStatus(status) {
+  if (!status) return 'Open'
+  return STATUS_MIGRATION[status] || status
+}
+
+export function isCarrierMethod(method) {
+  const m = String(method || '')
+  return m.startsWith('UPS ') || m.startsWith('USPS ')
+}
+
+export function isCompanyDelivery(method) {
+  return method === 'Company Delivery'
+}
+
+export function isCustomerPickup(method) {
+  return method === 'Customer Pickup'
+}
 
 export function isValidDbDate(value) {
   if (value == null || String(value).trim() === '') return false
@@ -29,9 +64,10 @@ export function deriveCreateStatus(allocated_qty, backorder_qty) {
 
 export function normalizeFulfillment(order) {
   const qty = Number(order?.qty || 0)
+  const status = normalizeOrderStatus(order?.status)
   const shipped_qty = order?.shipped_qty != null && order?.shipped_qty !== ''
     ? Number(order.shipped_qty)
-    : (order?.status === 'Shipped' ? qty : 0)
+    : (status === 'Completed' ? qty : 0)
   let allocated_qty = order?.allocated_qty != null && order?.allocated_qty !== ''
     ? Number(order.allocated_qty)
     : qty
@@ -39,12 +75,12 @@ export function normalizeFulfillment(order) {
     ? Number(order.backorder_qty)
     : Math.max(qty - allocated_qty, 0)
 
-  if (order?.status === 'Cancelled') {
+  if (status === 'Cancelled') {
     allocated_qty = Number(order.allocated_qty || 0)
     backorder_qty = Number(order.backorder_qty || 0)
   }
 
-  return { qty, allocated_qty, backorder_qty, shipped_qty }
+  return { qty, allocated_qty, backorder_qty, shipped_qty, fulfilled_qty: shipped_qty }
 }
 
 export function unshippedAllocated(order) {
@@ -52,26 +88,47 @@ export function unshippedAllocated(order) {
   return Math.max(allocated_qty - shipped_qty, 0)
 }
 
-export function isCancelledOrShipped(order) {
-  const status = order?.status || ''
-  return status === 'Cancelled' || status === 'Shipped'
+export function isCancelledOrCompleted(order) {
+  const status = normalizeOrderStatus(order?.status)
+  return status === 'Cancelled' || status === 'Completed'
 }
 
-export function countsForBackorder(order) {
-  const status = order?.status || ''
-  if (status === 'Cancelled' || status === 'Shipped') {
-    return { items: 0, units: 0, value: 0 }
-  }
-  const { backorder_qty } = normalizeFulfillment(order)
-  const units = Math.max(backorder_qty, 0)
-  if (units <= 0) return { items: 0, units: 0, value: 0 }
-  const value = units * Number(order.price || 0)
-  return { items: 1, units, value }
+export function statusMatchesFilter(order, filter) {
+  if (filter === 'All') return true
+  return normalizeOrderStatus(order?.status) === filter
+}
+
+export function countOrdersByStatus(orders, status) {
+  return (orders || []).filter(o => normalizeOrderStatus(o.status) === status).length
+}
+
+export function fulfillmentHandledBy(order) {
+  const method = order?.shipping_method || ''
+  if (isCarrierMethod(method)) return order?.tracking || '—'
+  if (isCompanyDelivery(method)) return order?.delivered_by || '—'
+  if (isCustomerPickup(method)) return order?.picked_up_by || '—'
+  return order?.tracking || order?.delivered_by || order?.picked_up_by || '—'
+}
+
+export function readyToFulfillOrders(orders) {
+  return (orders || []).filter(o => normalizeOrderStatus(o.status) === 'Ready to Fulfill')
+}
+
+export function awaitingPickupCount(orders) {
+  return readyToFulfillOrders(orders).filter(o => isCustomerPickup(o.shipping_method)).length
+}
+
+export function companyDeliveryCount(orders) {
+  return readyToFulfillOrders(orders).filter(o => isCompanyDelivery(o.shipping_method)).length
+}
+
+export function readyToFulfillAlerts(orders, limit = 10) {
+  return readyToFulfillOrders(orders).slice(0, limit)
 }
 
 export function backOrderedQtyForProduct(orders, inventoryId) {
   return (orders || [])
-    .filter(o => String(o.inventory_id) === String(inventoryId) && !isCancelledOrShipped(o))
+    .filter(o => String(o.inventory_id) === String(inventoryId) && !isCancelledOrCompleted(o))
     .reduce((sum, o) => sum + normalizeFulfillment(o).backorder_qty, 0)
 }
 
@@ -79,7 +136,7 @@ export function activeBackorderOrders(orders, inventoryId) {
   return (orders || [])
     .filter(o => {
       if (String(o.inventory_id) !== String(inventoryId)) return false
-      if (isCancelledOrShipped(o)) return false
+      if (isCancelledOrCompleted(o)) return false
       return normalizeFulfillment(o).backorder_qty > 0
     })
     .sort((a, b) => {
@@ -94,7 +151,7 @@ export function backOrderDashboardStats(orders) {
   const productIds = new Set()
   let units = 0
   for (const o of orders || []) {
-    if (isCancelledOrShipped(o)) continue
+    if (isCancelledOrCompleted(o)) continue
     const { backorder_qty } = normalizeFulfillment(o)
     if (backorder_qty <= 0) continue
     productIds.add(String(o.inventory_id))
@@ -105,7 +162,7 @@ export function backOrderDashboardStats(orders) {
 
 export function activeBackorderAlerts(orders, limit = 10) {
   return (orders || [])
-    .filter(o => !isCancelledOrShipped(o) && normalizeFulfillment(o).backorder_qty > 0)
+    .filter(o => !isCancelledOrCompleted(o) && normalizeFulfillment(o).backorder_qty > 0)
     .sort((a, b) => {
       const da = String(a.order_date || a.created_at || '')
       const db = String(b.order_date || b.created_at || '')
@@ -122,7 +179,7 @@ export function backOrderReports(orders) {
   let totalValue = 0
 
   for (const o of orders || []) {
-    if (isCancelledOrShipped(o)) continue
+    if (isCancelledOrCompleted(o)) continue
     const { backorder_qty } = normalizeFulfillment(o)
     if (backorder_qty <= 0) continue
     const value = backorder_qty * Number(o.price || 0)
@@ -150,17 +207,49 @@ export function backOrderReports(orders) {
   }
 }
 
-export function validateShipStatus(status, backorder_qty) {
-  if (status === 'Shipped' && backorder_qty > 0) {
+export function validateFulfillmentStatus(status, backorder_qty) {
+  const normalized = normalizeOrderStatus(status)
+  if (normalized === 'Completed' && backorder_qty > 0) {
     return `This order still has ${backorder_qty} units on Back Order.`
   }
   return ''
 }
 
-export function resolveShippedQty(status, allocated_qty, shipped_qty, backorder_qty) {
-  if (status === 'Shipped') return allocated_qty
-  if (status === 'Partially Shipped' && backorder_qty > 0) return Math.max(Number(shipped_qty) || 0, allocated_qty)
-  return Number(shipped_qty) || 0
+export function resolveFulfilledQty(status, allocated_qty, fulfilled_qty, backorder_qty) {
+  const normalized = normalizeOrderStatus(status)
+  if (normalized === 'Completed') return allocated_qty
+  if (normalized === 'Partially Fulfilled' && backorder_qty > 0) {
+    return Math.max(Number(fulfilled_qty) || 0, allocated_qty)
+  }
+  return Number(fulfilled_qty) || 0
+}
+
+export function validateCompleteFulfillment(order, form) {
+  const method = form.shipping_method || order?.shipping_method || ''
+  const { allocated_qty, backorder_qty } = normalizeFulfillment(order)
+
+  if (backorder_qty > 0) {
+    return { error: `This order still has ${backorder_qty} units on Back Order.` }
+  }
+  if (allocated_qty <= 0) {
+    return { error: 'No allocated quantity to fulfill.' }
+  }
+  if (!method) {
+    return { error: 'Select a Fulfillment Method before completing.' }
+  }
+
+  if (isCarrierMethod(method)) {
+    if (!String(form.tracking || '').trim()) return { error: 'Tracking Number is required for carrier fulfillment.' }
+    if (!isValidDbDate(form.fulfillment_date)) return { error: 'Fulfillment Date is required for carrier fulfillment.' }
+  } else if (isCompanyDelivery(method)) {
+    if (!isValidDbDate(form.fulfillment_date)) return { error: 'Delivery Date is required.' }
+    if (!String(form.delivered_by || '').trim()) return { error: 'Delivered By is required.' }
+  } else if (isCustomerPickup(method)) {
+    if (!isValidDbDate(form.fulfillment_date)) return { error: 'Pickup Date is required.' }
+    if (!String(form.picked_up_by || '').trim()) return { error: 'Picked Up By is required.' }
+  }
+
+  return { error: '' }
 }
 
 export function buildAllocationPlan(orders, stockIncrease) {
@@ -180,9 +269,15 @@ export function buildAllocationPlan(orders, stockIncrease) {
       allocatedNow: alloc,
       remainingBackOrder: backorder_qty - alloc,
       newAllocated: allocated_qty + alloc,
-      newStatus: backorder_qty - alloc === 0 ? 'Ready to Ship' : 'Back Order',
+      newStatus: backorder_qty - alloc === 0 ? 'Ready to Fulfill' : 'Back Order',
     })
     remaining -= alloc
   }
   return { plan, stockUsed: Math.max(Number(stockIncrease) - remaining, 0) }
+}
+
+export function formatFulfillmentDate(order) {
+  const d = order?.fulfillment_date
+  if (!d) return '—'
+  return String(d).slice(0, 10)
 }

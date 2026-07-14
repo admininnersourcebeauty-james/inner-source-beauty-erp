@@ -25,7 +25,7 @@ const TABLE_NUMERIC = {
 const TABLE_DATES = {
   customers: ['created_at'],
   inventory: ['created_at', 'expiration_date'],
-  orders: ['created_at', 'due_date', 'order_date'],
+  orders: ['created_at', 'due_date', 'order_date', 'fulfillment_date'],
   payments: ['created_at', 'payment_date'],
 }
 

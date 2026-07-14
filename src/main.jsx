@@ -1435,9 +1435,11 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
   }
 
   async function performSave(row) {
-    if (editingId) await updateRow('inventory', editingId, row)
+    const inventoryId = editingId
+    if (inventoryId) await updateRow('inventory', inventoryId, row)
     else await addRow('inventory', row)
     cancelEdit()
+    return { inventoryId, savedQty: row.qty }
   }
 
   async function save() {
@@ -1452,26 +1454,24 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
     const oldQty = Number(oldItem?.qty || 0)
     const stockIncrease = editingId ? Math.max(row.qty - oldQty, 0) : 0
     const backorders = editingId ? activeBackorderOrders(data.orders, editingId) : []
-
-    if (stockIncrease > 0 && backorders.length > 0) {
-      setAllocPrompt({ row, stockIncrease, inventoryId: editingId })
-      return
-    }
+    const inventoryId = editingId
 
     await performSave(row)
+
+    if (inventoryId && stockIncrease > 0 && backorders.length > 0) {
+      setAllocSummary(null)
+      setAllocPrompt({ stockIncrease, inventoryId, savedQty: row.qty })
+    }
   }
 
   async function saveWithoutAllocation() {
-    if (!allocPrompt) return
-    await performSave(allocPrompt.row)
     setAllocPrompt(null)
   }
 
   async function saveWithAllocation() {
     if (!allocPrompt) return
-    const { row, stockIncrease, inventoryId } = allocPrompt
-    await performSave(row)
-    const summary = await allocateBackOrders(inventoryId, stockIncrease, row.qty)
+    const { stockIncrease, inventoryId, savedQty } = allocPrompt
+    const summary = await allocateBackOrders(inventoryId, stockIncrease, savedQty)
     setAllocSummary(summary)
     setAllocPrompt(null)
   }
@@ -1528,7 +1528,7 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
       <h2>Inventory</h2>
       {allocPrompt && (
         <div className="alloc-prompt panel-inline">
-          <p><strong>New stock is available for existing Back Orders.</strong><br />Would you like to allocate it now?</p>
+          <p><strong>Stock saved.</strong> New stock is available for existing Back Orders.<br />Would you like to allocate it now?</p>
           <div className="alloc-prompt-actions">
             <button type="button" className="soft" onClick={saveWithoutAllocation}>Not Now</button>
             <button type="button" onClick={saveWithAllocation}>Allocate Back Orders</button>

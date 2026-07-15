@@ -31,8 +31,30 @@ aside button.active{background:#24324b}
 .cards,.mini-cards{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:16px;margin-bottom:18px}
 .cards-9{grid-template-columns:repeat(4,minmax(140px,1fr))}
 .dashboard-rows{display:flex;flex-direction:column;gap:16px;margin-bottom:18px}
+.dashboard-rows-compact{gap:12px;margin-bottom:14px}
 .dashboard-rows .cards{margin-bottom:0}
+.dashboard-row-group{margin:0}
+.dashboard-row-label{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.04em;margin:0 0 8px}
+.dashboard-row-3{grid-template-columns:repeat(3,minmax(140px,1fr))}
 .dashboard-row-5{grid-template-columns:repeat(5,minmax(120px,1fr))}
+.dashboard-section-title{font-size:16px;margin:0 0 12px}
+.dashboard-empty-note{font-size:13px;color:#52607a;margin:0 0 12px;padding:4px 0}
+.panel-compact{padding:16px 18px;margin-bottom:14px}
+.card-compact{padding:14px 16px}
+.card-compact p{margin:0 0 6px;font-size:12px}
+.card-compact b{font-size:20px}
+.card-clickable{cursor:pointer;transition:box-shadow .15s,border-color .15s,transform .15s}
+.card-clickable:hover{box-shadow:0 8px 22px #0b172014;transform:translateY(-1px)}
+.card-clickable:focus{outline:2px solid #2563eb;outline-offset:2px}
+.card-action-rtf{border-color:#bfdbfe;background:#f0f7ff}
+.card-action-rtf b{color:#1d4ed8}
+.card-action-bo{border-color:#fecaca;background:#fff5f5}
+.card-action-bo b{color:#b42318}
+.card-action-low{border-color:#fde68a;background:#fffbeb}
+.card-action-low b{color:#b45309}
+.low-stock-compact li{padding:8px 0;font-size:13px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.low-stock-product{font-weight:700;color:#07142b}
+.low-stock-sep{color:#cbd5e1}
 .low-stock-alerts{list-style:none;padding:0;margin:0}
 .low-stock-alerts li{padding:12px 0;border-bottom:1px solid #e3e8f0;font-size:14px;line-height:1.5}
 .low-stock-alerts li:last-child{border-bottom:0}
@@ -282,7 +304,7 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .split{grid-template-columns:1fr}
   .detail{position:static;max-height:none}
   .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
-  .dashboard-row-5{grid-template-columns:1fr 1fr}
+  .dashboard-row-3,.dashboard-row-5{grid-template-columns:1fr 1fr}
   .customer-form textarea,.method-boxes{grid-column:auto}
   .address-grid{grid-template-columns:1fr;row-gap:24px}
   .address-spacer{display:none}

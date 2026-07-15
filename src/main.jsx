@@ -10,7 +10,7 @@ import {
   backOrderedQtyForProduct, activeBackorderOrders, backOrderDashboardStats, activeBackorderAlerts,
   backOrderReports, validateFulfillmentStatus, resolveFulfilledQty, buildAllocationPlan,
   isValidDbDate, inventoryStockView, normalizeOrderStatus, statusMatchesFilter, countOrdersByStatus,
-  fulfillmentHandledBy, readyToFulfillAlerts, awaitingPickupCount, companyDeliveryCount,
+  fulfillmentHandledBy, readyToFulfillAlerts, readyToFulfillOrders, awaitingPickupCount, companyDeliveryCount,
   validateCompleteFulfillment, isCarrierMethod, isCompanyDelivery, isCustomerPickup, formatFulfillmentDate,
 } from './backorder.js'
 import './style.css'
@@ -949,9 +949,15 @@ function Dashboard({ data, stats, onNavigate }) {
   const pickupCount = awaitingPickupCount(data.orders)
   const deliveryCount = companyDeliveryCount(data.orders)
   const rtfAlerts = readyToFulfillAlerts(data.orders, 10)
+  const pickupAlerts = readyToFulfillOrders(data.orders).filter(o => isCustomerPickup(o.shipping_method)).slice(0, 10)
+  const deliveryAlerts = readyToFulfillOrders(data.orders).filter(o => isCompanyDelivery(o.shipping_method)).slice(0, 10)
 
   function openOrderForEdit(orderId, focusFulfillment = false) {
     onNavigate?.('Orders', orderId, { focusFulfillment })
+  }
+
+  function scrollToSection(id) {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   const todaySales = todayOrders.reduce((s, o) => s + Number(o.total || 0), 0)
@@ -961,12 +967,6 @@ function Dashboard({ data, stats, onNavigate }) {
   const monthlyProfit = monthOrders.reduce((s, o) => s + orderProfit(o), 0)
   const openBalance = stats.balance
   const expectedProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
-  const totalCustomers = data.customers.length
-  const totalProducts = data.inventory.length
-  const totalInventoryQty = data.inventory.reduce((s, i) => {
-    const qty = Number(i.qty) || 0
-    return qty > 0 ? s + qty : s
-  }, 0)
   const inventoryValue = data.inventory.reduce((s, i) => {
     const qty = Number(i.qty) || 0
     if (qty <= 0) return s
@@ -977,13 +977,11 @@ function Dashboard({ data, stats, onNavigate }) {
     const qty = Number(i.qty) || 0
     return qty > 0 && qty <= lowStockLimit(i)
   })
-  const outOfStockItems = data.inventory.filter(i => (Number(i.qty) || 0) <= 0)
-  const salesByDay = buildSalesGraph(data.orders)
 
   const lowStockAlerts = lowStockItems
     .slice()
     .sort((a, b) => (Number(a.qty) || 0) - (Number(b.qty) || 0))
-    .slice(0, 5)
+    .slice(0, 10)
     .map(item => {
       const qty = Number(item.qty) || 0
       const limit = lowStockLimit(item)
@@ -1014,7 +1012,7 @@ function Dashboard({ data, stats, onNavigate }) {
     }
   }
 
-  const recentOrders = data.orders.slice(0, 5).map(o => ({
+  const recentOrders = data.orders.slice(0, 10).map(o => ({
     id: o.id,
     order_date: formatDashboardDate(o.order_date || o.created_at),
     invoice_no: o.invoice_no || '—',
@@ -1023,95 +1021,120 @@ function Dashboard({ data, stats, onNavigate }) {
     payment_status: o.payment_status || '—',
   }))
 
+  function FulfillmentAlertTable({ rows, showAction = true }) {
+    return (
+      <div className="table-wrap rtf-alerts-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Invoice No</th>
+              <th>Customer</th>
+              <th>Product</th>
+              <th>Qty</th>
+              <th>Fulfillment Method</th>
+              <th>Tracking / Handled By</th>
+              <th>Status</th>
+              {showAction && <th>Action</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(o => {
+              const ff = normalizeFulfillment(o)
+              return (
+                <tr key={o.id}>
+                  <td>
+                    <button type="button" className="link-cell invoice-link" onClick={() => openOrderForEdit(o.id)}>
+                      {o.invoice_no || '—'}
+                    </button>
+                  </td>
+                  <td>{o.customer_name || '—'}</td>
+                  <td>{o.style || '—'}</td>
+                  <td>{ff.qty}</td>
+                  <td>{o.shipping_method || '—'}</td>
+                  <td>{fulfillmentHandledBy(o)}</td>
+                  <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
+                  {showAction && (
+                    <td>
+                      <button type="button" className="soft fulfill-open-btn" onClick={() => openOrderForEdit(o.id, true)}>
+                        Open Fulfillment
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
   return (
     <>
-      <div className="dashboard-rows">
-        <div className="cards dashboard-row">
-          <Card t="Today's Sales" v={money(todaySales)} />
-          <Card t="Today's Profit" v={money(todayProfit)} />
-          <Card t="Orders Today" v={ordersToday} />
-          <Card t="Monthly Sales" v={money(monthlySales)} />
-        </div>
-        <div className="cards dashboard-row">
-          <Card t="Open Balance" v={money(openBalance)} />
-          <Card t="Inventory Value" v={money(inventoryValue)} />
-          <Card t="Expected Profit" v={money(expectedProfit)} />
-          <Card t="Monthly Profit" v={money(monthlyProfit)} />
-        </div>
-        <div className="cards dashboard-row dashboard-row-5">
-          <Card t="Total Customers" v={totalCustomers} />
-          <Card t="Total Products" v={totalProducts} />
-          <Card t="Total Inventory Qty" v={totalInventoryQty} />
-          <Card t="Low Stock Items" v={lowStockItems.length} cls={lowStockItems.length > 0 ? 'card-warn' : ''} />
-          <Card t="Out of Stock Items" v={outOfStockItems.length} cls={outOfStockItems.length > 0 ? 'card-warn' : ''} />
-        </div>
-        <div className="cards dashboard-row">
-          <Card t="Back Order Units" v={boStats.units} cls={boStats.units > 0 ? 'card-warn' : ''} />
-          <Card t="Ready to Fulfill Orders" v={rtfCount} cls={rtfCount > 0 ? 'card-warn' : ''} />
-          <Card t="Awaiting Pickup" v={pickupCount} cls={pickupCount > 0 ? 'card-warn' : ''} />
-          <Card t="Company Deliveries" v={deliveryCount} cls={deliveryCount > 0 ? 'card-warn' : ''} />
-        </div>
-      </div>
-
-      <div className="panel">
-        <h2>Ready to Fulfill Alerts</h2>
-        {rtfAlerts.length === 0 ? (
-          <p className="hint">No orders ready to fulfill.</p>
-        ) : (
-          <div className="table-wrap rtf-alerts-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Invoice No</th>
-                  <th>Customer</th>
-                  <th>Product</th>
-                  <th>Qty</th>
-                  <th>Fulfillment Method</th>
-                  <th>Tracking / Handled By</th>
-                  <th>Status</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rtfAlerts.map(o => {
-                  const ff = normalizeFulfillment(o)
-                  return (
-                    <tr key={o.id}>
-                      <td>
-                        <button type="button" className="link-cell invoice-link" onClick={() => openOrderForEdit(o.id)}>
-                          {o.invoice_no || '—'}
-                        </button>
-                      </td>
-                      <td>{o.customer_name || '—'}</td>
-                      <td>{o.style || '—'}</td>
-                      <td>{ff.qty}</td>
-                      <td>{o.shipping_method || '—'}</td>
-                      <td>{fulfillmentHandledBy(o)}</td>
-                      <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
-                      <td>
-                        <button type="button" className="soft fulfill-open-btn" onClick={() => openOrderForEdit(o.id, true)}>
-                          Open Fulfillment
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+      <div className="dashboard-rows dashboard-rows-compact">
+        <div className="dashboard-row-group">
+          <p className="dashboard-row-label">Daily Summary</p>
+          <div className="cards dashboard-row">
+            <Card t="Today's Sales" v={money(todaySales)} compact />
+            <Card t="Today's Profit" v={money(todayProfit)} compact />
+            <Card t="Orders Today" v={ordersToday} compact />
+            <Card t="Open Balance" v={money(openBalance)} compact />
           </div>
-        )}
+        </div>
+        <div className="dashboard-row-group">
+          <p className="dashboard-row-label">Business Summary</p>
+          <div className="cards dashboard-row">
+            <Card t="Monthly Sales" v={money(monthlySales)} compact />
+            <Card t="Monthly Profit" v={money(monthlyProfit)} compact />
+            <Card t="Expected Profit" v={money(expectedProfit)} compact />
+            <Card t="Inventory Value" v={money(inventoryValue)} compact />
+          </div>
+        </div>
+        <div className="dashboard-row-group">
+          <p className="dashboard-row-label">Action Required</p>
+          <div className="cards dashboard-row dashboard-row-3">
+            <Card
+              t="Ready to Fulfill"
+              v={rtfCount}
+              compact
+              cls="card-action-rtf"
+              onClick={() => scrollToSection('dashboard-rtf-alerts')}
+            />
+            <Card
+              t="Back Orders"
+              v={boStats.units}
+              compact
+              cls="card-action-bo"
+              onClick={() => scrollToSection('dashboard-backorder-alerts')}
+            />
+            <Card
+              t="Low Stock"
+              v={lowStockItems.length}
+              compact
+              cls="card-action-low"
+              onClick={() => scrollToSection('dashboard-lowstock-alerts')}
+            />
+          </div>
+        </div>
       </div>
 
-      <div className="panel">
-        <h2>Back Order Alerts</h2>
-        {backorderAlerts.length === 0 ? (
-          <p className="hint">No active back orders.</p>
-        ) : (
+      {rtfAlerts.length > 0 ? (
+        <div className="panel panel-compact dashboard-section" id="dashboard-rtf-alerts">
+          <h2 className="dashboard-section-title">Ready to Fulfill Alerts</h2>
+          <FulfillmentAlertTable rows={rtfAlerts} />
+        </div>
+      ) : (
+        <p className="dashboard-empty-note" id="dashboard-rtf-alerts">No orders ready to fulfill.</p>
+      )}
+
+      {backorderAlerts.length > 0 ? (
+        <div className="panel panel-compact dashboard-section" id="dashboard-backorder-alerts">
+          <h2 className="dashboard-section-title">Back Order Alerts</h2>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Customer Name</th>
+                  <th>Customer</th>
                   <th>Invoice No</th>
                   <th>Product</th>
                   <th>Order Qty</th>
@@ -1128,7 +1151,7 @@ function Dashboard({ data, stats, onNavigate }) {
                     <tr key={o.id}>
                       <td>{row.customer_name}</td>
                       <td>
-                        <button type="button" className="link-cell" onClick={() => onNavigate?.('Invoice', o.id)}>
+                        <button type="button" className="link-cell invoice-link" onClick={() => onNavigate?.('Invoice', o.id)}>
                           {row.invoice_no}
                         </button>
                       </td>
@@ -1144,42 +1167,58 @@ function Dashboard({ data, stats, onNavigate }) {
               </tbody>
             </table>
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <p className="dashboard-empty-note" id="dashboard-backorder-alerts">No active back orders.</p>
+      )}
 
-      <div className="panel">
-        <h2>Low Stock Alerts</h2>
-        {lowStockAlerts.length === 0 ? (
-          <p className="hint">No low stock items right now.</p>
-        ) : (
-          <ul className="low-stock-alerts">
+      {lowStockAlerts.length > 0 ? (
+        <div className="panel panel-compact dashboard-section" id="dashboard-lowstock-alerts">
+          <h2 className="dashboard-section-title">Low Stock Alerts</h2>
+          <ul className="low-stock-alerts low-stock-compact">
             {lowStockAlerts.map(item => (
               <li key={item.id}>
-                <strong>{item.label}</strong>
-                {' — Only '}{item.qty} left
-                {' — Limit '}{item.limit}
-                {' — '}
+                <span className="low-stock-product">{item.label}</span>
+                <span className="low-stock-sep">|</span>
+                <span>{item.qty} left</span>
+                <span className="low-stock-sep">|</span>
+                <span>Limit {item.limit}</span>
+                <span className="low-stock-sep">|</span>
                 <span className={item.recommended ? 'alert-reorder' : 'alert-ok'}>
                   {item.recommended ? 'Reorder Recommended' : 'Monitor'}
                 </span>
               </li>
             ))}
           </ul>
-        )}
-      </div>
+        </div>
+      ) : (
+        <p className="dashboard-empty-note" id="dashboard-lowstock-alerts">No low stock items right now.</p>
+      )}
 
-      <div className="panel">
-        <h2>Recent Orders</h2>
-        {recentOrders.length === 0 ? (
-          <p className="hint">No orders yet.</p>
-        ) : (
+      {pickupCount > 0 && (
+        <div className="panel panel-compact dashboard-section" id="dashboard-pickup-alerts">
+          <h2 className="dashboard-section-title">Awaiting Pickup Alerts</h2>
+          <FulfillmentAlertTable rows={pickupAlerts} showAction={false} />
+        </div>
+      )}
+
+      {deliveryCount > 0 && (
+        <div className="panel panel-compact dashboard-section" id="dashboard-delivery-alerts">
+          <h2 className="dashboard-section-title">Company Delivery Alerts</h2>
+          <FulfillmentAlertTable rows={deliveryAlerts} showAction={false} />
+        </div>
+      )}
+
+      {recentOrders.length > 0 && (
+        <div className="panel panel-compact dashboard-section">
+          <h2 className="dashboard-section-title">Recent Orders</h2>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Order Date</th>
                   <th>Invoice No</th>
-                  <th>Customer Name</th>
+                  <th>Customer</th>
                   <th>Total</th>
                   <th>Payment Status</th>
                 </tr>
@@ -1188,7 +1227,11 @@ function Dashboard({ data, stats, onNavigate }) {
                 {recentOrders.map(o => (
                   <tr key={o.id}>
                     <td>{o.order_date}</td>
-                    <td>{o.invoice_no}</td>
+                    <td>
+                      <button type="button" className="link-cell invoice-link" onClick={() => onNavigate?.('Invoice', o.id)}>
+                        {o.invoice_no}
+                      </button>
+                    </td>
                     <td>{o.customer_name}</td>
                     <td>{o.total}</td>
                     <td>{o.payment_status}</td>
@@ -1197,28 +1240,26 @@ function Dashboard({ data, stats, onNavigate }) {
               </tbody>
             </table>
           </div>
-        )}
-      </div>
-
-      <div className="panel">
-        <h2>Sales — Last 30 Days</h2>
-        <div className="sales-graph">
-          {salesByDay.map(d => (
-            <div key={d.date} className="bar-col" title={`${d.label}: ${money(d.total)}`}>
-              <div className="bar-track" style={{ height: 140 }}>
-                <div className="bar" style={{ height: `${d.pct}%` }} />
-              </div>
-              <span className="bar-label">{d.label}</span>
-            </div>
-          ))}
         </div>
-      </div>
+      )}
     </>
   )
 }
 
-function Card({ t, v, cls }) {
-  return <div className={`card ${cls || ''}`}><p>{t}</p><b>{v}</b></div>
+function Card({ t, v, cls, compact, onClick }) {
+  const interactive = typeof onClick === 'function'
+  const props = interactive ? {
+    role: 'button',
+    tabIndex: 0,
+    onClick,
+    onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } },
+  } : {}
+  return (
+    <div className={`card ${compact ? 'card-compact' : ''} ${interactive ? 'card-clickable' : ''} ${cls || ''}`.trim()} {...props}>
+      <p>{t}</p>
+      <b>{v}</b>
+    </div>
+  )
 }
 
 function Customers({ data, addRow, updateRow, deleteRow, onNavigate, selectedCustomerId, clearSelection }) {

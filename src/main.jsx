@@ -47,8 +47,8 @@ const localDateKey = d => {
 }
 const dateOnly = d => localDateKey(d)
 const today = () => localDateKey(new Date())
-const formatLocalLongDate = (d = new Date()) => d.toLocaleDateString('en-US', {
-  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+const formatLocalShortDate = (d = new Date()) => d.toLocaleDateString('en-US', {
+  month: 'short', day: 'numeric', year: 'numeric',
 })
 const toDbDate = value => {
   if (!value) return today()
@@ -796,11 +796,11 @@ function App() {
           )}
           <div className="header-right">
             {page === 'Dashboard' && (
-              <div className="dashboard-page-date">{formatLocalLongDate()}</div>
+              <div className="dashboard-page-date">{formatLocalShortDate()}</div>
             )}
-            <input className="global-search" placeholder="Search..."
+            <input className="global-search" placeholder="Search customers, orders..."
               value={globalSearch} onChange={e => setGlobalSearch(e.target.value)} />
-            <div className="user">{session.user?.email}</div>
+            <HeaderUserMenu role={role} email={session.user?.email || profile.email} onLogout={logout} />
           </div>
         </header>
         {searchResults && globalSearch && (
@@ -951,6 +951,42 @@ function OrderStatusBadge({ status, backorderQty = 0 }) {
   const label = normalizeOrderStatus(status)
   const isBackOrder = label === 'Back Order' || backorderQty > 0
   return <span className={isBackOrder ? 'status-badge backorder-badge' : 'status-badge'}>{label || '—'}</span>
+}
+
+function HeaderUserMenu({ role, email, onLogout }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  const displayRole = role || 'Admin'
+
+  useEffect(() => {
+    if (!open) return
+    function handleClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [open])
+
+  return (
+    <div className="header-user-menu" ref={ref}>
+      <button type="button" className="header-user-btn soft" onClick={() => setOpen(v => !v)} aria-expanded={open}>
+        {displayRole} ▼
+      </button>
+      {open && (
+        <div className="header-user-dropdown">
+          <div className="header-user-item">
+            <span className="header-user-label">Account Email</span>
+            <span className="header-user-value">{email || '—'}</span>
+          </div>
+          <div className="header-user-item">
+            <span className="header-user-label">Role</span>
+            <span className="header-user-value">{displayRole}</span>
+          </div>
+          <button type="button" className="header-user-logout" onClick={() => { setOpen(false); onLogout() }}>Logout</button>
+        </div>
+      )}
+    </div>
+  )
 }
 
 function Dashboard({ data, stats, onNavigate }) {
@@ -1134,7 +1170,7 @@ function Dashboard({ data, stats, onNavigate }) {
         </div>
       </div>
 
-      {rtfAlerts.length > 0 ? (
+      {rtfCount > 0 ? (
         <div className="panel panel-compact dashboard-section" id="dashboard-rtf-alerts">
           <h2 className="dashboard-section-title">Ready to Fulfill Alerts</h2>
           <FulfillmentAlertTable rows={rtfAlerts} />
@@ -1143,7 +1179,7 @@ function Dashboard({ data, stats, onNavigate }) {
         <p className="dashboard-empty-note" id="dashboard-rtf-alerts">No orders ready to fulfill.</p>
       )}
 
-      {backorderAlerts.length > 0 ? (
+      {boStats.units > 0 ? (
         <div className="panel panel-compact dashboard-section" id="dashboard-backorder-alerts">
           <h2 className="dashboard-section-title">Back Order Alerts</h2>
           <div className="table-wrap">
@@ -1191,21 +1227,32 @@ function Dashboard({ data, stats, onNavigate }) {
       {lowStockAlerts.length > 0 ? (
         <div className="panel panel-compact dashboard-section" id="dashboard-lowstock-alerts">
           <h2 className="dashboard-section-title">Low Stock Alerts</h2>
-          <ul className="low-stock-alerts low-stock-compact">
-            {lowStockAlerts.map(item => (
-              <li key={item.id}>
-                <span className="low-stock-product">{item.label}</span>
-                <span className="low-stock-sep">|</span>
-                <span>{item.qty} left</span>
-                <span className="low-stock-sep">|</span>
-                <span>Limit {item.limit}</span>
-                <span className="low-stock-sep">|</span>
-                <span className={item.recommended ? 'alert-reorder' : 'alert-ok'}>
-                  {item.recommended ? 'Reorder Recommended' : 'Monitor'}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <div className="table-wrap low-stock-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Stock</th>
+                  <th>Reorder Limit</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lowStockAlerts.map(item => (
+                  <tr key={item.id}>
+                    <td>{item.label}</td>
+                    <td>{item.qty}</td>
+                    <td>{item.limit}</td>
+                    <td>
+                      <span className={item.recommended ? 'stock-status-badge stock-status-reorder' : 'stock-status-badge stock-status-monitor'}>
+                        {item.recommended ? 'Reorder Recommended' : 'Monitor'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <p className="dashboard-empty-note" id="dashboard-lowstock-alerts">No low stock items right now.</p>

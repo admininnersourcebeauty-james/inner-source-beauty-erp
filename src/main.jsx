@@ -47,6 +47,9 @@ const localDateKey = d => {
 }
 const dateOnly = d => localDateKey(d)
 const today = () => localDateKey(new Date())
+const formatLocalLongDate = (d = new Date()) => d.toLocaleDateString('en-US', {
+  weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+})
 const toDbDate = value => {
   if (!value) return today()
   const s = String(value).trim()
@@ -782,10 +785,20 @@ function App() {
         <button className="logout" onClick={logout}>Logout</button>
       </aside>
       <main>
-        <header>
-          <h1>{page}</h1>
+        <header className={page === 'Dashboard' ? 'header-dashboard' : ''}>
+          {page === 'Dashboard' ? (
+            <div className="dashboard-page-header">
+              <h1 className="dashboard-page-title">Dashboard</h1>
+              <p className="dashboard-page-subtitle">Today&apos;s Overview</p>
+            </div>
+          ) : (
+            <h1>{page}</h1>
+          )}
           <div className="header-right">
-            <input className="global-search" placeholder="Search customer, product, brand, invoice, phone, email..."
+            {page === 'Dashboard' && (
+              <div className="dashboard-page-date">{formatLocalLongDate()}</div>
+            )}
+            <input className="global-search" placeholder="Search..."
               value={globalSearch} onChange={e => setGlobalSearch(e.target.value)} />
             <div className="user">{session.user?.email}</div>
           </div>
@@ -1077,8 +1090,8 @@ function Dashboard({ data, stats, onNavigate }) {
           <div className="cards dashboard-row">
             <Card t="Today's Sales" v={money(todaySales)} compact />
             <Card t="Today's Profit" v={money(todayProfit)} compact />
-            <Card t="Orders Today" v={ordersToday} compact />
-            <Card t="Open Balance" v={money(openBalance)} compact />
+            <Card t="Today's Orders" v={ordersToday} compact />
+            <Card t="Outstanding Balance" v={money(openBalance)} compact />
           </div>
         </div>
         <div className="dashboard-row-group">
@@ -1097,6 +1110,7 @@ function Dashboard({ data, stats, onNavigate }) {
               t="Ready to Fulfill"
               v={rtfCount}
               compact
+              actionCompact
               cls="card-action-rtf"
               onClick={() => scrollToSection('dashboard-rtf-alerts')}
             />
@@ -1104,6 +1118,7 @@ function Dashboard({ data, stats, onNavigate }) {
               t="Back Orders"
               v={boStats.units}
               compact
+              actionCompact
               cls="card-action-bo"
               onClick={() => scrollToSection('dashboard-backorder-alerts')}
             />
@@ -1111,6 +1126,7 @@ function Dashboard({ data, stats, onNavigate }) {
               t="Low Stock"
               v={lowStockItems.length}
               compact
+              actionCompact
               cls="card-action-low"
               onClick={() => scrollToSection('dashboard-lowstock-alerts')}
             />
@@ -1246,7 +1262,7 @@ function Dashboard({ data, stats, onNavigate }) {
   )
 }
 
-function Card({ t, v, cls, compact, onClick }) {
+function Card({ t, v, cls, compact, actionCompact, onClick }) {
   const interactive = typeof onClick === 'function'
   const props = interactive ? {
     role: 'button',
@@ -1255,7 +1271,7 @@ function Card({ t, v, cls, compact, onClick }) {
     onKeyDown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } },
   } : {}
   return (
-    <div className={`card ${compact ? 'card-compact' : ''} ${interactive ? 'card-clickable' : ''} ${cls || ''}`.trim()} {...props}>
+    <div className={`card ${compact ? 'card-compact' : ''} ${actionCompact ? 'card-action-compact' : ''} ${interactive ? 'card-clickable' : ''} ${cls || ''}`.trim()} {...props}>
       <p>{t}</p>
       <b>{v}</b>
     </div>

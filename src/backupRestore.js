@@ -1,7 +1,9 @@
 import JSZip from 'jszip'
 
-export const BACKUP_TABLES = ['customers', 'inventory', 'orders', 'payments']
-export const BACKUP_VERSION = 1
+export const CORE_BACKUP_TABLES = ['customers', 'inventory', 'orders', 'payments']
+export const PO_BACKUP_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts']
+export const BACKUP_TABLES = [...CORE_BACKUP_TABLES, ...PO_BACKUP_TABLES]
+export const BACKUP_VERSION = 2
 export const APP_NAME = 'INNER SOURCE BEAUTY ERP'
 export const LAST_BACKUP_KEY = 'isb_last_backup_at'
 
@@ -13,6 +15,9 @@ const TABLE_REQUIRED = {
   inventory: ['id'],
   orders: ['id', 'invoice_no'],
   payments: ['id'],
+  purchase_orders: ['id', 'po_number'],
+  purchase_order_items: ['id', 'purchase_order_id'],
+  purchase_order_receipts: ['id', 'purchase_order_id', 'purchase_order_item_id'],
 }
 
 const TABLE_NUMERIC = {
@@ -20,6 +25,9 @@ const TABLE_NUMERIC = {
   inventory: ['qty', 'buying_price', 'selling_price', 'cost', 'price', 'retail', 'low_stock', 'reorder_limit', 'shipping_cost'],
   orders: ['customer_id', 'inventory_id', 'qty', 'price', 'buying_price', 'profit', 'shipping', 'discount', 'total', 'shipping_cost', 'allocated_qty', 'backorder_qty', 'shipped_qty'],
   payments: ['customer_id', 'order_id', 'amount'],
+  purchase_orders: ['exchange_rate', 'shipping_cost', 'other_cost', 'total_ordered_units', 'total_product_cost', 'total_commission', 'grand_total', 'commission_amount_paid'],
+  purchase_order_items: ['inventory_id', 'order_qty', 'korean_unit_cost', 'commission_percent', 'commission_per_unit', 'product_cost', 'commission_total', 'total_line_cost', 'received_qty'],
+  purchase_order_receipts: ['inventory_id', 'received_qty', 'inventory_before', 'inventory_after'],
 }
 
 const TABLE_DATES = {
@@ -27,6 +35,9 @@ const TABLE_DATES = {
   inventory: ['created_at', 'expiration_date'],
   orders: ['created_at', 'due_date', 'order_date', 'fulfillment_date', 'voided_at'],
   payments: ['created_at', 'payment_date'],
+  purchase_orders: ['created_at', 'order_date', 'eta', 'commission_payment_date', 'updated_at'],
+  purchase_order_items: ['created_at'],
+  purchase_order_receipts: ['created_at', 'received_date'],
 }
 
 export function backupZipFilename() {
@@ -144,8 +155,18 @@ export function validateRestoreRows(parsed, existingData = {}) {
     ...(parsed.orders || []).map(r => String(r.id)),
     ...(existingData.orders || []).map(r => String(r.id)),
   ])
+  const poIds = new Set([
+    ...(parsed.purchase_orders || []).map(r => String(r.id)),
+    ...(existingData.purchase_orders || []).map(r => String(r.id)),
+  ])
+  const poItemIds = new Set([
+    ...(parsed.purchase_order_items || []).map(r => String(r.id)),
+    ...(existingData.purchase_order_items || []).map(r => String(r.id)),
+  ])
 
-  for (const table of BACKUP_TABLES) {
+  const tablesToValidate = BACKUP_TABLES.filter(t => Array.isArray(parsed[t]))
+
+  for (const table of tablesToValidate) {
     const rows = parsed[table] || []
     const required = TABLE_REQUIRED[table] || ['id']
     const numeric = TABLE_NUMERIC[table] || []
@@ -190,6 +211,22 @@ export function validateRestoreRows(parsed, existingData = {}) {
           errors.push({ table, rowNum, reason: `order_id ${row.order_id} not found in backup or current data.` })
         }
       }
+      if (table === 'purchase_order_items') {
+        if (row.purchase_order_id && !poIds.has(String(row.purchase_order_id))) {
+          errors.push({ table, rowNum, reason: `purchase_order_id ${row.purchase_order_id} not found.` })
+        }
+        if (row.inventory_id && String(row.inventory_id).trim() && !inventoryIds.has(String(row.inventory_id))) {
+          errors.push({ table, rowNum, reason: `inventory_id ${row.inventory_id} not found.` })
+        }
+      }
+      if (table === 'purchase_order_receipts') {
+        if (row.purchase_order_id && !poIds.has(String(row.purchase_order_id))) {
+          errors.push({ table, rowNum, reason: `purchase_order_id ${row.purchase_order_id} not found.` })
+        }
+        if (row.purchase_order_item_id && !poItemIds.has(String(row.purchase_order_item_id))) {
+          errors.push({ table, rowNum, reason: `purchase_order_item_id ${row.purchase_order_item_id} not found.` })
+        }
+      }
     })
   }
   return errors
@@ -201,16 +238,25 @@ export async function readBackupZip(file) {
   const manifestFile = zip.file('backup_manifest.json')
   if (!manifestFile) throw new Error('Missing backup_manifest.json in ZIP.')
   const manifest = JSON.parse(await manifestFile.async('string'))
-  if (manifest.backup_version !== BACKUP_VERSION) {
+  if (manifest.backup_version !== BACKUP_VERSION && manifest.backup_version !== 1) {
     throw new Error(`Unsupported backup version: ${manifest.backup_version}`)
   }
-  for (const table of BACKUP_TABLES) {
+  for (const table of CORE_BACKUP_TABLES) {
     if (!zip.file(`${table}.json`)) throw new Error(`Missing required file: ${table}.json`)
   }
   const parsed = { manifest }
-  for (const table of BACKUP_TABLES) {
+  for (const table of CORE_BACKUP_TABLES) {
     const text = await zip.file(`${table}.json`).async('string')
     parsed[table] = parseJsonTable(text, `${table}.json`)
+  }
+  for (const table of PO_BACKUP_TABLES) {
+    const file = zip.file(`${table}.json`)
+    if (file) {
+      const text = await file.async('string')
+      parsed[table] = parseJsonTable(text, `${table}.json`)
+    } else {
+      parsed[table] = []
+    }
   }
   return parsed
 }
@@ -232,8 +278,9 @@ export async function executeRestore({ parsed, mode, existingData, persistTable,
   const stats = { inserted: 0, updated: 0, failed: 0 }
   const rowErrors = []
   const safeUpsert = mode === 'upsert'
+  const tablesToRestore = BACKUP_TABLES.filter(t => Array.isArray(parsed[t]))
 
-  for (const table of BACKUP_TABLES) {
+  for (const table of tablesToRestore) {
     onProgress?.(`Restoring ${table}...`)
     const rows = (parsed[table] || []).map(coerceRow)
     const existingIds = new Set((existingData[table] || []).map(r => String(r.id)))

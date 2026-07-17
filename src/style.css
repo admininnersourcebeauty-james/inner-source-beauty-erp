@@ -400,9 +400,43 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .dashboard-row-4 .card-action-compact b{font-size:18px}
 }
 
+.po-list-panel,.po-form-panel,.po-detail-panel{margin-bottom:18px}
+.po-list-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.po-summary-cards{margin-bottom:16px}
+.po-filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.po-search{margin-bottom:14px}
+.po-list-table,.po-receive-table{overflow-x:auto}
+.po-status-badge{display:inline-block;padding:4px 10px;border-radius:999px;font-size:11px;font-weight:700;background:#e8edf5;color:#07142b}
+.po-status-partially-received,.po-status-shipped{background:#fff4e5;color:#9a5b00}
+.po-status-received{background:#e6f4ea;color:#0d5c2e}
+.po-status-cancelled{background:#fdecea;color:#9b1c1c}
+.po-status-draft{background:#eef2f7;color:#52607a}
+.po-line-card{border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-bottom:12px;background:#fafbfd}
+.po-line-grid{align-items:end}
+.po-calc-value{display:block;padding:12px 13px;background:#f5f7fa;border:1px solid #dce3ee;border-radius:10px;font-weight:700}
+.po-totals-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:16px 0}
+.po-totals-box p{margin:6px 0}
+.po-form-actions,.po-detail-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
+.po-receive-dialog{max-width:960px;width:min(960px,calc(100vw - 24px))}
+.po-receive-buying-prompt{margin:16px 0;padding:12px;background:#f8fafc;border-radius:10px}
+.po-receive-buying-prompt label{margin-right:16px;font-weight:700}
+.po-commission-payment{margin-top:20px}
+.po-internal-toggle{margin-left:auto}
+.dashboard-row-3{grid-template-columns:repeat(3,minmax(140px,1fr))}
+.po-report-dates{margin-bottom:12px}
+@media(max-width:900px){
+  .po-header-grid,.po-line-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}
+  .dashboard-row-3{grid-template-columns:repeat(2,minmax(120px,1fr))}
+}
+@media(max-width:480px){
+  .po-header-grid,.po-line-grid,.dashboard-row-3{grid-template-columns:1fr}
+  .po-detail-actions,.po-form-actions{flex-direction:column}
+  .po-detail-actions button,.po-form-actions button{width:100%}
+}
+
 @media print{
   @page{size:letter;margin:0.5in}
-  aside,header,select,button,.notice,.menu-toggle,.invoice-actions,.search-results,.reorder-list-overlay .restore-dialog-actions{display:none!important}
+  aside,header,select,button,.notice,.menu-toggle,.invoice-actions,.search-results,.reorder-list-overlay .restore-dialog-actions,.po-detail-actions,.no-print{display:none!important}
   main{margin:0;padding:0}
   .panel{box-shadow:none;border:0;padding:0}
   .invoice{border:0;box-shadow:none}

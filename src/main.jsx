@@ -22,10 +22,21 @@ import {
   isVoidOrder, orderPaidTotal, ordersForSalesMetrics, paymentCountsTowardBalance,
   statusMatchesFilterWithVoid, voidRestoreQty, ORDER_FILTER_STATUSES,
 } from './invoiceVoid.js'
+import {
+  nextPoNumber, calcPoTotals, derivePoStatus, newPoId, buildPoFromReorderItems,
+  poSummaryStats, incomingInventoryAlerts, allocateLineCosts, calcLineItem,
+  deriveCommissionPaymentStatus, formatKrw,
+} from './purchaseOrders.js'
+import { PurchaseOrdersPage, PurchaseOrderReports } from './PurchaseOrdersUI.jsx'
 import './style.css'
 
-const TABLES = ['customers', 'inventory', 'orders', 'payments']
-const EMPTY = { customers: [], inventory: [], orders: [], payments: [] }
+const CORE_TABLES = ['customers', 'inventory', 'orders', 'payments']
+const PO_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts']
+const TABLES = [...CORE_TABLES, ...PO_TABLES]
+const EMPTY = {
+  customers: [], inventory: [], orders: [], payments: [],
+  purchase_orders: [], purchase_order_items: [], purchase_order_receipts: [],
+}
 const PAYMENT_METHODS = ['Zelle', 'Venmo', 'Cash', 'Credit Card', 'Check', 'ACH/Wire']
 const TERMS = ['COD', 'NET 15', 'NET 30', 'NET 45', 'NET 60']
 const STATUSES = ['Active', 'Hold', 'VIP']
@@ -128,14 +139,17 @@ const stockLevel = qty => {
 }
 
 const PAGE_ACCESS = {
-  Admin: ['Dashboard', 'Customers', 'Inventory', 'Orders', 'Invoice', 'Payments', 'Reports', 'Settings'],
-  Staff: ['Dashboard', 'Customers', 'Orders', 'Invoice', 'Payments'],
+  Admin: ['Dashboard', 'Customers', 'Inventory', 'Purchase Orders', 'Orders', 'Invoice', 'Payments', 'Reports', 'Settings'],
+  Staff: ['Dashboard', 'Customers', 'Purchase Orders', 'Orders', 'Invoice', 'Payments'],
   Warehouse: ['Inventory'],
 }
 
 function useLocalData() {
   const [data, setData] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('isb_data_v2')) || EMPTY } catch { return EMPTY }
+    try {
+      const raw = JSON.parse(localStorage.getItem('isb_data_v2')) || {}
+      return { ...EMPTY, ...raw, purchase_orders: raw.purchase_orders || [], purchase_order_items: raw.purchase_order_items || [], purchase_order_receipts: raw.purchase_order_receipts || [] }
+    } catch { return EMPTY }
   })
   useEffect(() => localStorage.setItem('isb_data_v2', JSON.stringify(data)), [data])
   return [data, setData]
@@ -157,6 +171,8 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [selectedRecord, setSelectedRecord] = useState({ page: '', id: '', focusFulfillment: false })
   const voidingRef = useRef(false)
+  const receivingRef = useRef(false)
+  const [draftPoSeed, setDraftPoSeed] = useState(null)
 
   const data = hasSupabaseConfig && session ? cloudData : localData
   const role = profile.role || 'Admin'
@@ -192,8 +208,12 @@ function App() {
     const next = { ...EMPTY }
     for (const t of TABLES) {
       const { data: rows, error } = await supabase.from(t).select('*').order('created_at', { ascending: false })
-      if (error) setNotice(error.message)
-      next[t] = rows || []
+      if (error) {
+        if (PO_TABLES.includes(t)) next[t] = []
+        else setNotice(error.message)
+      } else {
+        next[t] = rows || []
+      }
     }
     setCloudData(next); setLoading(false)
   }
@@ -406,6 +426,258 @@ function App() {
     } finally {
       voidingRef.current = false
     }
+  }
+
+  function buildPoRow(id, header, totals, isNew) {
+    const createdBy = session?.user?.email || profile.email || role || 'Admin'
+    return {
+      id,
+      po_number: header.po_number || nextPoNumber(data.purchase_orders),
+      order_date: toDbDate(header.order_date || today()),
+      supplier: header.supplier || '',
+      middleman_name: header.middleman_name || '',
+      currency: header.currency || 'KRW',
+      exchange_rate: totals.exchangeRate,
+      shipping_cost: totals.shippingCost,
+      other_cost: totals.otherCost,
+      eta: header.eta || null,
+      status: header.status || 'Draft',
+      notes: header.notes || '',
+      total_ordered_units: totals.totalOrderedUnits,
+      total_product_cost: totals.totalProductCost,
+      total_commission: totals.totalCommission,
+      grand_total: totals.grandTotal,
+      commission_payment_status: header.commission_payment_status || deriveCommissionPaymentStatus(header),
+      commission_amount_paid: Number(header.commission_amount_paid) || 0,
+      commission_payment_date: header.commission_payment_date || null,
+      commission_payment_method: header.commission_payment_method || '',
+      commission_payment_note: header.commission_payment_note || '',
+      created_by: isNew ? createdBy : (header.created_by || createdBy),
+      updated_at: new Date().toISOString(),
+      ...(isNew ? { created_at: new Date().toISOString() } : {}),
+    }
+  }
+
+  function buildPoItemRows(poId, lines) {
+    return totalsLines(lines).map(line => ({
+      id: line.id || newPoId(),
+      purchase_order_id: poId,
+      inventory_id: line.inventory_id || null,
+      product_sku: line.product_sku || line.product_name || '',
+      product_name: line.product_name || line.product_sku || '',
+      brand: line.brand || '',
+      order_qty: line.order_qty,
+      korean_unit_cost: line.korean_unit_cost,
+      commission_percent: line.commission_percent,
+      commission_per_unit: line.commission_per_unit,
+      product_cost: line.product_cost,
+      commission_total: line.commission_total,
+      total_line_cost: line.total_line_cost,
+      received_qty: line.received_qty || 0,
+      note: line.note || '',
+      created_at: line.created_at || new Date().toISOString(),
+    }))
+  }
+
+  function totalsLines(lines) {
+    return calcPoTotals({}, lines).lines
+  }
+
+  async function savePurchaseOrder({ id, header, lines }) {
+    if (role !== 'Admin') { setNotice('Only administrators can save purchase orders.'); return 'denied' }
+    const existing = id ? data.purchase_orders.find(p => String(p.id) === String(id)) : null
+    if (existing && !['Draft', 'Submitted', 'In Production', 'Shipped'].includes(existing.status)) {
+      setNotice('This purchase order cannot be edited.'); return 'locked'
+    }
+    const totals = calcPoTotals(header, lines)
+    if (!totals.lines.length) { setNotice('Add at least one product line.'); return 'empty' }
+    const poId = id || newPoId()
+    const poRow = buildPoRow(poId, { ...header, po_number: header.po_number || nextPoNumber(data.purchase_orders) }, totals, !id)
+    poRow.status = derivePoStatus(totals.lines, header.status || existing?.status || 'Draft')
+    const itemRows = buildPoItemRows(poId, totals.lines)
+    setNotice('')
+    if (hasSupabaseConfig && session) {
+      if (id) {
+        const { error } = await supabase.from('purchase_orders').update(poRow).eq('id', poId)
+        if (error) { setNotice(error.message); return error.message }
+        await supabase.from('purchase_order_items').delete().eq('purchase_order_id', poId)
+      } else {
+        const { error } = await supabase.from('purchase_orders').insert(poRow)
+        if (error) { setNotice(error.message); return error.message }
+      }
+      const { error: itemsErr } = await supabase.from('purchase_order_items').insert(itemRows)
+      if (itemsErr) { setNotice(itemsErr.message); return itemsErr.message }
+      await loadCloudData()
+    } else {
+      setLocalData(p => {
+        const pos = id
+          ? p.purchase_orders.map(x => String(x.id) === String(poId) ? { ...x, ...poRow } : x)
+          : [{ ...poRow }, ...p.purchase_orders]
+        const keptItems = p.purchase_order_items.filter(i => String(i.purchase_order_id) !== String(poId))
+        return {
+          ...p,
+          purchase_orders: pos,
+          purchase_order_items: [...itemRows, ...keptItems],
+        }
+      })
+    }
+    return ''
+  }
+
+  async function receivePurchaseOrder(poId, { lines, updateBuyingPrice }) {
+    if (receivingRef.current) return 'Receive already in progress.'
+    if (role !== 'Admin') return 'Only administrators can receive inventory.'
+    const po = data.purchase_orders.find(p => String(p.id) === String(poId))
+    if (!po) return 'Purchase order not found.'
+    if (po.status === 'Cancelled') return 'Cannot receive a cancelled purchase order.'
+    if (po.status === 'Received') return 'Purchase order is already fully received.'
+
+    const poItems = data.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId)).map(calcLineItem)
+    const payload = lines.filter(l => Number(l.receive_now) > 0)
+    if (!payload.length) return 'Enter a quantity to receive.'
+
+    for (const row of payload) {
+      const item = poItems.find(i => String(i.id) === String(row.purchase_order_item_id))
+      if (!item) return 'PO line item not found.'
+      const receiveNow = Number(row.receive_now)
+      if (receiveNow <= 0) continue
+      if (receiveNow > item.remaining_qty) return `Cannot receive ${receiveNow} when only ${item.remaining_qty} remaining for ${item.product_sku || item.product_name}.`
+    }
+
+    receivingRef.current = true
+    setNotice('')
+    try {
+      if (hasSupabaseConfig && session) {
+        const rpcLines = payload.map(l => ({
+          purchase_order_item_id: l.purchase_order_item_id,
+          receive_now: Number(l.receive_now),
+          note: l.note || '',
+        }))
+        const { error } = await supabase.rpc('receive_purchase_order_items', {
+          p_po_id: poId,
+          p_lines: rpcLines,
+          p_update_buying_price: !!updateBuyingPrice,
+          p_received_by: session.user?.email || profile.email || 'Admin',
+        })
+        if (error) {
+          setNotice(error.message)
+          return error.message
+        }
+        await loadCloudData()
+        return ''
+      }
+
+      const allocated = allocateLineCosts(poItems, Number(po.shipping_cost) || 0, Number(po.other_cost) || 0)
+      const receivedBy = session?.user?.email || profile.email || 'Admin'
+      const receiptRows = []
+      const itemUpdates = new Map()
+      const inventoryUpdates = new Map()
+
+      for (const row of payload) {
+        const item = poItems.find(i => String(i.id) === String(row.purchase_order_item_id))
+        const receiveNow = Number(row.receive_now)
+        const alloc = allocated.find(a => String(a.id) === String(item.id))
+        const newReceived = item.received_qty + receiveNow
+        itemUpdates.set(String(item.id), newReceived)
+
+        if (item.inventory_id) {
+          const inv = data.inventory.find(i => String(i.id) === String(item.inventory_id))
+          const before = Number(inv?.qty || 0)
+          const after = before + receiveNow
+          inventoryUpdates.set(String(item.inventory_id), {
+            after,
+            landed: alloc?.estimated_landed_cost || item.korean_unit_cost + item.commission_per_unit,
+          })
+          receiptRows.push({
+            id: newPoId(),
+            purchase_order_id: poId,
+            purchase_order_item_id: item.id,
+            inventory_id: item.inventory_id,
+            received_qty: receiveNow,
+            received_date: new Date().toISOString(),
+            received_by: receivedBy,
+            note: row.note || '',
+            inventory_before: before,
+            inventory_after: after,
+            created_at: new Date().toISOString(),
+          })
+        }
+      }
+
+      const updatedItems = poItems.map(item => {
+        const nr = itemUpdates.get(String(item.id))
+        return nr != null ? { ...item, received_qty: nr } : item
+      })
+      const newStatus = derivePoStatus(updatedItems, po.status)
+
+      setLocalData(p => ({
+        ...p,
+        purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? { ...x, status: newStatus, updated_at: new Date().toISOString() } : x),
+        purchase_order_items: p.purchase_order_items.map(i => {
+          const nr = itemUpdates.get(String(i.id))
+          return nr != null ? { ...i, received_qty: nr } : i
+        }),
+        purchase_order_receipts: [...receiptRows, ...p.purchase_order_receipts],
+        inventory: p.inventory.map(inv => {
+          const upd = inventoryUpdates.get(String(inv.id))
+          if (!upd) return inv
+          const patch = { qty: upd.after }
+          if (updateBuyingPrice) {
+            patch.buying_price = upd.landed
+            patch.cost = upd.landed
+          }
+          return { ...inv, ...patch }
+        }),
+      }))
+      return ''
+    } finally {
+      receivingRef.current = false
+    }
+  }
+
+  async function cancelPurchaseOrder(poId) {
+    if (role !== 'Admin') { setNotice('Only administrators can cancel purchase orders.'); return 'denied' }
+    const po = data.purchase_orders.find(p => String(p.id) === String(poId))
+    if (!po) return 'not found'
+    if (po.status === 'Cancelled') return 'already cancelled'
+    if (po.status === 'Received') return 'Cannot cancel a fully received PO.'
+    if (hasSupabaseConfig && session) {
+      const { error } = await supabase.from('purchase_orders').update({ status: 'Cancelled', updated_at: new Date().toISOString() }).eq('id', poId)
+      if (error) { setNotice(error.message); return error.message }
+      await loadCloudData()
+    } else {
+      setLocalData(p => ({
+        ...p,
+        purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? { ...x, status: 'Cancelled', updated_at: new Date().toISOString() } : x),
+      }))
+    }
+    return ''
+  }
+
+  async function updatePoCommissionPayment(poId, patch) {
+    if (role !== 'Admin') return
+    const row = {
+      ...patch,
+      commission_payment_status: deriveCommissionPaymentStatus({ ...data.purchase_orders.find(p => String(p.id) === String(poId)), ...patch }),
+      updated_at: new Date().toISOString(),
+    }
+    if (hasSupabaseConfig && session) {
+      const { error } = await supabase.from('purchase_orders').update(row).eq('id', poId)
+      if (error) setNotice(error.message)
+      else await loadCloudData()
+    } else {
+      setLocalData(p => ({
+        ...p,
+        purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? { ...x, ...row } : x),
+      }))
+    }
+  }
+
+  function createPoFromReorder(reorderItems) {
+    const seed = buildPoFromReorderItems(reorderItems, nextPoNumber(data.purchase_orders))
+    setDraftPoSeed(seed)
+    setPage('Purchase Orders')
+    setMenuOpen(false)
   }
 
   async function createOrder(f) {
@@ -786,9 +1058,13 @@ function App() {
             inventory: [...(data.inventory || [])],
             orders: [...(data.orders || [])],
             payments: [...(data.payments || [])],
+            purchase_orders: [...(data.purchase_orders || [])],
+            purchase_order_items: [...(data.purchase_order_items || [])],
+            purchase_order_receipts: [...(data.purchase_order_receipts || [])],
           }
         }
         if (rowMode === 'insert_missing' && exists) return 'skipped'
+        if (!localState[table]) localState[table] = []
         const idx = localState[table].findIndex(x => String(x.id) === String(row.id))
         if (idx >= 0) {
           localState[table][idx] = { ...localState[table][idx], ...row }
@@ -883,11 +1159,27 @@ function App() {
         )}
         {notice && <div className="notice" onClick={() => setNotice('')}>{notice}</div>}
         {loading && <div className="panel">Loading...</div>}
-        {page === 'Dashboard' && <Dashboard data={data} stats={stats} onNavigate={openRecord} />}
+        {page === 'Dashboard' && <Dashboard data={data} stats={stats} onNavigate={openRecord} onCreatePoFromReorder={role === 'Admin' ? createPoFromReorder : null} />}
         {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} onNavigate={openRecord}
           selectedCustomerId={selectedRecord.page === 'Customers' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow}
           allocateBackOrders={allocateBackOrdersForProduct} />}
+        {page === 'Purchase Orders' && (
+          <PurchaseOrdersPage
+            data={data}
+            role={role}
+            isAdmin={role === 'Admin'}
+            selectedPoId={selectedRecord.page === 'Purchase Orders' ? selectedRecord.id : ''}
+            clearSelection={clearSelectedRecord}
+            draftPoSeed={draftPoSeed}
+            clearDraftPoSeed={() => setDraftPoSeed(null)}
+            nextPoNumber={nextPoNumber(data.purchase_orders)}
+            onSavePo={savePurchaseOrder}
+            onReceivePo={receivePurchaseOrder}
+            onCancelPo={cancelPurchaseOrder}
+            onUpdateCommissionPayment={updatePoCommissionPayment}
+          />
+        )}
         {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteOrder={deleteOrder}
           completeFulfillment={completeFulfillment}
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''}
@@ -897,7 +1189,7 @@ function App() {
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Payments' && <Payments data={data} recordMultiPayment={recordMultiPayment} deleteRow={deleteRow} onNavigate={openRecord}
           selectedPaymentId={selectedRecord.page === 'Payments' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
-        {page === 'Reports' && <Reports data={data} stats={stats} />}
+        {page === 'Reports' && <Reports data={data} stats={stats} poStats={poSummaryStats(data.purchase_orders, data.purchase_order_items)} />}
         {page === 'Settings' && <Settings data={data} reload={loadCloudData} profile={profile} setProfile={setProfile} session={session}
           fetchProfilesForBackup={fetchProfilesForBackup} restoreBackupData={restoreBackupData} setLocalData={setLocalData}
           repairNegativeInventory={repairNegativeInventory} />}
@@ -1068,7 +1360,7 @@ function HeaderUserMenu({ role, email, onLogout }) {
   )
 }
 
-function ReorderListDialog({ items, onClose }) {
+function ReorderListDialog({ items, onClose, onCreatePo, isAdmin }) {
   const totalUnits = items.reduce((s, r) => s + r.needToOrder, 0)
   const totalCost = items.reduce((s, r) => s + r.estimatedCost, 0)
   const listDate = formatLocalShortDate()
@@ -1142,6 +1434,9 @@ function ReorderListDialog({ items, onClose }) {
         <div className="restore-dialog-actions reorder-list-actions">
           <button type="button" onClick={handlePrint} disabled={!items.length}>Print</button>
           <button type="button" className="soft" onClick={downloadCsv} disabled={!items.length}>Download CSV</button>
+          {isAdmin && (
+            <button type="button" onClick={() => { onCreatePo?.(items); onClose() }} disabled={!items.length}>Create Purchase Order</button>
+          )}
           <button type="button" className="soft" onClick={onClose}>Close</button>
         </div>
       </div>
@@ -1149,7 +1444,7 @@ function ReorderListDialog({ items, onClose }) {
   )
 }
 
-function Dashboard({ data, stats, onNavigate }) {
+function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
   const [showReorderList, setShowReorderList] = useState(false)
   const todayOrders = data.orders.filter(o => isOrderDateToday(o) && !isVoidOrder(o))
   const monthOrders = data.orders.filter(o => isOrderDateThisMonth(o) && !isVoidOrder(o))
@@ -1185,6 +1480,8 @@ function Dashboard({ data, stats, onNavigate }) {
   const { itemCount: lowStockCount, unitsToReorder } = lowStockSummary(data.inventory)
   const lowStockAlerts = buildLowStockAlerts(data.inventory, 10)
   const reorderList = reorderListItems(data.inventory)
+  const poStats = poSummaryStats(data.purchase_orders || [], data.purchase_order_items || [])
+  const incomingAlerts = incomingInventoryAlerts(data.purchase_orders || [], data.purchase_order_items || [], 8)
 
   function formatDashboardDate(raw) {
     if (!raw) return '—'
@@ -1284,6 +1581,14 @@ function Dashboard({ data, stats, onNavigate }) {
             <Card t="Monthly Profit" v={money(monthlyProfit)} compact />
             <Card t="Expected Profit" v={money(expectedProfit)} compact />
             <Card t="Inventory Value" v={money(inventoryValue)} compact />
+          </div>
+        </div>
+        <div className="dashboard-row-group">
+          <p className="dashboard-row-label">Purchase Orders</p>
+          <div className="cards dashboard-row dashboard-row-3">
+            <Card t="Open Purchase Orders" v={poStats.openCount} compact cls={poStats.openCount > 0 ? 'card-warn' : ''} onClick={() => onNavigate?.('Purchase Orders')} actionCompact />
+            <Card t="Incoming Units" v={poStats.incomingUnits} compact onClick={() => scrollToSection('dashboard-incoming-po')} actionCompact />
+            <Card t="Commission Payable" v={formatKrw(poStats.commissionPayable)} compact cls={poStats.commissionPayable > 0 ? 'card-warn' : ''} onClick={() => onNavigate?.('Purchase Orders')} actionCompact />
           </div>
         </div>
         <div className="dashboard-row-group">
@@ -1420,8 +1725,37 @@ function Dashboard({ data, stats, onNavigate }) {
         <p className="dashboard-empty-note" id="dashboard-lowstock-alerts">No low stock items right now.</p>
       )}
 
+      {incomingAlerts.length > 0 && (
+        <div className="panel panel-compact dashboard-section" id="dashboard-incoming-po">
+          <h2 className="dashboard-section-title">Incoming Inventory</h2>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>PO Number</th><th>Supplier</th><th>ETA</th><th>Remaining Units</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {incomingAlerts.map(a => (
+                  <tr key={a.id}>
+                    <td><button type="button" className="link-cell" onClick={() => onNavigate?.('Purchase Orders', a.id)}>{a.po_number}</button></td>
+                    <td>{a.supplier || '—'}</td>
+                    <td>{a.eta || '—'}</td>
+                    <td>{a.remaining_units}</td>
+                    <td>{a.status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {showReorderList && (
-        <ReorderListDialog items={reorderList} onClose={() => setShowReorderList(false)} />
+        <ReorderListDialog
+          items={reorderList}
+          onClose={() => setShowReorderList(false)}
+          onCreatePo={onCreatePoFromReorder}
+          isAdmin={!!onCreatePoFromReorder}
+        />
       )}
 
       {pickupCount > 0 && (
@@ -3147,8 +3481,10 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
   )
 }
 
-function Reports({ data, stats }) {
+function Reports({ data, stats, poStats }) {
   const [reportFilter, setReportFilter] = useState('Active')
+  const [poDateFrom, setPoDateFrom] = useState('')
+  const [poDateTo, setPoDateTo] = useState('')
   const activeOrders = ordersForSalesMetrics(data.orders)
   const voidOrders = data.orders.filter(isVoidOrder)
   const ranked = [...data.customers].map(c => ({ ...c, ...customerStats(c, data) })).sort((a, b) => b.sales - a.sales)
@@ -3311,6 +3647,13 @@ function Reports({ data, stats }) {
           )}
         </>
       )}
+      <PurchaseOrderReports
+        data={data}
+        dateFrom={poDateFrom}
+        dateTo={poDateTo}
+        onDateFromChange={setPoDateFrom}
+        onDateToChange={setPoDateTo}
+      />
     </div>
   )
 }
@@ -3336,7 +3679,10 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
     setStatusError(isError)
   }
 
-  const exportLabels = { customers: 'Customers', inventory: 'Inventory', orders: 'Orders', payments: 'Payments' }
+  const exportLabels = {
+    customers: 'Customers', inventory: 'Inventory', orders: 'Orders', payments: 'Payments',
+    purchase_orders: 'Purchase Orders', purchase_order_items: 'PO Line Items', purchase_order_receipts: 'PO Receipts',
+  }
 
   function formatLocalBackupDisplay(iso) {
     if (!iso) return 'Never'

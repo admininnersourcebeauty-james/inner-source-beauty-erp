@@ -51,6 +51,7 @@ aside button.active{background:#24324b}
 .dashboard-row-group{margin:0}
 .dashboard-row-label{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.04em;margin:0 0 8px}
 .dashboard-row-3{grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px}
+.dashboard-row-4{grid-template-columns:repeat(4,minmax(110px,1fr));gap:10px}
 .dashboard-row-5{grid-template-columns:repeat(5,minmax(120px,1fr))}
 .dashboard-section-title{font-size:16px;margin:0 0 12px}
 .dashboard-empty-note{font-size:13px;color:#52607a;margin:0 0 12px;padding:4px 0}
@@ -67,14 +68,26 @@ aside button.active{background:#24324b}
 .card-action-bo b{color:#b42318}
 .card-action-low{border-color:#fde68a;background:#fffbeb}
 .card-action-low b{color:#b45309}
-.card-action-compact{padding:7px 10px;border-radius:12px;min-height:0}
-.card-action-compact p{margin:0 0 1px;font-size:10px;line-height:1.2}
-.card-action-compact b{font-size:21px;line-height:1.05}
-.low-stock-table table{font-size:13px}
-.low-stock-table th,.low-stock-table td{padding:8px 10px}
+.card-action-compact{padding:6px 10px;border-radius:12px;min-height:0}
+.card-action-compact p{margin:0 0 1px;font-size:10px;line-height:1.15}
+.card-action-compact b{font-size:20px;line-height:1.05}
+.low-stock-table table{font-size:13px;min-width:520px}
+.low-stock-table th,.low-stock-table td{padding:8px 10px;vertical-align:middle}
+.low-stock-col-product{min-width:140px;max-width:220px;white-space:normal;word-break:break-word}
 .stock-status-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;white-space:nowrap}
 .stock-status-monitor{background:#ecfdf5;color:#047857}
+.stock-status-minimum{background:#fef3c7;color:#b45309}
 .stock-status-reorder{background:#fee4e2;color:#b42318}
+.dashboard-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.dashboard-section-head .dashboard-section-title{margin:0}
+.reorder-list-btn{padding:8px 12px;font-size:12px;white-space:nowrap}
+.inventory-minimum-field{display:flex;flex-direction:column;gap:6px}
+.field-hint{font-size:11px;color:#64748b;font-weight:500;line-height:1.35}
+.reorder-list-dialog{max-width:960px;width:min(960px,calc(100vw - 24px));max-height:calc(100vh - 40px);overflow:auto}
+.reorder-list-totals{margin-top:12px;padding-top:10px;border-top:1px solid #e2e8f0;font-size:14px}
+.reorder-list-totals p{margin:4px 0}
+.reorder-list-actions{margin-top:12px}
+.reorder-list-table table{font-size:13px;min-width:720px}
 .low-stock-alerts{list-style:none;padding:0;margin:0}
 .low-stock-alerts li{padding:12px 0;border-bottom:1px solid #e3e8f0;font-size:14px;line-height:1.5}
 .low-stock-alerts li:last-child{border-bottom:0}
@@ -324,7 +337,7 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .split{grid-template-columns:1fr}
   .detail{position:static;max-height:none}
   .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
-  .dashboard-row-3,.dashboard-row-5{grid-template-columns:1fr 1fr}
+  .dashboard-row-3,.dashboard-row-4,.dashboard-row-5{grid-template-columns:1fr 1fr}
   .customer-form textarea,.method-boxes{grid-column:auto}
   .address-grid{grid-template-columns:1fr;row-gap:24px}
   .address-spacer{display:none}
@@ -353,12 +366,14 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .alloc-prompt-actions button{width:100%}
   .rtf-alerts-table table{min-width:760px}
   .rtf-alerts-table .fulfill-open-btn{padding:5px 8px;font-size:11px}
-  .low-stock-table table{min-width:420px}
+  .low-stock-table table{min-width:480px}
+  .low-stock-col-product{min-width:120px;max-width:none}
+  .dashboard-row-4 .card-action-compact b{font-size:18px}
 }
 
 @media print{
   @page{size:letter;margin:0.5in}
-  aside,header,select,button,.notice,.menu-toggle,.invoice-actions,.search-results{display:none!important}
+  aside,header,select,button,.notice,.menu-toggle,.invoice-actions,.search-results,.reorder-list-overlay .restore-dialog-actions{display:none!important}
   main{margin:0;padding:0}
   .panel{box-shadow:none;border:0;padding:0}
   .invoice{border:0;box-shadow:none}

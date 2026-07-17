@@ -13,6 +13,10 @@ import {
   fulfillmentHandledBy, readyToFulfillAlerts, readyToFulfillOrders, awaitingPickupCount, companyDeliveryCount,
   validateCompleteFulfillment, isCarrierMethod, isCompanyDelivery, isCustomerPickup, formatFulfillmentDate,
 } from './backorder.js'
+import {
+  buildLowStockAlerts, inventoryReorderView, itemMinimumStockOrDefault,
+  lowStockSummary, minimumStockPayload, reorderListItems,
+} from './inventoryReorder.js'
 import './style.css'
 
 const TABLES = ['customers', 'inventory', 'orders', 'payments']
@@ -989,7 +993,89 @@ function HeaderUserMenu({ role, email, onLogout }) {
   )
 }
 
+function ReorderListDialog({ items, onClose }) {
+  const totalUnits = items.reduce((s, r) => s + r.needToOrder, 0)
+  const totalCost = items.reduce((s, r) => s + r.estimatedCost, 0)
+  const listDate = formatLocalShortDate()
+
+  function downloadCsv() {
+    const header = ['Date', 'Product / SKU', 'Brand', 'Stock On Hand', 'Minimum Stock', 'Need to Order', 'Buying Price', 'Estimated Cost', 'Notes']
+    const rows = items.map(r => [
+      listDate, r.style, r.brand, r.stockOnHand, r.minimumStock, r.needToOrder,
+      r.buyingPrice.toFixed(2), r.estimatedCost.toFixed(2), r.notes,
+    ])
+    const csv = [header, ...rows].map(cols => cols.map(c => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `ISB_Reorder_List_${today()}.csv`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000)
+  }
+
+  function handlePrint() {
+    window.print()
+  }
+
+  return (
+    <div className="restore-dialog-overlay reorder-list-overlay" onClick={onClose}>
+      <div className="restore-dialog reorder-list-dialog" onClick={e => e.stopPropagation()}>
+        <div className="reorder-list-screen">
+          <h2>Reorder List</h2>
+          <p className="hint">Date: {listDate}</p>
+          {items.length === 0 ? (
+            <p className="hint">No products currently need reordering.</p>
+          ) : (
+            <>
+              <div className="table-wrap reorder-list-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Product / SKU</th>
+                      <th>Brand</th>
+                      <th>Stock On Hand</th>
+                      <th>Minimum Stock</th>
+                      <th>Need to Order</th>
+                      <th>Buying Price</th>
+                      <th>Estimated Cost</th>
+                      <th>Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map(r => (
+                      <tr key={r.id}>
+                        <td>{r.style}</td>
+                        <td>{r.brand}</td>
+                        <td>{r.stockOnHand}</td>
+                        <td>{r.minimumStock}</td>
+                        <td>{r.needToOrder}</td>
+                        <td>{money(r.buyingPrice)}</td>
+                        <td>{money(r.estimatedCost)}</td>
+                        <td>{r.notes || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="reorder-list-totals">
+                <p><strong>Total Units to Order:</strong> {totalUnits}</p>
+                <p><strong>Estimated Total Cost:</strong> {money(totalCost)}</p>
+              </div>
+            </>
+          )}
+        </div>
+        <div className="restore-dialog-actions reorder-list-actions">
+          <button type="button" onClick={handlePrint} disabled={!items.length}>Print</button>
+          <button type="button" className="soft" onClick={downloadCsv} disabled={!items.length}>Download CSV</button>
+          <button type="button" className="soft" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function Dashboard({ data, stats, onNavigate }) {
+  const [showReorderList, setShowReorderList] = useState(false)
   const todayOrders = data.orders.filter(isOrderDateToday)
   const monthOrders = data.orders.filter(isOrderDateThisMonth)
   const boStats = backOrderDashboardStats(data.orders)
@@ -1021,23 +1107,9 @@ function Dashboard({ data, stats, onNavigate }) {
     if (qty <= 0) return s
     return s + qty * inventoryUnitCost(i)
   }, 0)
-  const lowStockLimit = i => Number(i.low_stock ?? 5) || 5
-  const lowStockItems = data.inventory.filter(i => {
-    const qty = Number(i.qty) || 0
-    return qty > 0 && qty <= lowStockLimit(i)
-  })
-
-  const lowStockAlerts = lowStockItems
-    .slice()
-    .sort((a, b) => (Number(a.qty) || 0) - (Number(b.qty) || 0))
-    .slice(0, 10)
-    .map(item => {
-      const qty = Number(item.qty) || 0
-      const limit = lowStockLimit(item)
-      const reorder = reorderInfo(item, data.orders)
-      const label = [item.style, item.brand].filter(Boolean).join(' ')
-      return { id: item.id, label, qty, limit, recommended: reorder?.recommended }
-    })
+  const { itemCount: lowStockCount, unitsToReorder } = lowStockSummary(data.inventory)
+  const lowStockAlerts = buildLowStockAlerts(data.inventory, 10)
+  const reorderList = reorderListItems(data.inventory)
 
   function formatDashboardDate(raw) {
     if (!raw) return '—'
@@ -1141,7 +1213,7 @@ function Dashboard({ data, stats, onNavigate }) {
         </div>
         <div className="dashboard-row-group">
           <p className="dashboard-row-label">Action Required</p>
-          <div className="cards dashboard-row dashboard-row-3">
+          <div className="cards dashboard-row dashboard-row-4">
             <Card
               t="Ready to Fulfill"
               v={rtfCount}
@@ -1159,8 +1231,16 @@ function Dashboard({ data, stats, onNavigate }) {
               onClick={() => scrollToSection('dashboard-backorder-alerts')}
             />
             <Card
-              t="Low Stock"
-              v={lowStockItems.length}
+              t="Low Stock Items"
+              v={lowStockCount}
+              compact
+              actionCompact
+              cls="card-action-low"
+              onClick={() => scrollToSection('dashboard-lowstock-alerts')}
+            />
+            <Card
+              t="Units to Reorder"
+              v={unitsToReorder}
               compact
               actionCompact
               cls="card-action-low"
@@ -1226,26 +1306,33 @@ function Dashboard({ data, stats, onNavigate }) {
 
       {lowStockAlerts.length > 0 ? (
         <div className="panel panel-compact dashboard-section" id="dashboard-lowstock-alerts">
-          <h2 className="dashboard-section-title">Low Stock Alerts</h2>
+          <div className="dashboard-section-head">
+            <h2 className="dashboard-section-title">Low Stock Alerts</h2>
+            <button type="button" className="soft reorder-list-btn" onClick={() => setShowReorderList(true)}>
+              Create Reorder List
+            </button>
+          </div>
           <div className="table-wrap low-stock-table">
             <table>
               <thead>
                 <tr>
-                  <th>Product</th>
-                  <th>Stock</th>
-                  <th>Reorder Limit</th>
+                  <th className="low-stock-col-product">Product</th>
+                  <th>Stock On Hand</th>
+                  <th>Minimum Stock</th>
+                  <th>Need to Order</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
                 {lowStockAlerts.map(item => (
                   <tr key={item.id}>
-                    <td>{item.label}</td>
-                    <td>{item.qty}</td>
-                    <td>{item.limit}</td>
+                    <td className="low-stock-col-product">{item.label}</td>
+                    <td>{item.stockOnHand}</td>
+                    <td>{item.minimumStockDisplay}</td>
+                    <td>{item.needToOrder}</td>
                     <td>
-                      <span className={item.recommended ? 'stock-status-badge stock-status-reorder' : 'stock-status-badge stock-status-monitor'}>
-                        {item.recommended ? 'Reorder Recommended' : 'Monitor'}
+                      <span className={`stock-status-badge ${item.statusClass}`}>
+                        {item.status}
                       </span>
                     </td>
                   </tr>
@@ -1256,6 +1343,10 @@ function Dashboard({ data, stats, onNavigate }) {
         </div>
       ) : (
         <p className="dashboard-empty-note" id="dashboard-lowstock-alerts">No low stock items right now.</p>
+      )}
+
+      {showReorderList && (
+        <ReorderListDialog items={reorderList} onClose={() => setShowReorderList(false)} />
       )}
 
       {pickupCount > 0 && (
@@ -1527,7 +1618,7 @@ function CustomerDetail({ customer, data, deleteRow, onNavigate }) {
 }
 
 function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
-  const blank = { style: '', brand: '', category: '', qty: '', buying_price: '', shipping_cost: '', selling_price: '', low_stock: 5 }
+  const blank = { style: '', brand: '', category: '', qty: '', buying_price: '', shipping_cost: '', selling_price: '', reorder_limit: 5 }
   const [f, setF] = useState(blank)
   const [editingId, setEditingId] = useState(null)
   const [allocPrompt, setAllocPrompt] = useState(null)
@@ -1545,7 +1636,7 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
       buying_price: itemBuying(item) || '',
       shipping_cost: item.shipping_cost ?? '',
       selling_price: itemSelling(item) || '',
-      low_stock: item.low_stock ?? 5,
+      reorder_limit: itemMinimumStockOrDefault(item, 5),
     })
   }
 
@@ -1568,7 +1659,8 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
     const row = {
       style: f.style, brand: f.brand, category: f.category,
       qty: Number(f.qty) || 0, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
-      cost: buying, price: selling, low_stock: Number(f.low_stock) || 5,
+      cost: buying, price: selling,
+      ...minimumStockPayload(f.reorder_limit),
     }
     const oldItem = editingId ? data.inventory.find(i => String(i.id) === String(editingId)) : null
     const oldQty = Number(oldItem?.qty || 0)
@@ -1598,20 +1690,23 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
 
   const rows = data.inventory.map(item => {
     const buying = itemBuying(item), shippingCost = itemShipping(item), selling = itemSelling(item)
-    const ri = reorderInfo(item, data.orders)
     const stockOnHand = inventoryStockView(item)
     const backOrdered = backOrderedQtyForProduct(data.orders, item.id)
+    const reorder = inventoryReorderView(item)
     return {
       ...item, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
       profit: calcProfit(buying, selling, shippingCost),
       margin: formatMargin(buying, selling, shippingCost),
       stock: stockLevel(stockOnHand.display),
-      reorder: ri,
       stockOnHand: stockOnHand.display,
       stockRaw: stockOnHand.raw,
       stockNegative: stockOnHand.isNegative,
       backOrdered,
       available: stockOnHand.display,
+      minimumStock: reorder.minimumStockDisplay,
+      needToOrder: reorder.needToOrder,
+      stockStatus: reorder.status,
+      stockStatusClass: reorder.statusClass,
     }
   })
 
@@ -1626,6 +1721,11 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
             <label>Brand<input value={f.brand} onChange={e => setF({ ...f, brand: e.target.value })} /></label>
             <label>Category<input value={f.category} onChange={e => setF({ ...f, category: e.target.value })} /></label>
             <label>Qty<input type="number" min="0" value={f.qty} onChange={e => setF({ ...f, qty: e.target.value })} /></label>
+            <label className="inventory-minimum-field">
+              Minimum Stock
+              <input type="number" min="0" value={f.reorder_limit} onChange={e => setF({ ...f, reorder_limit: e.target.value })} />
+              <span className="field-hint">Low stock alerts appear when Stock On Hand is at or below this quantity.</span>
+            </label>
           </div>
         </div>
         <div className="form-section">
@@ -1688,9 +1788,11 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
     <div className="table-wrap inventory-table">
       <table>
         <thead><tr>
-          <th>Style</th><th>Brand</th><th>Category</th>
+          <th>Style / SKU</th><th>Brand</th><th>Category</th>
           <th>Stock On Hand</th><th>Back Ordered</th><th>Available</th>
-          <th>Buying</th><th>Shipping</th><th>Selling</th><th>Profit $</th><th>Margin</th><th>Reorder</th><th>Edit</th><th>Delete</th>
+          <th>Minimum Stock</th><th>Need to Order</th>
+          <th>Buying Price</th><th>Shipping Cost</th><th>Selling Price</th>
+          <th>Profit</th><th>Margin</th><th>Status</th><th>Edit</th><th>Delete</th>
         </tr></thead>
         <tbody>{rows.map(r => (
           <tr key={r.id} className={String(editingId) === String(r.id) ? 'sel' : ''} onClick={() => onEdit(r)}>
@@ -1700,14 +1802,16 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
             <td><span className={`stock-badge ${r.stock.cls}`}>{r.stockOnHand}</span>{r.stockNegative && <span className="negative-stock-warn" title={`Stored qty: ${r.stockRaw}`}> ⚠</span>}</td>
             <td>{r.backOrdered > 0 ? <span className="backorder-badge">{r.backOrdered}</span> : '0'}</td>
             <td>{r.available}</td>
+            <td>{r.minimumStock}</td>
+            <td>{r.needToOrder}</td>
             <td>{money(r.buying_price)}</td>
             <td>{money(r.shipping_cost)}</td>
             <td>{money(r.selling_price)}</td>
             <td>{money(r.profit)}</td>
             <td className="margin-cell">{r.margin}</td>
-            <td>{r.reorder ? (r.reorder.recommended
-              ? <span className="reorder-yes">Reorder Recommended<br /><small>Avg {r.reorder.avg}/mo · Stock {r.qty}</small></span>
-              : <span className="reorder-no">OK · Avg {r.reorder.avg}/mo</span>) : '—'}</td>
+            <td>
+              <span className={`stock-status-badge ${r.stockStatusClass}`}>{r.stockStatus}</span>
+            </td>
             <td className="row-actions" onClick={e => e.stopPropagation()}>
               <button type="button" className="soft" onClick={() => onEdit(r)}>Edit</button>
             </td>
@@ -2827,6 +2931,8 @@ function Reports({ data, stats }) {
   const sorted = Object.entries(productStats).sort((a, b) => b[1].qty - a[1].qty)
   const best = sorted[0], worst = sorted[sorted.length - 1]
   const totalProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
+  const lowStockReport = buildLowStockAlerts(data.inventory, 50)
+  const { itemCount: lowStockItemCount, unitsToReorder } = lowStockSummary(data.inventory)
 
   return (
     <div className="panel">
@@ -2853,6 +2959,40 @@ function Reports({ data, stats }) {
         <div><h3>Best Seller</h3><p>{best ? `${best[0]} — ${best[1].qty} units · ${money(best[1].profit)} profit` : '—'}</p></div>
         <div><h3>Worst Seller</h3><p>{worst && sorted.length > 1 ? `${worst[0]} — ${worst[1].qty} units · ${money(worst[1].profit)} profit` : '—'}</p></div>
       </div>
+
+      <h3>Low Stock Report</h3>
+      <div className="cards">
+        <Card t="Low Stock Items" v={lowStockItemCount} cls={lowStockItemCount > 0 ? 'card-warn' : ''} />
+        <Card t="Units to Reorder" v={unitsToReorder} cls={unitsToReorder > 0 ? 'card-warn' : ''} />
+      </div>
+      {lowStockReport.length === 0 ? (
+        <p className="hint">No low stock items.</p>
+      ) : (
+        <div className="table-wrap low-stock-table">
+          <table>
+            <thead>
+              <tr>
+                <th className="low-stock-col-product">Product</th>
+                <th>Stock On Hand</th>
+                <th>Minimum Stock</th>
+                <th>Need to Order</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lowStockReport.map(item => (
+                <tr key={item.id}>
+                  <td className="low-stock-col-product">{item.label}</td>
+                  <td>{item.stockOnHand}</td>
+                  <td>{item.minimumStockDisplay}</td>
+                  <td>{item.needToOrder}</td>
+                  <td><span className={`stock-status-badge ${item.statusClass}`}>{item.status}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <h3>Back Order Reports</h3>
       <div className="cards">

@@ -64,6 +64,10 @@ export function deriveCreateStatus(allocated_qty, backorder_qty) {
 
 export function normalizeFulfillment(order) {
   const qty = Number(order?.qty || 0)
+  if (String(order?.status || '').trim().toLowerCase() === 'void') {
+    const shipped_qty = Number(order?.shipped_qty || 0)
+    return { qty, allocated_qty: 0, backorder_qty: 0, shipped_qty, fulfilled_qty: shipped_qty }
+  }
   const status = normalizeOrderStatus(order?.status)
   const shipped_qty = order?.shipped_qty != null && order?.shipped_qty !== ''
     ? Number(order.shipped_qty)
@@ -89,6 +93,7 @@ export function unshippedAllocated(order) {
 }
 
 export function isCancelledOrCompleted(order) {
+  if (String(order?.status || '').trim().toLowerCase() === 'void') return true
   const status = normalizeOrderStatus(order?.status)
   return status === 'Cancelled' || status === 'Completed'
 }

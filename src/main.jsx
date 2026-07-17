@@ -17,6 +17,11 @@ import {
   buildLowStockAlerts, inventoryReorderView, itemMinimumStockOrDefault,
   lowStockSummary, minimumStockPayload, reorderListItems,
 } from './inventoryReorder.js'
+import {
+  VOID_REASONS, VOID_CONFIRM_TEXT, buildVoidPayload, calcOutstandingBalance, formatVoidDate,
+  isVoidOrder, orderPaidTotal, ordersForSalesMetrics, paymentCountsTowardBalance,
+  statusMatchesFilterWithVoid, voidRestoreQty, ORDER_FILTER_STATUSES,
+} from './invoiceVoid.js'
 import './style.css'
 
 const TABLES = ['customers', 'inventory', 'orders', 'payments']
@@ -151,6 +156,7 @@ function App() {
   const [globalSearch, setGlobalSearch] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const [selectedRecord, setSelectedRecord] = useState({ page: '', id: '', focusFulfillment: false })
+  const voidingRef = useRef(false)
 
   const data = hasSupabaseConfig && session ? cloudData : localData
   const role = profile.role || 'Admin'
@@ -345,6 +351,63 @@ function App() {
     return true
   }
 
+  async function voidInvoice(orderId, { reason, note }) {
+    if (voidingRef.current) return { error: 'Void already in progress.' }
+    if (role !== 'Admin') return { error: 'Only administrators can void invoices.' }
+
+    const order = data.orders.find(o => String(o.id) === String(orderId))
+    if (!order) return { error: 'Invoice not found.' }
+    if (isVoidOrder(order)) return { error: 'This invoice is already voided.' }
+    if (!reason) return { error: 'Void reason is required.' }
+
+    const restoreQty = voidRestoreQty(order)
+    const invId = order.inventory_id
+    const voidedBy = session?.user?.email || profile.email || role || 'Admin'
+    const payload = buildVoidPayload(order, data.payments, { reason, note, voidedBy })
+
+    voidingRef.current = true
+    setNotice('')
+    try {
+      if (hasSupabaseConfig && session) {
+        const inv = data.inventory.find(i => String(i.id) === String(invId))
+        const prevQty = Number(inv?.qty || 0)
+        if (invId && restoreQty > 0) {
+          const { error: invErr } = await supabase.from('inventory').update({ qty: prevQty + restoreQty }).eq('id', invId)
+          if (invErr) {
+            setNotice(invErr.message)
+            return { error: invErr.message }
+          }
+        }
+        const { error: orderErr } = await supabase.from('orders').update(payload).eq('id', orderId)
+        if (orderErr) {
+          if (invId && restoreQty > 0) {
+            await supabase.from('inventory').update({ qty: prevQty }).eq('id', invId)
+          }
+          setNotice(orderErr.message)
+          return { error: orderErr.message }
+        }
+        await loadCloudData()
+      } else {
+        setLocalData(p => {
+          const existing = p.orders.find(o => String(o.id) === String(orderId))
+          if (existing && isVoidOrder(existing)) return p
+          return {
+            ...p,
+            inventory: invId && restoreQty > 0
+              ? p.inventory.map(i => String(i.id) === String(invId)
+                ? { ...i, qty: Math.max(Number(i.qty || 0) + restoreQty, 0) }
+                : i)
+              : p.inventory,
+            orders: p.orders.map(o => String(o.id) === String(orderId) ? { ...o, ...payload } : o),
+          }
+        })
+      }
+      return { error: '' }
+    } finally {
+      voidingRef.current = false
+    }
+  }
+
   async function createOrder(f) {
     if (!f.customer_id) return { error: 'Select a customer.' }
     if (!f.inventory_id) return { error: 'Select a product.' }
@@ -458,6 +521,7 @@ function App() {
   async function updateOrder(orderId, f, original) {
     const existing = data.orders.find(o => String(o.id) === String(orderId))
     if (!existing) return { error: 'Order not found.' }
+    if (isVoidOrder(existing)) return { error: 'Voided invoices cannot be edited.' }
 
     const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
     const customer = data.customers.find(c => String(c.id) === String(f.customer_id))
@@ -574,6 +638,7 @@ function App() {
   async function completeFulfillment(orderId, form) {
     const order = data.orders.find(o => String(o.id) === String(orderId))
     if (!order) return { error: 'Order not found.' }
+    if (isVoidOrder(order)) return { error: 'Voided invoices cannot be fulfilled.' }
 
     const validation = validateCompleteFulfillment(order, form)
     if (validation.error) return validation
@@ -828,7 +893,7 @@ function App() {
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''}
           focusFulfillment={selectedRecord.page === 'Orders' && selectedRecord.focusFulfillment}
           clearSelection={clearSelectedRecord} />}
-        {page === 'Invoice' && <Invoice data={data} updateRow={updateRow}
+        {page === 'Invoice' && <Invoice data={data} updateRow={updateRow} voidInvoice={voidInvoice} role={role} profile={profile}
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Payments' && <Payments data={data} recordMultiPayment={recordMultiPayment} deleteRow={deleteRow} onNavigate={openRecord}
           selectedPaymentId={selectedRecord.page === 'Payments' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
@@ -861,16 +926,20 @@ function Login(p) {
 }
 
 function calcStats(data) {
-  const sales = data.orders.reduce((s, o) => s + Number(o.total || 0), 0)
-  const paid = data.payments.reduce((s, p) => s + Number(p.amount || 0), 0)
-  const todaySales = data.orders.filter(o => isToday(o.created_at)).reduce((s, o) => s + Number(o.total || 0), 0)
-  const monthlySales = data.orders.filter(o => isThisMonth(o.created_at)).reduce((s, o) => s + Number(o.total || 0), 0)
+  const activeOrders = ordersForSalesMetrics(data.orders)
+  const sales = activeOrders.reduce((s, o) => s + Number(o.total || 0), 0)
+  const paid = data.payments
+    .filter(p => paymentCountsTowardBalance(data.orders, data.payments, p))
+    .reduce((s, p) => s + Number(p.amount || 0), 0)
+  const todaySales = activeOrders.filter(o => isToday(o.created_at)).reduce((s, o) => s + Number(o.total || 0), 0)
+  const monthlySales = activeOrders.filter(o => isThisMonth(o.created_at)).reduce((s, o) => s + Number(o.total || 0), 0)
   const inventoryValue = data.inventory.reduce((s, i) => s + Number(i.qty || 0) * itemUnitCost(i), 0)
-  const expectedProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
-  const ordersToday = data.orders.filter(o => isToday(o.created_at)).length
+  const expectedProfit = activeOrders.reduce((s, o) => s + orderProfit(o), 0)
+  const ordersToday = activeOrders.filter(o => isToday(o.created_at)).length
   const lowStock = data.inventory.filter(i => Number(i.qty || 0) < 5).length
   const salesByDay = buildSalesGraph(data.orders)
-  return { sales, paid, balance: sales - paid, stock: data.inventory.reduce((s, i) => s + Number(i.qty || 0), 0),
+  const balance = calcOutstandingBalance(data.orders, data.payments)
+  return { sales, paid, balance, stock: data.inventory.reduce((s, i) => s + Number(i.qty || 0), 0),
     orders: data.orders.length, customers: data.customers.length, todaySales, monthlySales,
     inventoryValue, expectedProfit, ordersToday, lowStock, salesByDay }
 }
@@ -884,7 +953,7 @@ function buildSalesGraph(orders) {
     d.setDate(base.getDate() - i)
     const key = localDateKey(d)
     const total = orders
-      .filter(o => localDateKey(o.created_at) === key)
+      .filter(o => !isVoidOrder(o) && localDateKey(o.created_at) === key)
       .reduce((s, o) => s + Number(o.total || 0), 0)
     days.push({ date: key, label: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }), total })
   }
@@ -910,13 +979,16 @@ function reorderInfo(item, orders) {
 }
 
 function customerStats(c, data) {
-  const orders = data.orders.filter(o => String(o.customer_id) === String(c.id) || o.customer_name === (c.company || c.name))
-  const payments = data.payments.filter(p => String(p.customer_id) === String(c.id) || orders.some(o => o.invoice_no === p.invoice_no))
-  const sales = orders.reduce((s, o) => s + Number(o.total || 0), 0)
-  const paid = payments.reduce((s, p) => s + Number(p.amount || 0), 0)
-  const last = orders[0]?.created_at ? dateOnly(orders[0].created_at) : ''
-  const avgOrder = orders.length ? sales / orders.length : 0
-  return { orders, payments, sales, paid, balance: sales - paid, lastOrder: last, avgOrder }
+  const allOrders = data.orders.filter(o => String(o.customer_id) === String(c.id) || o.customer_name === (c.company || c.name))
+  const activeOrders = allOrders.filter(o => !isVoidOrder(o))
+  const payments = data.payments.filter(p => String(p.customer_id) === String(c.id) || allOrders.some(o => o.invoice_no === p.invoice_no))
+  const sales = activeOrders.reduce((s, o) => s + Number(o.total || 0), 0)
+  const paid = payments
+    .filter(p => paymentCountsTowardBalance(data.orders, data.payments, p))
+    .reduce((s, p) => s + Number(p.amount || 0), 0)
+  const last = allOrders[0]?.created_at ? dateOnly(allOrders[0].created_at) : ''
+  const avgOrder = activeOrders.length ? sales / activeOrders.length : 0
+  return { orders: allOrders, payments, sales, paid, balance: sales - paid, lastOrder: last, avgOrder }
 }
 
 function runGlobalSearch(data, q) {
@@ -952,6 +1024,9 @@ function inventoryUnitCost(i) {
 }
 
 function OrderStatusBadge({ status, backorderQty = 0 }) {
+  if (String(status || '').trim().toLowerCase() === 'void') {
+    return <span className="status-badge void-badge">Void</span>
+  }
   const label = normalizeOrderStatus(status)
   const isBackOrder = label === 'Back Order' || backorderQty > 0
   return <span className={isBackOrder ? 'status-badge backorder-badge' : 'status-badge'}>{label || '—'}</span>
@@ -1076,8 +1151,8 @@ function ReorderListDialog({ items, onClose }) {
 
 function Dashboard({ data, stats, onNavigate }) {
   const [showReorderList, setShowReorderList] = useState(false)
-  const todayOrders = data.orders.filter(isOrderDateToday)
-  const monthOrders = data.orders.filter(isOrderDateThisMonth)
+  const todayOrders = data.orders.filter(o => isOrderDateToday(o) && !isVoidOrder(o))
+  const monthOrders = data.orders.filter(o => isOrderDateThisMonth(o) && !isVoidOrder(o))
   const boStats = backOrderDashboardStats(data.orders)
   const backorderAlerts = activeBackorderAlerts(data.orders, 10)
   const rtfCount = countOrdersByStatus(data.orders, 'Ready to Fulfill')
@@ -1101,7 +1176,7 @@ function Dashboard({ data, stats, onNavigate }) {
   const monthlySales = monthOrders.reduce((s, o) => s + Number(o.total || 0), 0)
   const monthlyProfit = monthOrders.reduce((s, o) => s + orderProfit(o), 0)
   const openBalance = stats.balance
-  const expectedProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
+  const expectedProfit = stats.expectedProfit
   const inventoryValue = data.inventory.reduce((s, i) => {
     const qty = Number(i.qty) || 0
     if (qty <= 0) return s
@@ -1133,7 +1208,7 @@ function Dashboard({ data, stats, onNavigate }) {
     }
   }
 
-  const recentOrders = data.orders.slice(0, 10).map(o => ({
+  const recentOrders = data.orders.filter(o => !isVoidOrder(o)).slice(0, 10).map(o => ({
     id: o.id,
     order_date: formatDashboardDate(o.order_date || o.created_at),
     invoice_no: o.invoice_no || '—',
@@ -1875,6 +1950,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
   }
 
   function loadOrderForEdit(order, scrollToFulfillment = false) {
+    if (isVoidOrder(order)) return
     setEditingId(order.id)
     const f0 = normalizeFulfillment(order)
     setEditSnapshot({
@@ -2010,10 +2086,14 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
   }
 
   const allocPreview = previewAllocation()
-  const filteredOrders = data.orders.filter(o => statusMatchesFilter(o, statusFilter))
+  const filteredOrders = data.orders.filter(o => statusMatchesFilterWithVoid(o, statusFilter))
 
   function filterLabel(s) {
     if (s === 'All') return 'All'
+    if (s === 'Void') {
+      const count = data.orders.filter(o => isVoidOrder(o)).length
+      return count ? `Void (${count})` : 'Void'
+    }
     const count = countOrdersByStatus(data.orders, s)
     if (['Back Order', 'Ready to Fulfill', 'Completed'].includes(s)) return `${s} (${count})`
     return s
@@ -2204,7 +2284,7 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
       )}
       <h2>Orders</h2>
       <div className="order-filters">
-        {['All', ...ORDER_STATUSES].map(s => (
+        {['All', ...ORDER_FILTER_STATUSES].map(s => (
           <button key={s} type="button" className={statusFilter === s ? 'filter-btn active' : 'filter-btn soft'} onClick={() => setStatusFilter(s)}>{filterLabel(s)}</button>
         ))}
       </div>
@@ -2250,7 +2330,9 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
                 <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
                 <td>{o.payment_status || '—'}</td>
                 <td className="row-actions">
-                  <button type="button" className="soft" onClick={() => loadOrderForEdit(o)}>Edit</button>
+                  {isVoidOrder(o) ? '—' : (
+                    <button type="button" className="soft" onClick={() => loadOrderForEdit(o)}>Edit</button>
+                  )}
                 </td>
                 <td className="row-actions">
                   <button type="button" className="danger" onClick={() => handleDeleteOrder(o.id)}>Delete</button>
@@ -2264,9 +2346,82 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
   )
 }
 
-function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
+function VoidInvoiceModal({ order, paid, restoreQty, fulfilledQty, onCancel, onConfirm }) {
+  const [reason, setReason] = useState('')
+  const [note, setNote] = useState('')
+  const [confirmText, setConfirmText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const needsNote = reason === 'Other'
+  const canConfirm = reason && (!needsNote || note.trim()) && confirmText === VOID_CONFIRM_TEXT && !busy
+
+  async function handleConfirm() {
+    if (!canConfirm) return
+    setBusy(true)
+    setError('')
+    const result = await onConfirm({ reason, note: needsNote ? note.trim() : note.trim() })
+    setBusy(false)
+    if (result?.error) setError(result.error)
+  }
+
+  return (
+    <div className="restore-dialog-overlay void-modal-overlay" onClick={onCancel}>
+      <div className="restore-dialog void-modal" onClick={e => e.stopPropagation()}>
+        <h2>Void Invoice {order.invoice_no || '—'}?</h2>
+        <p className="void-modal-intro">This action will:</p>
+        <ul className="void-modal-list">
+          <li>Restore allocated inventory ({restoreQty} unit{restoreQty === 1 ? '' : 's'})</li>
+          <li>Cancel remaining back-order quantity</li>
+          <li>Mark the invoice as VOID</li>
+          <li>Preserve the invoice number and full history</li>
+          <li>Preserve payment records for audit purposes</li>
+        </ul>
+        {fulfilledQty > 0 && (
+          <p className="field-error void-modal-warn">
+            This invoice has {fulfilledQty} fulfilled unit{fulfilledQty === 1 ? '' : 's'}. Only unfulfilled allocated stock ({restoreQty}) will be restored.
+          </p>
+        )}
+        {paid > 0 && (
+          <p className="field-error void-modal-warn">
+            This invoice has recorded payments. Voiding the invoice does not issue a refund or remove payment history.
+          </p>
+        )}
+        <label className="void-field">
+          Void Reason <span className="req">*</span>
+          <select value={reason} onChange={e => setReason(e.target.value)}>
+            <option value="">Select reason</option>
+            {VOID_REASONS.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </label>
+        {needsNote && (
+          <label className="void-field">
+            Explanation <span className="req">*</span>
+            <textarea rows={3} value={note} onChange={e => setNote(e.target.value)} placeholder="Explain why this invoice is being voided" />
+          </label>
+        )}
+        <label className="void-field">
+          Type {VOID_CONFIRM_TEXT} to confirm
+          <input value={confirmText} onChange={e => setConfirmText(e.target.value)} placeholder={VOID_CONFIRM_TEXT} autoComplete="off" />
+        </label>
+        {error && <p className="field-error">{error}</p>}
+        <div className="restore-dialog-actions">
+          <button type="button" className="soft" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" className="danger void-confirm-btn" onClick={handleConfirm} disabled={!canConfirm}>
+            Confirm VOID
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function Invoice({ data, updateRow, voidInvoice, role, profile, selectedOrderId, clearSelection }) {
   const [id, setId] = useState('')
   const [highlightId, setHighlightId] = useState('')
+  const [invoiceFilter, setInvoiceFilter] = useState('All')
+  const [showVoidModal, setShowVoidModal] = useState(false)
+  const isAdmin = (role || 'Admin') === 'Admin'
 
   useEffect(() => {
     if (!selectedOrderId) return
@@ -2278,18 +2433,29 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
     })
   }, [selectedOrderId, clearSelection])
 
-  const o = data.orders.find(x => String(x.id) === String(id)) || data.orders[0]
+  const filteredOrderList = data.orders.filter(o => {
+    if (invoiceFilter === 'Void') return isVoidOrder(o)
+    if (invoiceFilter === 'Active') return !isVoidOrder(o)
+    return true
+  })
+
+  const o = filteredOrderList.find(x => String(x.id) === String(id))
+    || data.orders.find(x => String(x.id) === String(id))
+    || filteredOrderList[0]
+    || data.orders[0]
   const c = data.customers.find(x => String(x.id) === String(o?.customer_id))
   if (!o) return <div className="panel">No invoice yet. Create an order first.</div>
 
-  const paid = data.payments
-    .filter(p => String(p.order_id) === String(o.id) || p.invoice_no === o.invoice_no)
-    .reduce((s, p) => s + Number(p.amount || 0), 0)
+  const paid = orderPaidTotal(data.payments, o)
   const due = Number(o.total || 0) - paid
+  const voided = isVoidOrder(o)
+  const fulfillmentStatus = voided ? 'Void' : normalizeOrderStatus(o.status)
+  const paymentDisplay = voided ? (o.payment_status || (paid > 0 ? 'VOID — Payment Recorded' : 'VOID')) : o.payment_status
   const subtotal = Number(o.qty || 0) * Number(o.price || 0)
   const shippingCharge = Number(o.shipping || 0)
   const discount = Number(o.discount || 0)
   const fulfillment = normalizeFulfillment(o)
+  const restoreQty = voidRestoreQty(o)
   const method = o.shipping_method || ''
   const fulfillmentDateLabel = isCompanyDelivery(method) ? 'Delivery Date' : isCustomerPickup(method) ? 'Pickup Date' : 'Fulfillment Date'
   const handledByLabel = isCarrierMethod(method) ? 'Tracking Number' : isCompanyDelivery(method) ? 'Delivered By' : isCustomerPickup(method) ? 'Picked Up By' : 'Tracking / Handled By'
@@ -2298,17 +2464,44 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
   const contact = c?.name && c.name !== company ? c.name : ''
   const billLines = addressLines(c?.billing_address || c?.address)
   const shipLines = addressLines(c?.shipping_address || c?.billing_address || c?.address)
+  const isCompleted = normalizeOrderStatus(o.status) === 'Completed'
+
+  function handleVoidClick() {
+    if (isCompleted) {
+      const ok = window.confirm(
+        'This invoice is Completed. Voiding will restore only unfulfilled allocated inventory and preserve fulfilled quantity for history. Continue?',
+      )
+      if (!ok) return
+    }
+    setShowVoidModal(true)
+  }
 
   return (
     <div className="panel" id="invoice-panel">
-      <select
-        className={String(highlightId) === String(id || o.id) ? 'sel' : ''}
-        value={id || o.id}
-        onChange={e => { setId(e.target.value); setHighlightId('') }}
-      >
-        {data.orders.map(o2 => <option key={o2.id} value={o2.id}>{o2.invoice_no} — {o2.customer_name}</option>)}
-      </select>
-      <div className={`invoice invoice-print${String(highlightId) === String(o.id) ? ' invoice-highlight' : ''}`}>
+      <div className="invoice-toolbar">
+        <select
+          className={String(highlightId) === String(id || o.id) ? 'sel' : ''}
+          value={id || o.id}
+          onChange={e => { setId(e.target.value); setHighlightId('') }}
+        >
+          {filteredOrderList.map(o2 => (
+            <option key={o2.id} value={o2.id}>
+              {o2.invoice_no} — {o2.customer_name}{isVoidOrder(o2) ? ' (VOID)' : ''}
+            </option>
+          ))}
+        </select>
+        <div className="invoice-filter-btns">
+          {['All', 'Active', 'Void'].map(f => (
+            <button key={f} type="button" className={`soft filter-btn${invoiceFilter === f ? ' active' : ''}`} onClick={() => setInvoiceFilter(f)}>
+              {f}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className={`invoice invoice-print invoice-void-wrap${voided ? ' invoice-is-void' : ''}${String(highlightId) === String(o.id) ? ' invoice-highlight' : ''}`}>
+        {voided && (
+          <div className="invoice-void-watermark" aria-hidden="true"><span>VOID</span></div>
+        )}
         <div className="invoice-header">
           <div><h1>INNER SOURCE BEAUTY</h1><p className="invoice-sub">Professional Beauty Distribution</p></div>
           <div className="invoice-meta">
@@ -2316,9 +2509,23 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
             <p><b>Invoice #:</b> {o.invoice_no}<br />
               <b>Date:</b> {dateOnly(o.created_at) || today()}<br />
               <b>Due Date:</b> {o.due_date || calcDueDate(c?.payment_terms, o.created_at)}<br />
-              <b>Payment Status:</b> {o.payment_status}<br />
-              <b>Fulfillment Status:</b> {normalizeOrderStatus(o.status)}<br />
-              <b>Fulfillment Method:</b> {o.shipping_method || '—'}</p>
+              <b>Payment Status:</b> <span className={voided ? 'void-text' : ''}>{paymentDisplay}</span><br />
+              <b>Fulfillment Status:</b> <span className={voided ? 'void-text' : ''}>{fulfillmentStatus}</span><br />
+              {!voided && (
+                <>
+                  <b>Fulfillment Method:</b> {o.shipping_method || '—'}<br />
+                </>
+              )}
+              {voided && (
+                <>
+                  <b className="void-text">Status:</b> <span className="void-text">VOID</span><br />
+                  <b>Void Date:</b> {formatVoidDate(o.voided_at)}<br />
+                  <b>Void Reason:</b> {o.void_reason || '—'}<br />
+                  <b>Voided By:</b> {o.voided_by || '—'}<br />
+                  {o.void_note && <><b>Void Note:</b> {o.void_note}<br /></>}
+                </>
+              )}
+            </p>
           </div>
         </div>
         <div className="address-grid">
@@ -2355,12 +2562,12 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
           <p><b>Discount:</b> {money(discount)}</p>
           <p className="invoice-grand-total"><b>Total:</b> {money(o.total)}</p>
           <p><b>Amount Paid:</b> {money(paid)}</p>
-          <p className="balance-due"><b>Balance Due:</b> {money(due)}</p>
+          {!voided && <p className="balance-due"><b>Balance Due:</b> {money(due)}</p>}
         </div>
         <div className="invoice-fulfillment">
           <h3>Fulfillment</h3>
-          <p><b>Fulfillment Method:</b> {o.shipping_method || '—'}</p>
-          {method && (
+          {!voided && <p><b>Fulfillment Method:</b> {o.shipping_method || '—'}</p>}
+          {!voided && method && (
             <>
               {isCarrierMethod(method) && o.tracking && <p><b>Tracking Number:</b> {o.tracking}</p>}
               {!isCarrierMethod(method) && handledByValue !== '—' && <p><b>{handledByLabel}:</b> {handledByValue}</p>}
@@ -2373,7 +2580,7 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
           <p><b>Allocated Qty:</b> {fulfillment.allocated_qty}</p>
           <p><b>Back Order Qty:</b> {fulfillment.backorder_qty}</p>
           <p><b>Fulfilled Qty:</b> {fulfillment.fulfilled_qty}</p>
-          {fulfillment.backorder_qty > 0 && (
+          {!voided && fulfillment.backorder_qty > 0 && (
             <p className="invoice-backorder-flag">BACK ORDER: {fulfillment.backorder_qty}</p>
           )}
         </div>
@@ -2383,14 +2590,35 @@ function Invoice({ data, updateRow, selectedOrderId, clearSelection }) {
           <div className="sig-box"><div className="sig-line" /><p>Date</p></div>
         </div>
         <div className="invoice-actions">
-          <input placeholder="Update Tracking #" defaultValue={o.tracking || ''} id="track-input" />
-          <button onClick={() => {
-            const v = document.getElementById('track-input').value
-            updateRow('orders', o.id, { tracking: v })
-          }}>Save Tracking</button>
+          {!voided && (
+            <>
+              <input placeholder="Update Tracking #" defaultValue={o.tracking || ''} id="track-input" />
+              <button onClick={() => {
+                const v = document.getElementById('track-input').value
+                updateRow('orders', o.id, { tracking: v })
+              }}>Save Tracking</button>
+            </>
+          )}
           <button onClick={() => window.print()}>Print / Save PDF</button>
+          {isAdmin && !voided && (
+            <button type="button" className="danger void-invoice-btn" onClick={handleVoidClick}>VOID INVOICE</button>
+          )}
         </div>
       </div>
+      {showVoidModal && (
+        <VoidInvoiceModal
+          order={o}
+          paid={paid}
+          restoreQty={restoreQty}
+          fulfilledQty={fulfillment.fulfilled_qty}
+          onCancel={() => setShowVoidModal(false)}
+          onConfirm={async (form) => {
+            const result = await voidInvoice(o.id, form)
+            if (!result?.error) setShowVoidModal(false)
+            return result
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -2428,6 +2656,7 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
   }
 
   function resolvePaymentStatus(order, paid) {
+    if (isVoidOrder(order)) return order.payment_status || (paid > 0 ? 'VOID — Payment Recorded' : 'VOID')
     const total = Number(order.total || 0)
     const stored = order.payment_status || ''
     if (stored === 'Paid' || stored === 'Partial' || stored === 'Unpaid') return stored
@@ -2460,6 +2689,7 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
   }
 
   function paymentBadgeClass(status) {
+    if (String(status || '').startsWith('VOID')) return 'payment-status-void'
     if (status === 'Paid') return 'payment-status-paid'
     if (status === 'Partial') return 'payment-status-partial'
     return 'payment-status-unpaid'
@@ -2504,20 +2734,24 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
   const partialCount = invoiceRows.filter(o => o.payment_status === 'Partial').length
   const paidCount = invoiceRows.filter(o => o.payment_status === 'Paid').length
   const totalOpenBalance = invoiceRows
-    .filter(o => o.payment_status === 'Unpaid' || o.payment_status === 'Partial')
+    .filter(o => !isVoidOrder(o) && (o.payment_status === 'Unpaid' || o.payment_status === 'Partial'))
     .reduce((s, o) => s + o.balance, 0)
 
   const openInvoices = invoiceRows.filter(o => {
+    if (invoiceFilter === 'Void') return isVoidOrder(o)
+    if (isVoidOrder(o)) return false
     if (invoiceFilter === 'Unpaid') return o.payment_status === 'Unpaid'
     if (invoiceFilter === 'Partial') return o.payment_status === 'Partial'
     if (invoiceFilter === 'Paid') return o.payment_status === 'Paid'
+    if (invoiceFilter === 'All') return true
     return o.payment_status === 'Unpaid' || o.payment_status === 'Partial'
   })
 
   const customerOpenInvoices = receive.customer_id
     ? invoiceRows
       .filter(o =>
-        String(o.customer_id) === String(receive.customer_id)
+        !isVoidOrder(o)
+        && String(o.customer_id) === String(receive.customer_id)
         && o.balance > 0
         && (o.payment_status === 'Unpaid' || o.payment_status === 'Partial')
       )
@@ -2717,7 +2951,7 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
           <Card t="Total Open Balance" v={money(totalOpenBalance)} cls={totalOpenBalance > 0 ? 'card-warn' : ''} />
         </div>
         <div className="payment-filters">
-          {['All', 'Unpaid', 'Partial', 'Paid'].map(label => (
+          {['All', 'Unpaid', 'Partial', 'Paid', 'Void'].map(label => (
             <button
               key={label}
               type="button"
@@ -2914,15 +3148,18 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
 }
 
 function Reports({ data, stats }) {
+  const [reportFilter, setReportFilter] = useState('Active')
+  const activeOrders = ordersForSalesMetrics(data.orders)
+  const voidOrders = data.orders.filter(isVoidOrder)
   const ranked = [...data.customers].map(c => ({ ...c, ...customerStats(c, data) })).sort((a, b) => b.sales - a.sales)
   const boReport = backOrderReports(data.orders)
   const monthlyBreakdown = {}
-  data.orders.forEach(o => {
+  activeOrders.forEach(o => {
     const m = localDateKey(o.created_at).slice(0, 7)
     monthlyBreakdown[m] = (monthlyBreakdown[m] || 0) + Number(o.total || 0)
   })
   const productStats = {}
-  data.orders.forEach(o => {
+  activeOrders.forEach(o => {
     const k = o.style || 'Unknown'
     if (!productStats[k]) productStats[k] = { qty: 0, profit: 0 }
     productStats[k].qty += Number(o.qty || 0)
@@ -2930,13 +3167,29 @@ function Reports({ data, stats }) {
   })
   const sorted = Object.entries(productStats).sort((a, b) => b[1].qty - a[1].qty)
   const best = sorted[0], worst = sorted[sorted.length - 1]
-  const totalProfit = data.orders.reduce((s, o) => s + orderProfit(o), 0)
+  const totalProfit = activeOrders.reduce((s, o) => s + orderProfit(o), 0)
   const lowStockReport = buildLowStockAlerts(data.inventory, 50)
   const { itemCount: lowStockItemCount, unitsToReorder } = lowStockSummary(data.inventory)
+  const showActiveReports = reportFilter === 'Active' || reportFilter === 'All'
+  const showVoidAudit = reportFilter === 'Void' || reportFilter === 'All'
 
   return (
     <div className="panel">
       <h2>Reports</h2>
+      <div className="report-filters">
+        {['Active', 'Void', 'All'].map(f => (
+          <button
+            key={f}
+            type="button"
+            className={`filter-btn soft${reportFilter === f ? ' active' : ''}`}
+            onClick={() => setReportFilter(f)}
+          >
+            {f === 'Void' && voidOrders.length ? `Void (${voidOrders.length})` : f}
+          </button>
+        ))}
+      </div>
+      {showActiveReports && (
+        <>
       <div className="cards">
         <Card t="Total Sales" v={money(stats.sales)} />
         <Card t="Total Profit" v={money(totalProfit)} />
@@ -3016,6 +3269,47 @@ function Reports({ data, stats }) {
           <tbody>{boReport.byProduct.map(r => (
             <tr key={r.product}><td>{r.product}</td><td>{r.orders}</td><td>{r.units}</td><td>{money(r.value)}</td></tr>
           ))}</tbody></table>
+      )}
+        </>
+      )}
+      {showVoidAudit && (
+        <>
+          <h3>Void Invoice Audit</h3>
+          {voidOrders.length === 0 ? (
+            <p className="hint">No voided invoices.</p>
+          ) : (
+            <div className="table-wrap void-audit-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Invoice No</th>
+                    <th>Customer</th>
+                    <th>Date</th>
+                    <th>Void Date</th>
+                    <th>Reason</th>
+                    <th>Voided By</th>
+                    <th>Amount Paid</th>
+                    <th>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {voidOrders.map(o => (
+                    <tr key={o.id}>
+                      <td>{o.invoice_no || '—'}</td>
+                      <td>{o.customer_name || '—'}</td>
+                      <td>{dateOnly(o.created_at) || '—'}</td>
+                      <td>{formatVoidDate(o.voided_at)}</td>
+                      <td>{o.void_reason || '—'}{o.void_note ? ` — ${o.void_note}` : ''}</td>
+                      <td>{o.voided_by || '—'}</td>
+                      <td>{money(orderPaidTotal(data.payments, o))}</td>
+                      <td>{money(o.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
     </div>
   )

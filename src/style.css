@@ -231,6 +231,30 @@ tr.sel,tbody tr:hover{background:#eef4ff;cursor:pointer}
 .invoice-fulfillment h3{margin:0 0 10px;font-size:15px}
 .invoice-fulfillment p{margin:4px 0;font-size:14px}
 .invoice-backorder-flag{color:#b42318;font-weight:800;margin-top:10px!important}
+
+/* Invoice void */
+.invoice-toolbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:16px}
+.invoice-toolbar select{flex:1;min-width:200px}
+.invoice-filter-btns{display:flex;flex-wrap:wrap;gap:8px}
+.invoice-void-wrap{position:relative;overflow:hidden}
+.invoice-void-watermark{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:2}
+.invoice-void-watermark span{font-size:clamp(72px,18vw,140px);font-weight:900;letter-spacing:0.12em;color:rgba(180,35,24,0.18);transform:rotate(-28deg);user-select:none;line-height:1;text-align:center}
+.invoice-is-void{border-color:#fecdca}
+.invoice-is-void .invoice-meta h2,.void-text{color:#b42318!important}
+.status-badge.void-badge{background:#fee4e2;color:#b42318}
+.payment-status-void{background:#fee4e2;color:#b42318}
+.void-invoice-btn{white-space:nowrap}
+.void-modal{max-width:520px;width:100%;max-height:90vh;overflow-y:auto}
+.void-modal-intro{margin:0 0 8px;font-weight:700;color:#08142b}
+.void-modal-list{margin:0 0 16px;padding-left:20px;color:#334155;line-height:1.5}
+.void-modal-list li{margin:4px 0}
+.void-modal-warn{background:#fff5f5;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin:0 0 12px;line-height:1.45;word-wrap:break-word;overflow-wrap:anywhere}
+.void-field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px;font-size:14px;font-weight:600;color:#08142b}
+.void-field select,.void-field input,.void-field textarea{width:100%;font-weight:400}
+.void-confirm-btn{white-space:nowrap}
+.report-filters{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 20px}
+.void-audit-table table{min-width:720px}
+
 .backorder-badge{display:inline-block;background:#fee4e2;color:#b42318;font-weight:700;padding:2px 8px;border-radius:999px;font-size:12px}
 .status-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;background:#eef2ff;color:#24324b}
 .status-badge.backorder-badge{background:#fee4e2;color:#b42318}
@@ -366,6 +390,11 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .alloc-prompt-actions button{width:100%}
   .rtf-alerts-table table{min-width:760px}
   .rtf-alerts-table .fulfill-open-btn{padding:5px 8px;font-size:11px}
+  .void-invoice-btn{padding:8px 12px;font-size:12px}
+  .void-modal-overlay{padding:12px}
+  .void-modal{padding:18px;max-height:calc(100vh - 24px)}
+  .void-modal-warn{font-size:13px}
+  .void-field select{font-size:16px}
   .low-stock-table table{min-width:480px}
   .low-stock-col-product{min-width:120px;max-width:none}
   .dashboard-row-4 .card-action-compact b{font-size:18px}
@@ -378,6 +407,8 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .panel{box-shadow:none;border:0;padding:0}
   .invoice{border:0;box-shadow:none}
   .invoice-print{width:7.5in!important;max-width:7.5in!important;margin:0 auto!important;padding:0.35in 0.45in!important;box-sizing:border-box!important}
+  .invoice-void-watermark{display:flex!important}
+  .invoice-void-watermark span{color:rgba(180,35,24,0.22)!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .address-grid{display:flex!important;justify-content:space-between!important;align-items:flex-start!important;width:100%!important;gap:60px!important;padding:22px 0 26px!important}
   .bill-to,.ship-to{width:42%!important;flex:0 0 42%!important;page-break-inside:avoid}
   .ship-to{margin-left:auto!important}

@@ -419,8 +419,13 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
 .po-totals-box p{margin:6px 0}
 .po-form-actions,.po-detail-actions{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
 .po-receive-dialog{max-width:960px;width:min(960px,calc(100vw - 24px))}
-.po-receive-buying-prompt{margin:16px 0;padding:12px;background:#f8fafc;border-radius:10px}
-.po-receive-buying-prompt label{margin-right:16px;font-weight:700}
+.po-receive-header-grid{margin-bottom:12px}
+.po-receive-actions-row{margin:0 0 12px}
+.po-receive-error{color:#b42318}
+.po-receive-history{margin-top:20px}
+.po-receive-detail-meta{margin-bottom:16px}
+.po-receive-detail-meta p{margin:4px 0}
+.po-receive-print-block{margin-top:16px}
 .po-commission-payment{margin-top:20px}
 .po-internal-toggle{margin-left:auto}
 .dashboard-row-2{grid-template-columns:repeat(2,minmax(140px,1fr))}

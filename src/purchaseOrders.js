@@ -78,7 +78,7 @@ export function calcLineItem(raw, purchaseType) {
   }
 }
 
-export function calcPoTotals(header, lines) {
+export function calcPoTotals(header, lines, receives) {
   const purchaseType = resolvePurchaseType(header, lines)
   const computed = (lines || []).map(l => calcLineItem(l, purchaseType))
   const totalOrderedUnits = computed.reduce((s, l) => s + l.order_qty, 0)
@@ -86,8 +86,10 @@ export function calcPoTotals(header, lines) {
   const totalCommission = purchaseType === 'middleman'
     ? computed.reduce((s, l) => s + l.commission_total, 0)
     : 0
-  const shippingCost = Math.max(Number(header.shipping_cost) || 0, 0)
-  const otherCost = Math.max(Number(header.other_cost) || 0, 0)
+  const receivedShipping = sumReceiveCosts(receives).shippingCost
+  const receivedOther = sumReceiveCosts(receives).otherCost
+  const shippingCost = receivedShipping || Math.max(Number(header.shipping_cost) || 0, 0)
+  const otherCost = receivedOther || Math.max(Number(header.other_cost) || 0, 0)
   const grandTotal = totalProductCost + totalCommission + shippingCost + otherCost
   const totalPurchaseCost = grandTotal
   const currency = header.currency || 'KRW'
@@ -109,6 +111,55 @@ export function calcPoTotals(header, lines) {
   }
 }
 
+export function sumReceiveCosts(receives) {
+  const list = receives || []
+  return {
+    shippingCost: list.reduce((s, r) => s + Math.max(Number(r.shipping_cost) || 0, 0), 0),
+    otherCost: list.reduce((s, r) => s + Math.max(Number(r.other_cost) || 0, 0), 0),
+  }
+}
+
+export function allocateReceiveCosts(receiveLines, shippingCost, otherCost, purchaseType = 'direct') {
+  const isMiddleman = purchaseType === 'middleman'
+  const active = (receiveLines || []).filter(l => Number(l.receive_now) > 0)
+  const totalReceivedValue = active.reduce(
+    (s, l) => s + Number(l.receive_now) * Number(l.factory_unit_cost ?? l.korean_unit_cost ?? 0),
+    0,
+  ) || 1
+  return active.map(line => {
+    const receiveQty = Math.max(Number(line.receive_now) || 0, 0)
+    const factoryUnit = Math.max(Number(line.factory_unit_cost ?? line.korean_unit_cost) || 0, 0)
+    const itemValue = receiveQty * factoryUnit
+    const share = itemValue / totalReceivedValue
+    const shippingAllocation = shippingCost * share
+    const otherCostAllocation = otherCost * share
+    const commissionPerUnit = isMiddleman ? Math.max(Number(line.commission_per_unit) || 0, 0) : 0
+    const shippingPerUnit = receiveQty > 0 ? shippingAllocation / receiveQty : 0
+    const otherPerUnit = receiveQty > 0 ? otherCostAllocation / receiveQty : 0
+    const landedUnitCost = factoryUnit + commissionPerUnit + shippingPerUnit + otherPerUnit
+    return {
+      ...line,
+      receive_now: receiveQty,
+      factory_unit_cost: factoryUnit,
+      commission_per_unit: commissionPerUnit,
+      shipping_allocation: shippingAllocation,
+      other_cost_allocation: otherCostAllocation,
+      landed_unit_cost: landedUnitCost,
+      final_unit_cost: landedUnitCost,
+    }
+  })
+}
+
+export function calcWeightedBuyingPrice(oldQty, oldBuyingPrice, receiveQty, landedUnitCost) {
+  const oq = Math.max(Number(oldQty) || 0, 0)
+  const rq = Math.max(Number(receiveQty) || 0, 0)
+  const landed = Number(landedUnitCost) || 0
+  if (rq <= 0) return Number(oldBuyingPrice) || 0
+  if (oq <= 0) return landed
+  const ob = Number(oldBuyingPrice) || 0
+  return ((oq * ob) + (rq * landed)) / (oq + rq)
+}
+
 export function allocateLineCosts(lines, shippingCost, otherCost, purchaseType = 'direct') {
   const isMiddleman = purchaseType === 'middleman'
   const computed = (lines || []).map(l => calcLineItem(l, purchaseType))
@@ -128,6 +179,7 @@ export function allocateLineCosts(lines, shippingCost, otherCost, purchaseType =
       other_cost_allocation: otherCostAllocation,
       final_unit_cost: finalUnitCost,
       final_line_cost: finalLineCost,
+      landed_unit_cost: finalUnitCost,
       estimated_landed_cost: finalUnitCost,
     }
   })
@@ -139,8 +191,6 @@ export function validatePoSave(header, lines) {
   if (purchaseType === 'middleman' && !String(header.middleman_name || '').trim()) {
     return 'Middleman Name is required for Through Middleman purchase orders.'
   }
-  if (Math.max(Number(header.shipping_cost) || 0, 0) < 0) return 'Shipping Cost cannot be negative.'
-  if (Math.max(Number(header.other_cost) || 0, 0) < 0) return 'Other Cost cannot be negative.'
   const computed = calcPoTotals(header, lines)
   if (!computed.lines.length) return 'Add at least one product line.'
   for (const line of computed.lines) {
@@ -154,9 +204,15 @@ export function validatePoSave(header, lines) {
   return ''
 }
 
-export function normalizePoSavePayload(header, lines) {
+export function normalizePoSavePayload(header, lines, existingPo) {
   const purchaseType = header.purchase_type || 'direct'
-  const totals = calcPoTotals({ ...header, purchase_type: purchaseType }, lines)
+  const accumulatedShipping = Number(existingPo?.shipping_cost) || 0
+  const accumulatedOther = Number(existingPo?.other_cost) || 0
+  const totals = calcPoTotals(
+    { ...header, purchase_type: purchaseType, shipping_cost: accumulatedShipping, other_cost: accumulatedOther },
+    lines,
+    existingPo?.receives,
+  )
   const normalizedLines = totals.lines.map(line => ({
     ...line,
     commission_percent: purchaseType === 'middleman' ? line.commission_percent : 0,
@@ -166,16 +222,25 @@ export function normalizePoSavePayload(header, lines) {
       ? line.product_cost + line.commission_total
       : line.product_cost,
   }))
+  const grandTotal = totals.totalProductCost + totals.totalCommission + accumulatedShipping + accumulatedOther
   return {
     header: {
       ...header,
       purchase_type: purchaseType,
       middleman_name: purchaseType === 'middleman' ? (header.middleman_name || '') : '',
+      shipping_cost: accumulatedShipping,
+      other_cost: accumulatedOther,
       total_commission: totals.totalCommission,
-      grand_total: totals.grandTotal,
+      grand_total: grandTotal,
     },
     lines: normalizedLines,
-    totals: calcPoTotals({ ...header, purchase_type: purchaseType }, normalizedLines),
+    totals: {
+      ...totals,
+      shippingCost: accumulatedShipping,
+      otherCost: accumulatedOther,
+      grandTotal,
+      totalPurchaseCost: grandTotal,
+    },
   }
 }
 
@@ -246,6 +311,112 @@ export function poItemsForOrder(purchaseOrderItems, poId) {
 
 export function poReceiptsForOrder(purchaseOrderReceipts, poId) {
   return (purchaseOrderReceipts || []).filter(r => String(r.purchase_order_id) === String(poId))
+}
+
+export function poReceivesForOrder(purchaseOrderReceives, poId) {
+  return (purchaseOrderReceives || [])
+    .filter(r => String(r.purchase_order_id) === String(poId))
+    .sort((a, b) => String(a.received_date || a.created_at || '').localeCompare(String(b.received_date || b.created_at || '')))
+}
+
+export function nextReceiveNumber(receives, poNumber) {
+  const list = receives || []
+  let max = 0
+  for (const r of list) {
+    const match = String(r.receive_number || '').match(/-R(\d+)$/i)
+    if (match) max = Math.max(max, parseInt(match[1], 10))
+  }
+  return `${poNumber || 'PO'}-R${String(max + 1).padStart(2, '0')}`
+}
+
+export function validateReceive(header, lines, items) {
+  const payload = (lines || []).filter(l => Number(l.receive_now) > 0)
+  if (!payload.length) return 'At least one item must be received.'
+  if (Math.max(Number(header.shipping_cost) || 0, 0) < 0) return 'Shipping Cost cannot be negative.'
+  if (Math.max(Number(header.other_cost) || 0, 0) < 0) return 'Other Cost cannot be negative.'
+  for (const row of payload) {
+    const item = (items || []).find(i => String(i.id) === String(row.purchase_order_item_id))
+    if (!item) return 'PO line item not found.'
+    const receiveNow = Number(row.receive_now)
+    if (receiveNow < 0) return 'Receiving quantity cannot be negative.'
+    if (receiveNow > item.remaining_qty) {
+      return `Cannot receive ${receiveNow} when only ${item.remaining_qty} remaining for ${item.product_sku || item.product_name}.`
+    }
+  }
+  return ''
+}
+
+export function receiveHistoryRows(receives, receipts, items) {
+  const receiveList = receives || []
+  if (receiveList.length) {
+    return receiveList.map(rec => {
+      const recReceipts = (receipts || []).filter(r => String(r.receive_id) === String(rec.id))
+      const receivedQty = recReceipts.reduce((s, r) => s + Number(r.received_qty || 0), 0)
+      return {
+        ...rec,
+        received_qty: receivedQty,
+        receipts: recReceipts,
+        items: recReceipts.map(r => {
+          const line = (items || []).find(i => String(i.id) === String(r.purchase_order_item_id))
+          return {
+            ...r,
+            product: line?.product_sku || line?.product_name || r.product_sku || '—',
+          }
+        }),
+      }
+    })
+  }
+  const legacy = (receipts || []).filter(r => !r.receive_id)
+  if (!legacy.length) return []
+  const groups = new Map()
+  for (const r of legacy) {
+    const key = `${String(r.received_date || '').slice(0, 19)}|${r.received_by || ''}`
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: key,
+        receive_number: 'Legacy',
+        received_date: r.received_date,
+        shipment_number: '',
+        shipping_cost: 0,
+        other_cost: 0,
+        other_cost_description: '',
+        notes: r.note || '',
+        received_by: r.received_by || '',
+        receipts: [],
+        legacy: true,
+      })
+    }
+    groups.get(key).receipts.push(r)
+  }
+  return [...groups.values()].map(g => ({
+    ...g,
+    received_qty: g.receipts.reduce((s, r) => s + Number(r.received_qty || 0), 0),
+    items: g.receipts.map(r => {
+      const line = (items || []).find(i => String(i.id) === String(r.purchase_order_item_id))
+      return { ...r, product: line?.product_sku || line?.product_name || '—' }
+    }),
+  }))
+}
+
+export function internalCostSummary(po, items, receives, receipts) {
+  const purchaseType = resolvePurchaseType(po, items)
+  const totals = calcPoTotals(po, items, receives)
+  const history = receiveHistoryRows(receives, receipts, items)
+  const receivedLines = (receipts || []).map(r => {
+    const line = (items || []).find(i => String(i.id) === String(r.purchase_order_item_id))
+    return {
+      ...r,
+      product: line?.product_sku || line?.product_name || '—',
+      order_qty: line?.order_qty,
+    }
+  })
+  return {
+    purchaseType,
+    totals,
+    history,
+    receivedLines,
+    grandTotal: totals.grandTotal,
+  }
 }
 
 export function receivedProgress(items) {
@@ -341,8 +512,6 @@ export function blankPoHeader(poNumber) {
     middleman_name: '',
     currency: 'KRW',
     exchange_rate: '1350',
-    shipping_cost: '',
-    other_cost: '',
     eta: '',
     status: 'Draft',
     notes: '',
@@ -369,32 +538,83 @@ export function buildSupplierCsvRows(po, lines) {
   ])
 }
 
-export function buildInternalCsvRows(po, allocatedLines, totals) {
-  return allocatedLines.map(line => [
-    purchaseTypeLabel(totals.purchaseType),
-    po.po_number,
-    po.supplier,
-    totals.purchaseType === 'middleman' ? po.middleman_name : '',
-    line.product_name || line.product_sku,
-    line.order_qty,
-    line.factory_unit_cost,
-    line.commission_percent,
-    line.commission_per_unit,
-    line.commission_total,
-    line.shipping_allocation,
-    line.other_cost_allocation,
-    line.final_unit_cost,
-    line.final_line_cost,
+export function buildInternalCsvRows(po, summary) {
+  const { totals, history, receivedLines } = summary
+  const rows = []
+  for (const rec of history) {
+    for (const item of rec.items || []) {
+      rows.push([
+        purchaseTypeLabel(totals.purchaseType),
+        po.po_number,
+        rec.receive_number,
+        rec.received_date,
+        rec.shipment_number,
+        item.product,
+        item.received_qty,
+        item.factory_unit_cost,
+        item.commission_per_unit,
+        item.shipping_allocation,
+        item.other_cost_allocation,
+        item.landed_unit_cost,
+        rec.shipping_cost,
+        rec.other_cost,
+        rec.other_cost_description,
+      ])
+    }
+  }
+  if (!rows.length && receivedLines.length) {
+    for (const item of receivedLines) {
+      rows.push([
+        purchaseTypeLabel(totals.purchaseType),
+        po.po_number,
+        'Legacy',
+        item.received_date,
+        '',
+        item.product,
+        item.received_qty,
+        item.factory_unit_cost || item.korean_unit_cost,
+        item.commission_per_unit,
+        item.shipping_allocation,
+        item.other_cost_allocation,
+        item.landed_unit_cost,
+        '',
+        '',
+        '',
+      ])
+    }
+  }
+  if (!rows.length) {
+    rows.push([
+      purchaseTypeLabel(totals.purchaseType),
+      po.po_number,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      totals.shippingCost,
+      totals.otherCost,
+      '',
+    ])
+  }
+  rows.push([
+    'TOTALS', po.po_number, '', '', '', '', '', '', '', '', '', '',
     totals.totalProductCost,
     totals.totalCommission,
     totals.shippingCost,
     totals.otherCost,
     totals.grandTotal,
   ])
+  return rows
 }
 
-export function buildPoCsvRows(po, items, allocatedLines) {
-  return buildInternalCsvRows(po, allocatedLines, calcPoTotals(po, items))
+export function buildPoCsvRows(po, items, receives, receipts) {
+  return buildInternalCsvRows(po, internalCostSummary(po, items, receives, receipts))
 }
 
 export function poReportSummary(purchaseOrders, purchaseOrderItems) {

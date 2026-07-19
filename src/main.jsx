@@ -24,19 +24,19 @@ import {
 } from './invoiceVoid.js'
 import {
   nextPoNumber, calcPoTotals, derivePoStatus, newPoId, buildPoFromReorderItems,
-  poSummaryStats, incomingInventoryAlerts, allocateLineCosts, calcLineItem,
-  deriveCommissionPaymentStatus, normalizePoSavePayload, validatePoSave,
-  resolvePurchaseType, isMiddlemanPo, purchaseTypeLabel,
+  poSummaryStats, incomingInventoryAlerts, allocateReceiveCosts, calcLineItem,
+  deriveCommissionPaymentStatus, normalizePoSavePayload, validatePoSave, validateReceive,
+  resolvePurchaseType, isMiddlemanPo, purchaseTypeLabel, calcWeightedBuyingPrice, nextReceiveNumber,
 } from './purchaseOrders.js'
 import { PurchaseOrdersPage, PurchaseOrderReports } from './PurchaseOrdersUI.jsx'
 import './style.css'
 
 const CORE_TABLES = ['customers', 'inventory', 'orders', 'payments']
-const PO_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts']
+const PO_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts', 'purchase_order_receives']
 const TABLES = [...CORE_TABLES, ...PO_TABLES]
 const EMPTY = {
   customers: [], inventory: [], orders: [], payments: [],
-  purchase_orders: [], purchase_order_items: [], purchase_order_receipts: [],
+  purchase_orders: [], purchase_order_items: [], purchase_order_receipts: [], purchase_order_receives: [],
 }
 const PAYMENT_METHODS = ['Zelle', 'Venmo', 'Cash', 'Credit Card', 'Check', 'ACH/Wire']
 const TERMS = ['COD', 'NET 15', 'NET 30', 'NET 45', 'NET 60']
@@ -149,7 +149,7 @@ function useLocalData() {
   const [data, setData] = useState(() => {
     try {
       const raw = JSON.parse(localStorage.getItem('isb_data_v2')) || {}
-      return { ...EMPTY, ...raw, purchase_orders: raw.purchase_orders || [], purchase_order_items: raw.purchase_order_items || [], purchase_order_receipts: raw.purchase_order_receipts || [] }
+      return { ...EMPTY, ...raw, purchase_orders: raw.purchase_orders || [], purchase_order_items: raw.purchase_order_items || [], purchase_order_receipts: raw.purchase_order_receipts || [], purchase_order_receives: raw.purchase_order_receives || [] }
     } catch { return EMPTY }
   })
   useEffect(() => localStorage.setItem('isb_data_v2', JSON.stringify(data)), [data])
@@ -491,7 +491,7 @@ function App() {
     }
     const validationError = validatePoSave(header, lines)
     if (validationError) { setNotice(validationError); return validationError }
-    const normalized = normalizePoSavePayload(header, lines)
+    const normalized = normalizePoSavePayload(header, lines, existing)
     const totals = normalized.totals
     const poId = id || newPoId()
     const poRow = buildPoRow(poId, { ...normalized.header, po_number: header.po_number || nextPoNumber(data.purchase_orders) }, totals, !id)
@@ -526,7 +526,7 @@ function App() {
     return ''
   }
 
-  async function receivePurchaseOrder(poId, { lines, updateBuyingPrice }) {
+  async function receivePurchaseOrder(poId, receiveHeader) {
     if (receivingRef.current) return 'Receive already in progress.'
     if (role !== 'Admin') return 'Only administrators can receive inventory.'
     const po = data.purchase_orders.find(p => String(p.id) === String(poId))
@@ -534,17 +534,37 @@ function App() {
     if (po.status === 'Cancelled') return 'Cannot receive a cancelled purchase order.'
     if (po.status === 'Received') return 'Purchase order is already fully received.'
 
-    const poItems = data.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId)).map(calcLineItem)
-    const payload = lines.filter(l => Number(l.receive_now) > 0)
-    if (!payload.length) return 'Enter a quantity to receive.'
-
-    for (const row of payload) {
-      const item = poItems.find(i => String(i.id) === String(row.purchase_order_item_id))
-      if (!item) return 'PO line item not found.'
-      const receiveNow = Number(row.receive_now)
-      if (receiveNow <= 0) continue
-      if (receiveNow > item.remaining_qty) return `Cannot receive ${receiveNow} when only ${item.remaining_qty} remaining for ${item.product_sku || item.product_name}.`
+    const purchaseType = resolvePurchaseType(po, data.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId)))
+    const poItems = data.purchase_order_items
+      .filter(i => String(i.purchase_order_id) === String(poId))
+      .map(l => calcLineItem(l, purchaseType))
+    const lines = receiveHeader.lines || []
+    const shippingCost = Math.max(Number(receiveHeader.shipping_cost) || 0, 0)
+    const otherCost = Math.max(Number(receiveHeader.other_cost) || 0, 0)
+    const validationError = validateReceive(
+      { shipping_cost: shippingCost, other_cost: otherCost },
+      lines,
+      poItems,
+    )
+    if (validationError) {
+      setNotice(validationError)
+      return validationError
     }
+
+    const payload = lines.filter(l => Number(l.receive_now) > 0)
+    const allocated = allocateReceiveCosts(
+      payload.map(row => {
+        const item = poItems.find(i => String(i.id) === String(row.purchase_order_item_id))
+        return { ...item, receive_now: Number(row.receive_now) }
+      }),
+      shippingCost,
+      otherCost,
+      purchaseType,
+    )
+    const receivedBy = session?.user?.email || profile.email || 'Admin'
+    const receivedDate = receiveHeader.received_date
+      ? new Date(`${receiveHeader.received_date}T12:00:00`).toISOString()
+      : new Date().toISOString()
 
     receivingRef.current = true
     setNotice('')
@@ -558,8 +578,13 @@ function App() {
         const { error } = await supabase.rpc('receive_purchase_order_items', {
           p_po_id: poId,
           p_lines: rpcLines,
-          p_update_buying_price: !!updateBuyingPrice,
-          p_received_by: session.user?.email || profile.email || 'Admin',
+          p_received_by: receivedBy,
+          p_received_date: receivedDate,
+          p_shipment_number: receiveHeader.shipment_number || '',
+          p_shipping_cost: shippingCost,
+          p_other_cost: otherCost,
+          p_other_cost_description: receiveHeader.other_cost_description || '',
+          p_notes: receiveHeader.notes || '',
         })
         if (error) {
           setNotice(error.message)
@@ -569,21 +594,28 @@ function App() {
         return ''
       }
 
-      const allocated = allocateLineCosts(
-        poItems,
-        Number(po.shipping_cost) || 0,
-        Number(po.other_cost) || 0,
-        resolvePurchaseType(po, poItems),
-      )
-      const receivedBy = session?.user?.email || profile.email || 'Admin'
+      const existingReceives = data.purchase_order_receives.filter(r => String(r.purchase_order_id) === String(poId))
+      const receiveId = newPoId()
+      const receiveNumber = nextReceiveNumber(existingReceives, po.po_number)
+      const receiveRow = {
+        id: receiveId,
+        purchase_order_id: poId,
+        receive_number: receiveNumber,
+        received_date: receivedDate,
+        shipment_number: receiveHeader.shipment_number || '',
+        shipping_cost: shippingCost,
+        other_cost: otherCost,
+        other_cost_description: receiveHeader.other_cost_description || '',
+        notes: receiveHeader.notes || '',
+        received_by: receivedBy,
+        created_at: new Date().toISOString(),
+      }
       const receiptRows = []
       const itemUpdates = new Map()
-      const inventoryUpdates = new Map()
 
-      for (const row of payload) {
-        const item = poItems.find(i => String(i.id) === String(row.purchase_order_item_id))
-        const receiveNow = Number(row.receive_now)
-        const alloc = allocated.find(a => String(a.id) === String(item.id))
+      for (const alloc of allocated) {
+        const item = poItems.find(i => String(i.id) === String(alloc.id))
+        const receiveNow = Number(alloc.receive_now)
         const newReceived = item.received_qty + receiveNow
         itemUpdates.set(String(item.id), newReceived)
 
@@ -591,21 +623,27 @@ function App() {
           const inv = data.inventory.find(i => String(i.id) === String(item.inventory_id))
           const before = Number(inv?.qty || 0)
           const after = before + receiveNow
-          inventoryUpdates.set(String(item.inventory_id), {
-            after,
-            landed: alloc?.final_unit_cost || alloc?.estimated_landed_cost || item.korean_unit_cost,
-          })
+          const oldBuying = itemBuying(inv)
+          const newBuying = calcWeightedBuyingPrice(before, oldBuying, receiveNow, alloc.landed_unit_cost)
           receiptRows.push({
             id: newPoId(),
             purchase_order_id: poId,
             purchase_order_item_id: item.id,
             inventory_id: item.inventory_id,
+            receive_id: receiveId,
             received_qty: receiveNow,
-            received_date: new Date().toISOString(),
+            received_date: receivedDate,
             received_by: receivedBy,
-            note: row.note || '',
+            note: alloc.note || '',
             inventory_before: before,
             inventory_after: after,
+            factory_unit_cost: alloc.factory_unit_cost,
+            commission_per_unit: alloc.commission_per_unit,
+            shipping_allocation: alloc.shipping_allocation,
+            other_cost_allocation: alloc.other_cost_allocation,
+            landed_unit_cost: alloc.landed_unit_cost,
+            buying_price_before: oldBuying,
+            buying_price_after: newBuying,
             created_at: new Date().toISOString(),
           })
         }
@@ -616,24 +654,38 @@ function App() {
         return nr != null ? { ...item, received_qty: nr } : item
       })
       const newStatus = derivePoStatus(updatedItems, po.status)
+      const newShipping = (Number(po.shipping_cost) || 0) + shippingCost
+      const newOther = (Number(po.other_cost) || 0) + otherCost
+      const newGrand = (Number(po.total_product_cost) || 0)
+        + (Number(po.total_commission) || 0)
+        + newShipping
+        + newOther
 
       setLocalData(p => ({
         ...p,
-        purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? { ...x, status: newStatus, updated_at: new Date().toISOString() } : x),
+        purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? {
+          ...x,
+          status: newStatus,
+          shipping_cost: newShipping,
+          other_cost: newOther,
+          grand_total: newGrand,
+          updated_at: new Date().toISOString(),
+        } : x),
         purchase_order_items: p.purchase_order_items.map(i => {
           const nr = itemUpdates.get(String(i.id))
           return nr != null ? { ...i, received_qty: nr } : i
         }),
+        purchase_order_receives: [receiveRow, ...p.purchase_order_receives],
         purchase_order_receipts: [...receiptRows, ...p.purchase_order_receipts],
         inventory: p.inventory.map(inv => {
-          const upd = inventoryUpdates.get(String(inv.id))
-          if (!upd) return inv
-          const patch = { qty: upd.after }
-          if (updateBuyingPrice) {
-            patch.buying_price = upd.landed
-            patch.cost = upd.landed
+          const receipt = receiptRows.find(r => String(r.inventory_id) === String(inv.id))
+          if (!receipt) return inv
+          return {
+            ...inv,
+            qty: receipt.inventory_after,
+            buying_price: receipt.buying_price_after,
+            cost: receipt.buying_price_after,
           }
-          return { ...inv, ...patch }
         }),
       }))
       return ''
@@ -1068,6 +1120,7 @@ function App() {
             purchase_orders: [...(data.purchase_orders || [])],
             purchase_order_items: [...(data.purchase_order_items || [])],
             purchase_order_receipts: [...(data.purchase_order_receipts || [])],
+            purchase_order_receives: [...(data.purchase_order_receives || [])],
           }
         }
         if (rowMode === 'insert_missing' && exists) return 'skipped'
@@ -3687,7 +3740,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
 
   const exportLabels = {
     customers: 'Customers', inventory: 'Inventory', orders: 'Orders', payments: 'Payments',
-    purchase_orders: 'Purchase Orders', purchase_order_items: 'PO Line Items', purchase_order_receipts: 'PO Receipts',
+    purchase_orders: 'Purchase Orders', purchase_order_items: 'PO Line Items', purchase_order_receipts: 'PO Receipts', purchase_order_receives: 'PO Receives',
   }
 
   function formatLocalBackupDisplay(iso) {

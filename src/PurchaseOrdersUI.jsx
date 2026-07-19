@@ -1,14 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import {
   PO_STATUSES, PO_FILTER_STATUSES, PO_CURRENCIES, PO_PURCHASE_TYPES,
-  calcLineItem, calcPoTotals, allocateLineCosts, blankPoHeader, blankPoLine,
+  calcLineItem, calcPoTotals, allocateReceiveCosts, blankPoHeader, blankPoLine,
   canCancelPo, canEditPo, canReceivePo, commissionAmountDue, commissionBalance,
-  deriveCommissionPaymentStatus, formatKrw, formatUsd, formatPoMoney,
+  deriveCommissionPaymentStatus, formatKrw, formatPoMoney,
   poItemsForOrder, poMatchesFilter, poMatchesSearch, receivedProgress,
   poSummaryStats, buildSupplierCsvRows, buildInternalCsvRows, downloadCsv,
   resolvePurchaseType, isMiddlemanPo, purchaseTypeLabel,
   poReportSummary, middlemanCommissionReport, incomingInventoryReport,
   reportTotalsForCommission, reportTotalsForIncoming,
+  internalCostSummary, poReceivesForOrder,
 } from './purchaseOrders.js'
 
 const today = () => new Date().toISOString().slice(0, 10)
@@ -18,9 +19,16 @@ function PoStatusBadge({ status }) {
   return <span className={`po-status-badge po-status-${cls}`}>{status || '—'}</span>
 }
 
-function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm, busy }) {
+function ReceiveInventoryModal({ po, items, onCancel, onConfirm, busy }) {
   const purchaseType = resolvePurchaseType(po, items)
-  const isMiddleman = purchaseType === 'middleman'
+  const [header, setHeader] = useState({
+    received_date: today(),
+    shipment_number: '',
+    shipping_cost: '',
+    other_cost: '',
+    other_cost_description: '',
+    notes: '',
+  })
   const [lines, setLines] = useState(() => items.map(item => ({
     purchase_order_item_id: item.id,
     product: item.product_sku || item.product_name,
@@ -29,13 +37,33 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
     remaining_qty: item.remaining_qty,
     receive_now: '',
     note: '',
-    final_unit_cost: allocatedLines.find(l => String(l.id) === String(item.id))?.final_unit_cost || 0,
   })))
-  const [updateBuyingPrice, setUpdateBuyingPrice] = useState('')
+  const [error, setError] = useState('')
+
+  const shippingCost = Math.max(Number(header.shipping_cost) || 0, 0)
+  const otherCost = Math.max(Number(header.other_cost) || 0, 0)
+  const allocated = useMemo(() => {
+    const active = lines.filter(l => Number(l.receive_now) > 0).map(l => {
+      const item = items.find(i => String(i.id) === String(l.purchase_order_item_id))
+      return { ...item, receive_now: Number(l.receive_now) }
+    })
+    return allocateReceiveCosts(active, shippingCost, otherCost, purchaseType)
+  }, [lines, items, shippingCost, otherCost, purchaseType])
+
+  function receiveAllRemaining() {
+    setLines(prev => prev.map(l => ({
+      ...l,
+      receive_now: l.remaining_qty > 0 ? String(l.remaining_qty) : '',
+    })))
+  }
+
+  function landedForLine(lineId) {
+    return allocated.find(a => String(a.id) === String(lineId))?.landed_unit_cost || 0
+  }
 
   async function handleSubmit(e) {
     e.preventDefault()
-    if (!updateBuyingPrice) return
+    setError('')
     const payload = lines
       .filter(l => Number(l.receive_now) > 0)
       .map(l => ({
@@ -43,8 +71,24 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
         receive_now: Number(l.receive_now),
         note: l.note,
       }))
-    if (!payload.length) return
-    await onConfirm({ lines: payload, updateBuyingPrice: updateBuyingPrice === 'yes' })
+    if (!payload.length) {
+      setError('At least one item must be received.')
+      return
+    }
+    for (const row of payload) {
+      const item = items.find(i => String(i.id) === String(row.purchase_order_item_id))
+      if (row.receive_now < 0) { setError('Receiving quantity cannot be negative.'); return }
+      if (row.receive_now > item.remaining_qty) {
+        setError(`Cannot receive ${row.receive_now} when only ${item.remaining_qty} remaining for ${item.product_sku || item.product_name}.`)
+        return
+      }
+    }
+    await onConfirm({
+      ...header,
+      shipping_cost: shippingCost,
+      other_cost: otherCost,
+      lines: payload,
+    })
   }
 
   return (
@@ -52,12 +96,23 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
       <div className="restore-dialog po-receive-dialog" onClick={e => e.stopPropagation()}>
         <h2>Receive Inventory — {po.po_number}</h2>
         <form onSubmit={handleSubmit}>
+          <div className="form-grid po-receive-header-grid">
+            <label>Receive Date<input type="date" value={header.received_date} onChange={e => setHeader({ ...header, received_date: e.target.value })} /></label>
+            <label>Shipment Number (Optional)<input value={header.shipment_number} onChange={e => setHeader({ ...header, shipment_number: e.target.value })} /></label>
+            <label>Shipping Cost<input type="number" min="0" step="1" value={header.shipping_cost} onChange={e => setHeader({ ...header, shipping_cost: e.target.value })} /></label>
+            <label>Other Cost (Optional)<input type="number" min="0" step="1" value={header.other_cost} onChange={e => setHeader({ ...header, other_cost: e.target.value })} /></label>
+            <label>Other Cost Description (Optional)<input value={header.other_cost_description} onChange={e => setHeader({ ...header, other_cost_description: e.target.value })} /></label>
+            <label className="po-notes-field">Notes (Optional)<textarea rows={2} value={header.notes} onChange={e => setHeader({ ...header, notes: e.target.value })} /></label>
+          </div>
+          <div className="po-receive-actions-row">
+            <button type="button" className="soft" onClick={receiveAllRemaining}>Receive All Remaining</button>
+          </div>
           <div className="table-wrap po-receive-table">
             <table>
               <thead>
                 <tr>
-                  <th>Product / SKU</th><th>Ordered</th><th>Previously Received</th><th>Remaining</th>
-                  <th>Receive Now</th><th>Final Unit Cost</th><th>Note</th>
+                  <th>Product</th><th>Ordered Qty</th><th>Previously Received</th><th>Remaining Qty</th>
+                  <th>Receiving Qty</th><th>Landed Unit Cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -74,33 +129,67 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
                           const next = [...lines]
                           next[idx] = { ...next[idx], receive_now: e.target.value }
                           setLines(next)
+                          setError('')
                         }} />
                     </td>
-                    <td>{formatPoMoney(l.final_unit_cost, po.currency)}{isMiddleman ? '' : ''}</td>
-                    <td>
-                      <input value={l.note} disabled={l.remaining_qty <= 0}
-                        onChange={e => {
-                          const next = [...lines]
-                          next[idx] = { ...next[idx], note: e.target.value }
-                          setLines(next)
-                        }} />
-                    </td>
+                    <td>{Number(l.receive_now) > 0 ? formatPoMoney(landedForLine(l.purchase_order_item_id), po.currency) : '—'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <div className="po-receive-buying-prompt">
-            <p><strong>Update Inventory Buying Price with this PO cost?</strong></p>
-            <p className="hint">Final Unit Cost includes factory cost{isMiddleman ? ', middleman commission,' : ''} shipping, and other cost allocations.</p>
-            <label><input type="radio" name="updateBuying" value="yes" checked={updateBuyingPrice === 'yes'} onChange={() => setUpdateBuyingPrice('yes')} /> Yes</label>
-            <label><input type="radio" name="updateBuying" value="no" checked={updateBuyingPrice === 'no'} onChange={() => setUpdateBuyingPrice('no')} /> No</label>
-          </div>
+          {error && <p className="hint po-receive-error">{error}</p>}
+          <p className="hint">Shipping and other costs are allocated across the quantities received in this shipment only. Buying price updates automatically using weighted average cost.</p>
           <div className="restore-dialog-actions">
-            <button type="submit" disabled={busy || !updateBuyingPrice}>Confirm Receive</button>
+            <button type="submit" disabled={busy}>Confirm Receive</button>
             <button type="button" className="soft" onClick={onCancel} disabled={busy}>Cancel</button>
           </div>
         </form>
+      </div>
+    </div>
+  )
+}
+
+function ReceiveHistoryDetailModal({ receive, po, onClose }) {
+  return (
+    <div className="restore-dialog-overlay po-receive-overlay" onClick={onClose}>
+      <div className="restore-dialog po-receive-dialog" onClick={e => e.stopPropagation()}>
+        <h2>{receive.receive_number} — {po.po_number}</h2>
+        <div className="po-receive-detail-meta">
+          <p><b>Receive Date:</b> {String(receive.received_date || '').slice(0, 10) || '—'}</p>
+          <p><b>Shipment Number:</b> {receive.shipment_number || '—'}</p>
+          <p><b>Shipping Cost:</b> {formatPoMoney(receive.shipping_cost, po.currency)}</p>
+          <p><b>Other Cost:</b> {formatPoMoney(receive.other_cost, po.currency)}</p>
+          <p><b>Other Cost Description:</b> {receive.other_cost_description || '—'}</p>
+          <p><b>Received By:</b> {receive.received_by || '—'}</p>
+          <p><b>Notes:</b> {receive.notes || '—'}</p>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Product</th><th>Received Qty</th><th>Factory Unit Cost</th><th>Commission / Unit</th>
+                <th>Shipping Alloc.</th><th>Other Alloc.</th><th>Landed Unit Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(receive.items || []).map(item => (
+                <tr key={item.id || `${item.purchase_order_item_id}-${item.received_qty}`}>
+                  <td>{item.product}</td>
+                  <td>{item.received_qty}</td>
+                  <td>{formatPoMoney(item.factory_unit_cost, po.currency)}</td>
+                  <td>{formatPoMoney(item.commission_per_unit, po.currency)}</td>
+                  <td>{formatPoMoney(item.shipping_allocation, po.currency)}</td>
+                  <td>{formatPoMoney(item.other_cost_allocation, po.currency)}</td>
+                  <td>{formatPoMoney(item.landed_unit_cost, po.currency)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="restore-dialog-actions">
+          <button type="button" className="soft" onClick={onClose}>Close</button>
+        </div>
       </div>
     </div>
   )
@@ -180,8 +269,6 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
             </select>
           </label>
           <label>Exchange Rate<input type="number" min="0" step="0.01" value={h.exchange_rate} onChange={e => setH({ ...h, exchange_rate: e.target.value })} /></label>
-          <label>Estimated Shipping Cost<input type="number" min="0" step="1" value={h.shipping_cost} onChange={e => setH({ ...h, shipping_cost: e.target.value })} /></label>
-          <label>Other Cost<input type="number" min="0" step="1" value={h.other_cost} onChange={e => setH({ ...h, other_cost: e.target.value })} /></label>
           <label>ETA<input type="date" value={h.eta || ''} onChange={e => setH({ ...h, eta: e.target.value })} /></label>
           <label>Status
             <select value={h.status} onChange={e => setH({ ...h, status: e.target.value })}>
@@ -232,10 +319,8 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
         <p><strong>Total Ordered Units:</strong> {totals.totalOrderedUnits}</p>
         <p><strong>Total Factory Product Cost:</strong> {formatPoMoney(totals.totalProductCost, h.currency)}</p>
         {isMiddleman && <p><strong>Total Middleman Commission:</strong> {formatPoMoney(totals.totalCommission, h.currency)}</p>}
-        <p><strong>Estimated Shipping Cost:</strong> {formatPoMoney(totals.shippingCost, h.currency)}</p>
-        <p><strong>Other Cost:</strong> {formatPoMoney(totals.otherCost, h.currency)}</p>
-        <p><strong>Total Purchase Cost ({h.currency}):</strong> {formatPoMoney(totals.totalPurchaseCost, h.currency)}</p>
-        <p><strong>Estimated Grand Total USD:</strong> {formatUsd(totals.estimatedGrandTotalUsd)}</p>
+        <p><strong>Total Purchase Cost ({h.currency}):</strong> {formatPoMoney(totals.totalProductCost + totals.totalCommission, h.currency)}</p>
+        <p className="hint">Shipping and other costs are entered when inventory is received, not at PO creation.</p>
       </div>
       <div className="po-form-actions">
         <button type="button" onClick={handleSave}>Save Purchase Order</button>
@@ -282,8 +367,10 @@ function SupplierPurchaseOrderDoc({ po, lines, totals }) {
   )
 }
 
-function InternalCostSheetDoc({ po, allocated, totals }) {
+function InternalCostSheetDoc({ po, summary }) {
+  const { totals, history } = summary
   const isMiddleman = totals.purchaseType === 'middleman'
+  const lines = totals.lines || []
   return (
     <div className="po-print-sheet po-internal-doc invoice">
       <p className="po-internal-banner">INTERNAL USE ONLY</p>
@@ -300,30 +387,77 @@ function InternalCostSheetDoc({ po, allocated, totals }) {
             <tr>
               <th>Product</th><th>Qty</th><th>Factory Unit Cost</th>
               {isMiddleman && <><th>Commission %</th><th>Commission Per Unit</th><th>Commission Total</th></>}
-              <th>Shipping Allocation</th><th>Other Cost Allocation</th><th>Final Unit Cost</th><th>Final Line Cost</th>
+              <th>Factory Line Total</th>
             </tr>
           </thead>
           <tbody>
-            {allocated.map(l => (
+            {lines.map(l => (
               <tr key={l.id || l.product_sku}>
                 <td>{l.product_name || l.product_sku}</td>
                 <td>{l.order_qty}</td>
                 <td>{formatPoMoney(l.factory_unit_cost, po.currency)}</td>
                 {isMiddleman && <><td>{l.commission_percent}%</td><td>{formatPoMoney(l.commission_per_unit, po.currency)}</td><td>{formatPoMoney(l.commission_total, po.currency)}</td></>}
-                <td>{formatPoMoney(l.shipping_allocation, po.currency)}</td>
-                <td>{formatPoMoney(l.other_cost_allocation, po.currency)}</td>
-                <td>{formatPoMoney(l.final_unit_cost, po.currency)}</td>
-                <td>{formatPoMoney(l.final_line_cost, po.currency)}</td>
+                <td>{formatPoMoney(l.product_cost, po.currency)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      <h3>Receive History</h3>
+      {history.length === 0 ? (
+        <p className="hint">No inventory received yet.</p>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Receive #</th><th>Date</th><th>Shipment #</th><th>Received Qty</th>
+                <th>Shipping Cost</th><th>Other Cost</th><th>Other Cost Description</th><th>Received By</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map(rec => (
+                <tr key={rec.id}>
+                  <td>{rec.receive_number}</td>
+                  <td>{String(rec.received_date || '').slice(0, 10)}</td>
+                  <td>{rec.shipment_number || '—'}</td>
+                  <td>{rec.received_qty}</td>
+                  <td>{formatPoMoney(rec.shipping_cost, po.currency)}</td>
+                  <td>{formatPoMoney(rec.other_cost, po.currency)}</td>
+                  <td>{rec.other_cost_description || '—'}</td>
+                  <td>{rec.received_by || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {history.map(rec => (
+        <div key={`detail-${rec.id}`} className="po-receive-print-block">
+          <h4>{rec.receive_number} — Line Details</h4>
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Product</th><th>Qty</th><th>Landed Unit Cost</th></tr>
+              </thead>
+              <tbody>
+                {(rec.items || []).map(item => (
+                  <tr key={item.id || item.product}>
+                    <td>{item.product}</td>
+                    <td>{item.received_qty}</td>
+                    <td>{formatPoMoney(item.landed_unit_cost, po.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
       <div className="po-totals-box">
         <p><strong>Total Factory Cost:</strong> {formatPoMoney(totals.totalProductCost, po.currency)}</p>
         {isMiddleman && <p><strong>Total Commission:</strong> {formatPoMoney(totals.totalCommission, po.currency)}</p>}
-        <p><strong>Shipping Cost:</strong> {formatPoMoney(totals.shippingCost, po.currency)}</p>
-        <p><strong>Other Cost:</strong> {formatPoMoney(totals.otherCost, po.currency)}</p>
+        <p><strong>Total Shipping Cost (Received):</strong> {formatPoMoney(totals.shippingCost, po.currency)}</p>
+        <p><strong>Total Other Cost (Received):</strong> {formatPoMoney(totals.otherCost, po.currency)}</p>
         <p><strong>Grand Total:</strong> {formatPoMoney(totals.grandTotal, po.currency)}</p>
       </div>
     </div>
@@ -331,14 +465,16 @@ function InternalCostSheetDoc({ po, allocated, totals }) {
 }
 
 function PurchaseOrderDetail({
-  po, items, receipts, isAdmin, onBack, onEdit, onReceive, onCancel, onUpdateCommission,
+  po, items, receipts, receives, isAdmin, onBack, onEdit, onReceive, onCancel, onUpdateCommission,
 }) {
   const [showInternalDetails, setShowInternalDetails] = useState(false)
   const [printView, setPrintView] = useState('')
+  const [historyDetail, setHistoryDetail] = useState(null)
   const purchaseType = resolvePurchaseType(po, items)
   const isMiddleman = purchaseType === 'middleman'
-  const totals = calcPoTotals(po, items)
-  const allocated = allocateLineCosts(totals.lines, totals.shippingCost, totals.otherCost, purchaseType)
+  const summary = internalCostSummary(po, items, receives, receipts)
+  const { totals, history } = summary
+  const lines = totals.lines || []
   const locked = po.status === 'Received' || po.status === 'Cancelled'
   const [commPay, setCommPay] = useState({
     commission_amount_paid: po.commission_amount_paid || '',
@@ -370,8 +506,8 @@ function PurchaseOrderDetail({
   function exportInternalCsv() {
     downloadCsv(
       `${po.po_number || 'PO'}_internal.csv`,
-      ['Purchase Type', 'PO Number', 'Supplier', 'Middleman', 'Product', 'Qty', 'Factory Unit Cost', 'Commission %', 'Commission Per Unit', 'Commission Total', 'Shipping Allocation', 'Other Cost Allocation', 'Final Unit Cost', 'Final Line Cost', 'Total Factory Cost', 'Total Commission', 'Shipping Cost', 'Other Cost', 'Grand Total'],
-      buildInternalCsvRows(po, allocated, totals),
+      ['Purchase Type', 'PO Number', 'Receive #', 'Receive Date', 'Shipment #', 'Product', 'Received Qty', 'Factory Unit Cost', 'Commission Per Unit', 'Shipping Allocation', 'Other Allocation', 'Landed Unit Cost', 'Receive Shipping', 'Receive Other', 'Other Cost Description', 'Total Factory', 'Total Commission', 'Total Shipping', 'Total Other', 'Grand Total'],
+      buildInternalCsvRows(po, summary),
     )
   }
 
@@ -397,39 +533,71 @@ function PurchaseOrderDetail({
         <SupplierPurchaseOrderDoc po={po} lines={totals.lines} totals={totals} />
       )}
       {printView === 'internal' && (
-        <InternalCostSheetDoc po={po} allocated={allocated} totals={totals} />
+        <InternalCostSheetDoc po={po} summary={summary} />
       )}
 
       <div className={`po-detail-main${printView ? ' screen-only-hidden' : ''}`}>
         <div className="po-detail-summary">
           <h2>{po.po_number}</h2>
           <p><b>Supplier:</b> {po.supplier || '—'} · <b>Purchase Type:</b> {purchaseTypeLabel(purchaseType)} · <b>Status:</b> <PoStatusBadge status={po.status} /></p>
-          <p><b>Order Date:</b> {po.order_date || '—'} · <b>ETA:</b> {po.eta || '—'} · <b>Total Purchase Cost:</b> {formatPoMoney(totals.totalPurchaseCost, po.currency)}</p>
+          <p><b>Order Date:</b> {po.order_date || '—'} · <b>ETA:</b> {po.eta || '—'} · <b>Total Purchase Cost:</b> {formatPoMoney(totals.grandTotal, po.currency)}</p>
         </div>
 
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Product</th><th>SKU</th><th>Qty</th><th>Factory Unit Cost</th><th>Final Unit Cost</th>
-                <th>Line Total</th><th>Received Qty</th><th>Remaining Qty</th>
+                <th>Product</th><th>SKU</th><th>Qty</th><th>Factory Unit Cost</th>
+                <th>Factory Line Total</th><th>Received Qty</th><th>Remaining Qty</th>
               </tr>
             </thead>
             <tbody>
-              {allocated.map(l => (
+              {lines.map(l => (
                 <tr key={l.id || l.product_sku}>
                   <td>{l.product_name || l.product_sku}</td>
                   <td>{l.product_sku || '—'}</td>
                   <td>{l.order_qty}</td>
                   <td>{formatPoMoney(l.factory_unit_cost, po.currency)}</td>
-                  <td>{formatPoMoney(l.final_unit_cost, po.currency)}</td>
-                  <td>{formatPoMoney(l.final_line_cost, po.currency)}</td>
+                  <td>{formatPoMoney(l.product_cost, po.currency)}</td>
                   <td>{l.received_qty}</td>
                   <td>{l.remaining_qty}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+
+        <div className="form-section po-receive-history">
+          <h3>Receive History</h3>
+          {history.length === 0 ? (
+            <p className="hint">No inventory received yet.</p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Receive #</th><th>Receive Date</th><th>Received Qty</th><th>Shipping Cost</th>
+                    <th>Other Cost</th><th>Other Cost Description</th><th>Received By</th><th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map(rec => (
+                    <tr key={rec.id}>
+                      <td><b>{rec.receive_number}</b></td>
+                      <td>{String(rec.received_date || '').slice(0, 10)}</td>
+                      <td>{rec.received_qty}</td>
+                      <td>{formatPoMoney(rec.shipping_cost, po.currency)}</td>
+                      <td>{formatPoMoney(rec.other_cost, po.currency)}</td>
+                      <td>{rec.other_cost_description || '—'}</td>
+                      <td>{rec.received_by || '—'}</td>
+                      <td><button type="button" className="link-cell" onClick={() => setHistoryDetail(rec)}>View Details</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="hint">Received progress: {receivedProgress(items)}</p>
         </div>
 
         <button type="button" className="soft po-toggle-internal" onClick={() => setShowInternalDetails(v => !v)}>
@@ -440,32 +608,18 @@ function PurchaseOrderDetail({
           <div className="po-internal-details">
             <p><b>Purchase Type:</b> {purchaseTypeLabel(purchaseType)}</p>
             {isMiddleman && <p><b>Middleman Name:</b> {po.middleman_name || '—'}</p>}
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Product</th>
-                    {isMiddleman && <><th>Commission %</th><th>Commission Per Unit</th><th>Commission Total</th></>}
-                    <th>Shipping Allocation</th><th>Other Cost Allocation</th><th>Final Landed Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {allocated.map(l => (
-                    <tr key={`internal-${l.id || l.product_sku}`}>
-                      <td>{l.product_name || l.product_sku}</td>
-                      {isMiddleman && <><td>{l.commission_percent}%</td><td>{formatPoMoney(l.commission_per_unit, po.currency)}</td><td>{formatPoMoney(l.commission_total, po.currency)}</td></>}
-                      <td>{formatPoMoney(l.shipping_allocation, po.currency)}</td>
-                      <td>{formatPoMoney(l.other_cost_allocation, po.currency)}</td>
-                      <td>{formatPoMoney(l.final_unit_cost, po.currency)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p className="hint">Receipt history: {receipts.length} record(s). Received progress: {receivedProgress(items)}</p>
+            <p><b>Total Factory Cost:</b> {formatPoMoney(totals.totalProductCost, po.currency)}</p>
+            {isMiddleman && <p><b>Total Commission:</b> {formatPoMoney(totals.totalCommission, po.currency)}</p>}
+            <p><b>Total Shipping Cost (Received):</b> {formatPoMoney(totals.shippingCost, po.currency)}</p>
+            <p><b>Total Other Cost (Received):</b> {formatPoMoney(totals.otherCost, po.currency)}</p>
+            <p><b>Grand Total:</b> {formatPoMoney(totals.grandTotal, po.currency)}</p>
           </div>
         )}
       </div>
+
+      {historyDetail && (
+        <ReceiveHistoryDetailModal receive={historyDetail} po={po} onClose={() => setHistoryDetail(null)} />
+      )}
 
       {isAdmin && isMiddleman && !locked && (
         <div className="form-section po-commission-payment no-print">
@@ -504,6 +658,7 @@ export function PurchaseOrdersPage({
   const pos = data.purchase_orders || []
   const allItems = data.purchase_order_items || []
   const allReceipts = data.purchase_order_receipts || []
+  const allReceives = data.purchase_order_receives || []
   const stats = poSummaryStats(pos, allItems)
 
   useEffect(() => {
@@ -577,12 +732,14 @@ export function PurchaseOrdersPage({
   if (view === 'detail' && detailPo) {
     const items = poItemsForOrder(allItems, detailPo.id)
     const receipts = allReceipts.filter(r => String(r.purchase_order_id) === String(detailPo.id))
+    const receives = poReceivesForOrder(allReceives, detailPo.id)
     return (
       <>
         <PurchaseOrderDetail
           po={detailPo}
           items={items}
           receipts={receipts}
+          receives={receives}
           isAdmin={isAdmin}
           onBack={() => { setView('list'); setDetailId('') }}
           onEdit={id => { setEditingId(id); setView('edit') }}
@@ -594,12 +751,6 @@ export function PurchaseOrdersPage({
           <ReceiveInventoryModal
             po={receivePo}
             items={poItemsForOrder(allItems, receivePo.id).map(l => calcLineItem(l, resolvePurchaseType(receivePo, poItemsForOrder(allItems, receivePo.id))))}
-            allocatedLines={allocateLineCosts(
-              poItemsForOrder(allItems, receivePo.id),
-              Number(receivePo.shipping_cost) || 0,
-              Number(receivePo.other_cost) || 0,
-              resolvePurchaseType(receivePo, poItemsForOrder(allItems, receivePo.id)),
-            )}
             onCancel={() => setReceiveId('')}
             onConfirm={handleReceive}
             busy={busy}

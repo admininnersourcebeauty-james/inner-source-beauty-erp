@@ -1,7 +1,7 @@
 import JSZip from 'jszip'
 
 export const CORE_BACKUP_TABLES = ['customers', 'inventory', 'orders', 'payments']
-export const PO_BACKUP_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts']
+export const PO_BACKUP_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts', 'purchase_order_receives']
 export const BACKUP_TABLES = [...CORE_BACKUP_TABLES, ...PO_BACKUP_TABLES]
 export const BACKUP_VERSION = 2
 export const APP_NAME = 'INNER SOURCE BEAUTY ERP'
@@ -18,6 +18,7 @@ const TABLE_REQUIRED = {
   purchase_orders: ['id', 'po_number'],
   purchase_order_items: ['id', 'purchase_order_id'],
   purchase_order_receipts: ['id', 'purchase_order_id', 'purchase_order_item_id'],
+  purchase_order_receives: ['id', 'purchase_order_id', 'receive_number'],
 }
 
 const TABLE_NUMERIC = {
@@ -27,7 +28,8 @@ const TABLE_NUMERIC = {
   payments: ['customer_id', 'order_id', 'amount'],
   purchase_orders: ['exchange_rate', 'shipping_cost', 'other_cost', 'total_ordered_units', 'total_product_cost', 'total_commission', 'grand_total', 'commission_amount_paid'],
   purchase_order_items: ['inventory_id', 'order_qty', 'korean_unit_cost', 'commission_percent', 'commission_per_unit', 'product_cost', 'commission_total', 'total_line_cost', 'received_qty'],
-  purchase_order_receipts: ['inventory_id', 'received_qty', 'inventory_before', 'inventory_after'],
+  purchase_order_receipts: ['inventory_id', 'received_qty', 'inventory_before', 'inventory_after', 'factory_unit_cost', 'commission_per_unit', 'shipping_allocation', 'other_cost_allocation', 'landed_unit_cost', 'buying_price_before', 'buying_price_after'],
+  purchase_order_receives: ['shipping_cost', 'other_cost'],
 }
 
 const TABLE_DATES = {
@@ -38,6 +40,7 @@ const TABLE_DATES = {
   purchase_orders: ['created_at', 'order_date', 'eta', 'commission_payment_date', 'updated_at'],
   purchase_order_items: ['created_at'],
   purchase_order_receipts: ['created_at', 'received_date'],
+  purchase_order_receives: ['created_at', 'received_date'],
 }
 
 export function backupZipFilename() {
@@ -225,6 +228,11 @@ export function validateRestoreRows(parsed, existingData = {}) {
         }
         if (row.purchase_order_item_id && !poItemIds.has(String(row.purchase_order_item_id))) {
           errors.push({ table, rowNum, reason: `purchase_order_item_id ${row.purchase_order_item_id} not found.` })
+        }
+      }
+      if (table === 'purchase_order_receives') {
+        if (row.purchase_order_id && !poIds.has(String(row.purchase_order_id))) {
+          errors.push({ table, rowNum, reason: `purchase_order_id ${row.purchase_order_id} not found.` })
         }
       }
     })

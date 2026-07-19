@@ -25,7 +25,7 @@ import {
 import {
   nextPoNumber, calcPoTotals, derivePoStatus, newPoId, buildPoFromReorderItems,
   poSummaryStats, incomingInventoryAlerts, allocateLineCosts, calcLineItem,
-  deriveCommissionPaymentStatus, formatKrw, normalizePoSavePayload, validatePoSave,
+  deriveCommissionPaymentStatus, normalizePoSavePayload, validatePoSave,
   resolvePurchaseType, isMiddlemanPo, purchaseTypeLabel,
 } from './purchaseOrders.js'
 import { PurchaseOrdersPage, PurchaseOrderReports } from './PurchaseOrdersUI.jsx'
@@ -1592,10 +1592,9 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
         </div>
         <div className="dashboard-row-group">
           <p className="dashboard-row-label">Purchase Orders</p>
-          <div className="cards dashboard-row dashboard-row-3">
+          <div className="cards dashboard-row dashboard-row-2">
             <Card t="Open Purchase Orders" v={poStats.openCount} compact cls={poStats.openCount > 0 ? 'card-warn' : ''} onClick={() => onNavigate?.('Purchase Orders')} actionCompact />
             <Card t="Incoming Units" v={poStats.incomingUnits} compact onClick={() => scrollToSection('dashboard-incoming-po')} actionCompact />
-            <Card t="Commission Payable" v={formatKrw(poStats.commissionPayable)} compact cls={poStats.commissionPayable > 0 ? 'card-warn' : ''} onClick={() => onNavigate?.('Purchase Orders')} actionCompact />
           </div>
         </div>
         <div className="dashboard-row-group">

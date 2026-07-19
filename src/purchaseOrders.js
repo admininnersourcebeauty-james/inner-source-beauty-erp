@@ -262,13 +262,7 @@ export function poSummaryStats(purchaseOrders, purchaseOrderItems) {
   return {
     openCount: openPos.length,
     totalOrderedAmount: openPos.reduce((s, po) => s + Number(po.grand_total || 0), 0),
-    expectedCommission: openPos
-      .filter(po => isMiddlemanPo(po, poItemsForOrder(purchaseOrderItems, po.id)))
-      .reduce((s, po) => s + Number(po.total_commission || 0), 0),
     incomingUnits: openItems.reduce((s, l) => s + Math.max(Number(l.order_qty || 0) - Number(l.received_qty || 0), 0), 0),
-    commissionPayable: (purchaseOrders || [])
-      .filter(po => po.status !== 'Cancelled' && isMiddlemanPo(po, poItemsForOrder(purchaseOrderItems, po.id)))
-      .reduce((s, po) => s + commissionBalance(po), 0),
   }
 }
 

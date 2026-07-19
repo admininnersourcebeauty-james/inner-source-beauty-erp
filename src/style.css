@@ -50,6 +50,7 @@ aside button.active{background:#24324b}
 .dashboard-rows .cards{margin-bottom:0}
 .dashboard-row-group{margin:0}
 .dashboard-row-label{font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.04em;margin:0 0 8px}
+.dashboard-row-2{grid-template-columns:repeat(2,minmax(120px,1fr));gap:10px}
 .dashboard-row-3{grid-template-columns:repeat(3,minmax(120px,1fr));gap:10px}
 .dashboard-row-4{grid-template-columns:repeat(4,minmax(110px,1fr));gap:10px}
 .dashboard-row-5{grid-template-columns:repeat(5,minmax(120px,1fr))}
@@ -361,7 +362,7 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .split{grid-template-columns:1fr}
   .detail{position:static;max-height:none}
   .cards,.mini-cards,.cards-9,.form-grid,.customer-form{grid-template-columns:1fr 1fr}
-  .dashboard-row-3,.dashboard-row-4,.dashboard-row-5{grid-template-columns:1fr 1fr}
+  .dashboard-row-2,.dashboard-row-3,.dashboard-row-4,.dashboard-row-5{grid-template-columns:1fr 1fr}
   .customer-form textarea,.method-boxes{grid-column:auto}
   .address-grid{grid-template-columns:1fr;row-gap:24px}
   .address-spacer{display:none}
@@ -422,6 +423,7 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
 .po-receive-buying-prompt label{margin-right:16px;font-weight:700}
 .po-commission-payment{margin-top:20px}
 .po-internal-toggle{margin-left:auto}
+.dashboard-row-2{grid-template-columns:repeat(2,minmax(140px,1fr))}
 .dashboard-row-3{grid-template-columns:repeat(3,minmax(140px,1fr))}
 .po-report-dates{margin-bottom:12px}
 .po-actions-cell{display:flex;gap:8px;flex-wrap:wrap}
@@ -432,10 +434,10 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
 .screen-only-hidden{display:none}
 @media(max-width:900px){
   .po-header-grid,.po-line-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}
-  .dashboard-row-3{grid-template-columns:repeat(2,minmax(120px,1fr))}
+  .dashboard-row-2,.dashboard-row-3{grid-template-columns:repeat(2,minmax(120px,1fr))}
 }
 @media(max-width:480px){
-  .po-header-grid,.po-line-grid,.dashboard-row-3{grid-template-columns:1fr}
+  .po-header-grid,.po-line-grid,.dashboard-row-2,.dashboard-row-3{grid-template-columns:1fr}
   .po-detail-actions,.po-form-actions{flex-direction:column}
   .po-detail-actions button,.po-form-actions button{width:100%}
 }

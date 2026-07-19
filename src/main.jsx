@@ -25,7 +25,8 @@ import {
 import {
   nextPoNumber, calcPoTotals, derivePoStatus, newPoId, buildPoFromReorderItems,
   poSummaryStats, incomingInventoryAlerts, allocateLineCosts, calcLineItem,
-  deriveCommissionPaymentStatus, formatKrw,
+  deriveCommissionPaymentStatus, formatKrw, normalizePoSavePayload, validatePoSave,
+  resolvePurchaseType, isMiddlemanPo, purchaseTypeLabel,
 } from './purchaseOrders.js'
 import { PurchaseOrdersPage, PurchaseOrderReports } from './PurchaseOrdersUI.jsx'
 import './style.css'
@@ -433,9 +434,10 @@ function App() {
     return {
       id,
       po_number: header.po_number || nextPoNumber(data.purchase_orders),
+      purchase_type: totals.purchaseType || header.purchase_type || 'direct',
       order_date: toDbDate(header.order_date || today()),
       supplier: header.supplier || '',
-      middleman_name: header.middleman_name || '',
+      middleman_name: totals.purchaseType === 'middleman' ? (header.middleman_name || '') : '',
       currency: header.currency || 'KRW',
       exchange_rate: totals.exchangeRate,
       shipping_cost: totals.shippingCost,
@@ -447,19 +449,21 @@ function App() {
       total_product_cost: totals.totalProductCost,
       total_commission: totals.totalCommission,
       grand_total: totals.grandTotal,
-      commission_payment_status: header.commission_payment_status || deriveCommissionPaymentStatus(header),
-      commission_amount_paid: Number(header.commission_amount_paid) || 0,
-      commission_payment_date: header.commission_payment_date || null,
-      commission_payment_method: header.commission_payment_method || '',
-      commission_payment_note: header.commission_payment_note || '',
+      commission_payment_status: totals.purchaseType === 'middleman'
+        ? (header.commission_payment_status || deriveCommissionPaymentStatus({ ...header, total_commission: totals.totalCommission }))
+        : 'Paid',
+      commission_amount_paid: totals.purchaseType === 'middleman' ? Number(header.commission_amount_paid) || 0 : 0,
+      commission_payment_date: totals.purchaseType === 'middleman' ? header.commission_payment_date || null : null,
+      commission_payment_method: totals.purchaseType === 'middleman' ? header.commission_payment_method || '' : '',
+      commission_payment_note: totals.purchaseType === 'middleman' ? header.commission_payment_note || '' : '',
       created_by: isNew ? createdBy : (header.created_by || createdBy),
       updated_at: new Date().toISOString(),
       ...(isNew ? { created_at: new Date().toISOString() } : {}),
     }
   }
 
-  function buildPoItemRows(poId, lines) {
-    return totalsLines(lines).map(line => ({
+  function buildPoItemRows(poId, lines, purchaseType) {
+    return lines.map(line => ({
       id: line.id || newPoId(),
       purchase_order_id: poId,
       inventory_id: line.inventory_id || null,
@@ -479,22 +483,20 @@ function App() {
     }))
   }
 
-  function totalsLines(lines) {
-    return calcPoTotals({}, lines).lines
-  }
-
   async function savePurchaseOrder({ id, header, lines }) {
     if (role !== 'Admin') { setNotice('Only administrators can save purchase orders.'); return 'denied' }
     const existing = id ? data.purchase_orders.find(p => String(p.id) === String(id)) : null
     if (existing && !['Draft', 'Submitted', 'In Production', 'Shipped'].includes(existing.status)) {
       setNotice('This purchase order cannot be edited.'); return 'locked'
     }
-    const totals = calcPoTotals(header, lines)
-    if (!totals.lines.length) { setNotice('Add at least one product line.'); return 'empty' }
+    const validationError = validatePoSave(header, lines)
+    if (validationError) { setNotice(validationError); return validationError }
+    const normalized = normalizePoSavePayload(header, lines)
+    const totals = normalized.totals
     const poId = id || newPoId()
-    const poRow = buildPoRow(poId, { ...header, po_number: header.po_number || nextPoNumber(data.purchase_orders) }, totals, !id)
-    poRow.status = derivePoStatus(totals.lines, header.status || existing?.status || 'Draft')
-    const itemRows = buildPoItemRows(poId, totals.lines)
+    const poRow = buildPoRow(poId, { ...normalized.header, po_number: header.po_number || nextPoNumber(data.purchase_orders) }, totals, !id)
+    poRow.status = derivePoStatus(normalized.lines, header.status || existing?.status || 'Draft')
+    const itemRows = buildPoItemRows(poId, normalized.lines, totals.purchaseType)
     setNotice('')
     if (hasSupabaseConfig && session) {
       if (id) {
@@ -567,7 +569,12 @@ function App() {
         return ''
       }
 
-      const allocated = allocateLineCosts(poItems, Number(po.shipping_cost) || 0, Number(po.other_cost) || 0)
+      const allocated = allocateLineCosts(
+        poItems,
+        Number(po.shipping_cost) || 0,
+        Number(po.other_cost) || 0,
+        resolvePurchaseType(po, poItems),
+      )
       const receivedBy = session?.user?.email || profile.email || 'Admin'
       const receiptRows = []
       const itemUpdates = new Map()
@@ -586,7 +593,7 @@ function App() {
           const after = before + receiveNow
           inventoryUpdates.set(String(item.inventory_id), {
             after,
-            landed: alloc?.estimated_landed_cost || item.korean_unit_cost + item.commission_per_unit,
+            landed: alloc?.final_unit_cost || alloc?.estimated_landed_cost || item.korean_unit_cost,
           })
           receiptRows.push({
             id: newPoId(),

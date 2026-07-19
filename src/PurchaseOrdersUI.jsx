@@ -1,16 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import {
-  PO_STATUSES, PO_FILTER_STATUSES, PO_CURRENCIES,
+  PO_STATUSES, PO_FILTER_STATUSES, PO_CURRENCIES, PO_PURCHASE_TYPES,
   calcLineItem, calcPoTotals, allocateLineCosts, blankPoHeader, blankPoLine,
   canCancelPo, canEditPo, canReceivePo, commissionAmountDue, commissionBalance,
   deriveCommissionPaymentStatus, formatKrw, formatUsd, formatPoMoney,
   poItemsForOrder, poMatchesFilter, poMatchesSearch, receivedProgress,
-  poSummaryStats, buildPoCsvRows, isPoLocked,
+  poSummaryStats, buildSupplierCsvRows, buildInternalCsvRows, downloadCsv,
+  resolvePurchaseType, isMiddlemanPo, purchaseTypeLabel,
   poReportSummary, middlemanCommissionReport, incomingInventoryReport,
   reportTotalsForCommission, reportTotalsForIncoming,
 } from './purchaseOrders.js'
 
-const money = n => `$${(Number(n) || 0).toFixed(2)}`
 const today = () => new Date().toISOString().slice(0, 10)
 
 function PoStatusBadge({ status }) {
@@ -19,6 +19,8 @@ function PoStatusBadge({ status }) {
 }
 
 function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm, busy }) {
+  const purchaseType = resolvePurchaseType(po, items)
+  const isMiddleman = purchaseType === 'middleman'
   const [lines, setLines] = useState(() => items.map(item => ({
     purchase_order_item_id: item.id,
     product: item.product_sku || item.product_name,
@@ -26,9 +28,8 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
     received_qty: item.received_qty,
     remaining_qty: item.remaining_qty,
     receive_now: '',
-    commission_percent: item.commission_percent,
     note: '',
-    landed_cost: allocatedLines.find(l => String(l.id) === String(item.id))?.estimated_landed_cost || 0,
+    final_unit_cost: allocatedLines.find(l => String(l.id) === String(item.id))?.final_unit_cost || 0,
   })))
   const [updateBuyingPrice, setUpdateBuyingPrice] = useState('')
 
@@ -55,14 +56,8 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
             <table>
               <thead>
                 <tr>
-                  <th>Product / SKU</th>
-                  <th>Ordered</th>
-                  <th>Previously Received</th>
-                  <th>Remaining</th>
-                  <th>Receive Now</th>
-                  <th>Commission %</th>
-                  <th>Landed Unit</th>
-                  <th>Note</th>
+                  <th>Product / SKU</th><th>Ordered</th><th>Previously Received</th><th>Remaining</th>
+                  <th>Receive Now</th><th>Final Unit Cost</th><th>Note</th>
                 </tr>
               </thead>
               <tbody>
@@ -73,30 +68,22 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
                     <td>{l.received_qty}</td>
                     <td>{l.remaining_qty}</td>
                     <td>
-                      <input
-                        type="number" min="0" max={l.remaining_qty} step="1"
-                        value={l.receive_now}
+                      <input type="number" min="0" max={l.remaining_qty} step="1" value={l.receive_now}
                         disabled={l.remaining_qty <= 0}
                         onChange={e => {
-                          const val = e.target.value
                           const next = [...lines]
-                          next[idx] = { ...next[idx], receive_now: val }
+                          next[idx] = { ...next[idx], receive_now: e.target.value }
                           setLines(next)
-                        }}
-                      />
+                        }} />
                     </td>
-                    <td>{l.commission_percent}%</td>
-                    <td>{formatPoMoney(l.landed_cost, po.currency)}</td>
+                    <td>{formatPoMoney(l.final_unit_cost, po.currency)}{isMiddleman ? '' : ''}</td>
                     <td>
-                      <input
-                        value={l.note}
-                        disabled={l.remaining_qty <= 0}
+                      <input value={l.note} disabled={l.remaining_qty <= 0}
                         onChange={e => {
                           const next = [...lines]
                           next[idx] = { ...next[idx], note: e.target.value }
                           setLines(next)
-                        }}
-                      />
+                        }} />
                     </td>
                   </tr>
                 ))}
@@ -105,6 +92,7 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
           </div>
           <div className="po-receive-buying-prompt">
             <p><strong>Update Inventory Buying Price with this PO cost?</strong></p>
+            <p className="hint">Final Unit Cost includes factory cost{isMiddleman ? ', middleman commission,' : ''} shipping, and other cost allocations.</p>
             <label><input type="radio" name="updateBuying" value="yes" checked={updateBuyingPrice === 'yes'} onChange={() => setUpdateBuyingPrice('yes')} /> Yes</label>
             <label><input type="radio" name="updateBuying" value="no" checked={updateBuyingPrice === 'no'} onChange={() => setUpdateBuyingPrice('no')} /> No</label>
           </div>
@@ -119,20 +107,28 @@ function ReceiveInventoryModal({ po, items, allocatedLines, onCancel, onConfirm,
 }
 
 function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave, onCancel, nextPoNumber }) {
-  const [h, setH] = useState(() => ({ ...blankPoHeader(nextPoNumber), ...header, order_date: header.order_date || today() }))
+  const initialType = resolvePurchaseType(header, lines)
+  const [h, setH] = useState(() => ({
+    ...blankPoHeader(nextPoNumber),
+    ...header,
+    purchase_type: header.purchase_type || initialType,
+    order_date: header.order_date || today(),
+  }))
   const [rows, setRows] = useState(lines.length ? lines : [blankPoLine()])
+  const isMiddleman = h.purchase_type === 'middleman'
   const totals = useMemo(() => calcPoTotals(h, rows), [h, rows])
+
+  function setPurchaseType(type) {
+    if (type === 'direct') {
+      setH({ ...h, purchase_type: 'direct', middleman_name: '' })
+      setRows(prev => prev.map(r => ({ ...r, commission_percent: '' })))
+    } else {
+      setH({ ...h, purchase_type: 'middleman' })
+    }
+  }
 
   function updateLine(idx, patch) {
     setRows(prev => prev.map((r, i) => i === idx ? { ...r, ...patch } : r))
-  }
-
-  function addLine() {
-    setRows(prev => [...prev, blankPoLine()])
-  }
-
-  function removeLine(idx) {
-    setRows(prev => prev.filter((_, i) => i !== idx))
   }
 
   function pickInventory(idx, invId) {
@@ -146,8 +142,12 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
     })
   }
 
+  function removeLine(idx) {
+    setRows(prev => prev.filter((_, i) => i !== idx))
+  }
+
   function handleSave() {
-    onSave({ header: h, lines: totals.lines })
+    onSave({ header: h, lines: rows })
   }
 
   if (!isAdmin) {
@@ -165,8 +165,15 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
         <div className="form-grid po-header-grid">
           <label>PO Number<input value={h.po_number} readOnly /></label>
           <label>Order Date<input type="date" value={h.order_date || today()} onChange={e => setH({ ...h, order_date: e.target.value })} /></label>
+          <label>Purchase Type
+            <select value={h.purchase_type || 'direct'} onChange={e => setPurchaseType(e.target.value)}>
+              {PO_PURCHASE_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+            </select>
+          </label>
           <label>Supplier<input value={h.supplier} onChange={e => setH({ ...h, supplier: e.target.value })} placeholder="incelltechbio" /></label>
-          <label>Middleman Name<input value={h.middleman_name} onChange={e => setH({ ...h, middleman_name: e.target.value })} placeholder="OK LEE" /></label>
+          {isMiddleman && (
+            <label>Middleman Name<input value={h.middleman_name} onChange={e => setH({ ...h, middleman_name: e.target.value })} placeholder="OK LEE" /></label>
+          )}
           <label>Currency
             <select value={h.currency} onChange={e => setH({ ...h, currency: e.target.value })}>
               {PO_CURRENCIES.map(c => <option key={c}>{c}</option>)}
@@ -187,7 +194,7 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
       <div className="form-section">
         <h3>Product Lines</h3>
         {rows.map((line, idx) => {
-          const calc = calcLineItem(line)
+          const calc = calcLineItem(line, h.purchase_type)
           return (
             <div key={idx} className="po-line-card">
               <div className="form-grid po-line-grid">
@@ -200,12 +207,15 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
                 </label>
                 <label>Brand<input value={line.brand} onChange={e => updateLine(idx, { brand: e.target.value })} /></label>
                 <label>Order Qty<input type="number" min="0" value={line.order_qty} onChange={e => updateLine(idx, { order_qty: e.target.value })} /></label>
-                <label>Korean Unit Cost<input type="number" min="0" step="1" value={line.korean_unit_cost} onChange={e => updateLine(idx, { korean_unit_cost: e.target.value })} /></label>
-                <label>Middleman Commission %<input type="number" min="0" step="0.01" value={line.commission_percent} onChange={e => updateLine(idx, { commission_percent: e.target.value })} /></label>
-                <label>Commission Per Unit<span className="po-calc-value">{formatPoMoney(calc.commission_per_unit, h.currency)}</span></label>
-                <label>Product Cost<span className="po-calc-value">{formatPoMoney(calc.product_cost, h.currency)}</span></label>
-                <label>Commission Total<span className="po-calc-value">{formatPoMoney(calc.commission_total, h.currency)}</span></label>
-                <label>Total Line Cost<span className="po-calc-value">{formatPoMoney(calc.total_line_cost, h.currency)}</span></label>
+                <label>Factory Unit Cost<input type="number" min="0" step="1" value={line.korean_unit_cost} onChange={e => updateLine(idx, { korean_unit_cost: e.target.value })} /></label>
+                {isMiddleman && (
+                  <>
+                    <label>Middleman Commission %<input type="number" min="0" step="0.01" value={line.commission_percent} onChange={e => updateLine(idx, { commission_percent: e.target.value })} /></label>
+                    <label>Commission Per Unit<span className="po-calc-value">{formatPoMoney(calc.commission_per_unit, h.currency)}</span></label>
+                    <label>Commission Total<span className="po-calc-value">{formatPoMoney(calc.commission_total, h.currency)}</span></label>
+                  </>
+                )}
+                <label>Factory Product Cost<span className="po-calc-value">{formatPoMoney(calc.product_cost, h.currency)}</span></label>
                 <label>Received Qty<span className="po-calc-value">{calc.received_qty}</span></label>
                 <label>Remaining Qty<span className="po-calc-value">{calc.remaining_qty}</span></label>
                 <label>Note<input value={line.note || ''} onChange={e => updateLine(idx, { note: e.target.value })} /></label>
@@ -216,16 +226,15 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
             </div>
           )
         })}
-        <button type="button" className="soft" onClick={addLine}>+ Add Product Line</button>
+        <button type="button" className="soft" onClick={() => setRows(prev => [...prev, blankPoLine()])}>+ Add Product Line</button>
       </div>
       <div className="po-totals-box">
         <p><strong>Total Ordered Units:</strong> {totals.totalOrderedUnits}</p>
-        <p><strong>Total Product Cost:</strong> {formatPoMoney(totals.totalProductCost, h.currency)}</p>
-        <p><strong>Total Middleman Commission:</strong> {formatPoMoney(totals.totalCommission, h.currency)}</p>
+        <p><strong>Total Factory Product Cost:</strong> {formatPoMoney(totals.totalProductCost, h.currency)}</p>
+        {isMiddleman && <p><strong>Total Middleman Commission:</strong> {formatPoMoney(totals.totalCommission, h.currency)}</p>}
         <p><strong>Estimated Shipping Cost:</strong> {formatPoMoney(totals.shippingCost, h.currency)}</p>
         <p><strong>Other Cost:</strong> {formatPoMoney(totals.otherCost, h.currency)}</p>
-        <p><strong>Grand Total ({h.currency}):</strong> {formatPoMoney(totals.grandTotal, h.currency)}</p>
-        <p><strong>Exchange Rate:</strong> {totals.exchangeRate}</p>
+        <p><strong>Total Purchase Cost ({h.currency}):</strong> {formatPoMoney(totals.totalPurchaseCost, h.currency)}</p>
         <p><strong>Estimated Grand Total USD:</strong> {formatUsd(totals.estimatedGrandTotalUsd)}</p>
       </div>
       <div className="po-form-actions">
@@ -236,20 +245,107 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
   )
 }
 
+function SupplierPurchaseOrderDoc({ po, lines, totals }) {
+  const factoryTotal = totals.totalProductCost
+  return (
+    <div className="po-print-sheet po-supplier-doc invoice">
+      <h1>INNER SOURCE BEAUTY</h1>
+      <h2>SUPPLIER PURCHASE ORDER</h2>
+      <div className="invoice-grid">
+        <p><b>PO Number:</b> {po.po_number}<br /><b>Order Date:</b> {po.order_date || '—'}<br /><b>Status:</b> {po.status}</p>
+        <p><b>Supplier:</b> {po.supplier || '—'}<br /><b>ETA:</b> {po.eta || '—'}</p>
+        <p><b>Currency:</b> {po.currency}<br /><b>Notes:</b> {po.notes || '—'}</p>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Product</th><th>SKU</th><th>Qty</th><th>Factory Unit Price</th><th>Factory Line Total</th></tr>
+          </thead>
+          <tbody>
+            {lines.map(l => (
+              <tr key={l.id || l.product_sku}>
+                <td>{l.product_name || l.product_sku}</td>
+                <td>{l.product_sku || '—'}</td>
+                <td>{l.order_qty}</td>
+                <td>{formatPoMoney(l.factory_unit_cost, po.currency)}</td>
+                <td>{formatPoMoney(l.product_cost, po.currency)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="po-totals-box">
+        <p><strong>Factory Product Total:</strong> {formatPoMoney(factoryTotal, po.currency)}</p>
+      </div>
+      <p className="hint">Shipping instructions and delivery terms per supplier agreement.</p>
+    </div>
+  )
+}
+
+function InternalCostSheetDoc({ po, allocated, totals }) {
+  const isMiddleman = totals.purchaseType === 'middleman'
+  return (
+    <div className="po-print-sheet po-internal-doc invoice">
+      <p className="po-internal-banner">INTERNAL USE ONLY</p>
+      <h1>INNER SOURCE BEAUTY</h1>
+      <h2>INTERNAL COST SHEET</h2>
+      <div className="invoice-grid">
+        <p><b>PO Number:</b> {po.po_number}<br /><b>Purchase Type:</b> {purchaseTypeLabel(totals.purchaseType)}<br /><b>Supplier:</b> {po.supplier || '—'}</p>
+        <p>{isMiddleman && <><b>Middleman Name:</b> {po.middleman_name || '—'}<br /></>}<b>Order Date:</b> {po.order_date || '—'}<br /><b>Status:</b> {po.status}</p>
+        <p><b>ETA:</b> {po.eta || '—'}<br /><b>Notes:</b> {po.notes || '—'}</p>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Product</th><th>Qty</th><th>Factory Unit Cost</th>
+              {isMiddleman && <><th>Commission %</th><th>Commission Per Unit</th><th>Commission Total</th></>}
+              <th>Shipping Allocation</th><th>Other Cost Allocation</th><th>Final Unit Cost</th><th>Final Line Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {allocated.map(l => (
+              <tr key={l.id || l.product_sku}>
+                <td>{l.product_name || l.product_sku}</td>
+                <td>{l.order_qty}</td>
+                <td>{formatPoMoney(l.factory_unit_cost, po.currency)}</td>
+                {isMiddleman && <><td>{l.commission_percent}%</td><td>{formatPoMoney(l.commission_per_unit, po.currency)}</td><td>{formatPoMoney(l.commission_total, po.currency)}</td></>}
+                <td>{formatPoMoney(l.shipping_allocation, po.currency)}</td>
+                <td>{formatPoMoney(l.other_cost_allocation, po.currency)}</td>
+                <td>{formatPoMoney(l.final_unit_cost, po.currency)}</td>
+                <td>{formatPoMoney(l.final_line_cost, po.currency)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="po-totals-box">
+        <p><strong>Total Factory Cost:</strong> {formatPoMoney(totals.totalProductCost, po.currency)}</p>
+        {isMiddleman && <p><strong>Total Commission:</strong> {formatPoMoney(totals.totalCommission, po.currency)}</p>}
+        <p><strong>Shipping Cost:</strong> {formatPoMoney(totals.shippingCost, po.currency)}</p>
+        <p><strong>Other Cost:</strong> {formatPoMoney(totals.otherCost, po.currency)}</p>
+        <p><strong>Grand Total:</strong> {formatPoMoney(totals.grandTotal, po.currency)}</p>
+      </div>
+    </div>
+  )
+}
+
 function PurchaseOrderDetail({
-  po, items, receipts, isAdmin, onBack, onEdit, onReceive, onCancel, onPrint,
-  onDownloadCsv, onUpdateCommission,
+  po, items, receipts, isAdmin, onBack, onEdit, onReceive, onCancel, onUpdateCommission,
 }) {
-  const [includeInternal, setIncludeInternal] = useState(false)
+  const [showInternalDetails, setShowInternalDetails] = useState(false)
+  const [printView, setPrintView] = useState('')
+  const purchaseType = resolvePurchaseType(po, items)
+  const isMiddleman = purchaseType === 'middleman'
+  const totals = calcPoTotals(po, items)
+  const allocated = allocateLineCosts(totals.lines, totals.shippingCost, totals.otherCost, purchaseType)
+  const locked = po.status === 'Received' || po.status === 'Cancelled'
   const [commPay, setCommPay] = useState({
     commission_amount_paid: po.commission_amount_paid || '',
     commission_payment_date: po.commission_payment_date || today(),
     commission_payment_method: po.commission_payment_method || '',
     commission_payment_note: po.commission_payment_note || '',
   })
-  const totals = calcPoTotals(po, items)
-  const allocated = allocateLineCosts(totals.lines, totals.shippingCost, totals.otherCost)
-  const locked = isPoLocked(po)
 
   function saveCommissionPayment() {
     onUpdateCommission(po.id, {
@@ -257,9 +353,31 @@ function PurchaseOrderDetail({
       commission_amount_paid: Number(commPay.commission_amount_paid) || 0,
       commission_payment_status: deriveCommissionPaymentStatus({
         ...po,
+        purchase_type: purchaseType,
         commission_amount_paid: Number(commPay.commission_amount_paid) || 0,
       }),
     })
+  }
+
+  function exportSupplierCsv() {
+    downloadCsv(
+      `${po.po_number || 'PO'}_supplier.csv`,
+      ['PO Number', 'Order Date', 'Supplier', 'Product', 'SKU', 'Qty', 'Factory Unit Price', 'Factory Line Total', 'ETA', 'Notes'],
+      buildSupplierCsvRows(po, totals.lines),
+    )
+  }
+
+  function exportInternalCsv() {
+    downloadCsv(
+      `${po.po_number || 'PO'}_internal.csv`,
+      ['Purchase Type', 'PO Number', 'Supplier', 'Middleman', 'Product', 'Qty', 'Factory Unit Cost', 'Commission %', 'Commission Per Unit', 'Commission Total', 'Shipping Allocation', 'Other Cost Allocation', 'Final Unit Cost', 'Final Line Cost', 'Total Factory Cost', 'Total Commission', 'Shipping Cost', 'Other Cost', 'Grand Total'],
+      buildInternalCsvRows(po, allocated, totals),
+    )
+  }
+
+  function handlePrint(view) {
+    setPrintView(view)
+    setTimeout(() => { window.print(); setPrintView('') }, 50)
   }
 
   return (
@@ -269,72 +387,99 @@ function PurchaseOrderDetail({
         {isAdmin && canEditPo(po, 'Admin') && <button type="button" onClick={() => onEdit(po.id)}>Edit</button>}
         {isAdmin && canReceivePo(po, 'Admin') && <button type="button" onClick={() => onReceive(po.id)}>Receive Inventory</button>}
         {isAdmin && canCancelPo(po, 'Admin') && <button type="button" className="danger" onClick={() => onCancel(po.id)}>Cancel PO</button>}
-        <button type="button" onClick={onPrint}>Print / Save PDF</button>
-        <button type="button" className="soft" onClick={() => onDownloadCsv(po, allocated)}>Download CSV</button>
-        {isAdmin && (
-          <label className="check po-internal-toggle">
-            <input type="checkbox" checked={includeInternal} onChange={e => setIncludeInternal(e.target.checked)} />
-            Include Internal Cost Summary
-          </label>
-        )}
+        <button type="button" onClick={() => handlePrint('supplier')}>Print Supplier PO</button>
+        <button type="button" className="soft" onClick={exportSupplierCsv}>Export Supplier PO CSV</button>
+        <button type="button" onClick={() => handlePrint('internal')}>Print Internal Cost Sheet</button>
+        <button type="button" className="soft" onClick={exportInternalCsv}>Export Internal Cost CSV</button>
       </div>
-      <div className="po-print-sheet invoice">
-        <h1>INNER SOURCE BEAUTY</h1>
-        <h2>PURCHASE ORDER</h2>
-        <div className="invoice-grid">
-          <p><b>PO Number:</b> {po.po_number}<br /><b>Order Date:</b> {po.order_date || '—'}<br /><b>Status:</b> <PoStatusBadge status={po.status} /></p>
-          <p><b>Supplier:</b> {po.supplier || '—'}<br /><b>Middleman:</b> {po.middleman_name || '—'}<br /><b>ETA:</b> {po.eta || '—'}</p>
-          <p><b>Currency:</b> {po.currency}<br /><b>Exchange Rate:</b> {po.exchange_rate}<br /><b>Notes:</b> {po.notes || '—'}</p>
+
+      {printView === 'supplier' && (
+        <SupplierPurchaseOrderDoc po={po} lines={totals.lines} totals={totals} />
+      )}
+      {printView === 'internal' && (
+        <InternalCostSheetDoc po={po} allocated={allocated} totals={totals} />
+      )}
+
+      <div className={`po-detail-main${printView ? ' screen-only-hidden' : ''}`}>
+        <div className="po-detail-summary">
+          <h2>{po.po_number}</h2>
+          <p><b>Supplier:</b> {po.supplier || '—'} · <b>Purchase Type:</b> {purchaseTypeLabel(purchaseType)} · <b>Status:</b> <PoStatusBadge status={po.status} /></p>
+          <p><b>Order Date:</b> {po.order_date || '—'} · <b>ETA:</b> {po.eta || '—'} · <b>Total Purchase Cost:</b> {formatPoMoney(totals.totalPurchaseCost, po.currency)}</p>
         </div>
+
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Product / SKU</th><th>Qty</th><th>Korean Unit Cost</th><th>Commission %</th>
-                <th>Commission Amount</th><th>Product Cost</th><th>Line Total</th>
+                <th>Product</th><th>SKU</th><th>Qty</th><th>Factory Unit Cost</th><th>Final Unit Cost</th>
+                <th>Line Total</th><th>Received Qty</th><th>Remaining Qty</th>
               </tr>
             </thead>
             <tbody>
-              {totals.lines.map(l => (
+              {allocated.map(l => (
                 <tr key={l.id || l.product_sku}>
-                  <td>{l.product_sku || l.product_name}</td>
+                  <td>{l.product_name || l.product_sku}</td>
+                  <td>{l.product_sku || '—'}</td>
                   <td>{l.order_qty}</td>
-                  <td>{formatPoMoney(l.korean_unit_cost, po.currency)}</td>
-                  <td>{l.commission_percent}%</td>
-                  <td>{formatPoMoney(l.commission_total, po.currency)}</td>
-                  <td>{formatPoMoney(l.product_cost, po.currency)}</td>
-                  <td>{formatPoMoney(l.total_line_cost, po.currency)}</td>
+                  <td>{formatPoMoney(l.factory_unit_cost, po.currency)}</td>
+                  <td>{formatPoMoney(l.final_unit_cost, po.currency)}</td>
+                  <td>{formatPoMoney(l.final_line_cost, po.currency)}</td>
+                  <td>{l.received_qty}</td>
+                  <td>{l.remaining_qty}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        <div className="po-totals-box">
-          <p><strong>Product Cost:</strong> {formatPoMoney(totals.totalProductCost, po.currency)}</p>
-          <p><strong>Middleman Commission:</strong> {formatPoMoney(totals.totalCommission, po.currency)}</p>
-          <p><strong>Shipping:</strong> {formatPoMoney(totals.shippingCost, po.currency)}</p>
-          <p><strong>Other Cost:</strong> {formatPoMoney(totals.otherCost, po.currency)}</p>
-          <p><strong>Grand Total:</strong> {formatPoMoney(totals.grandTotal, po.currency)}</p>
-          <p><strong>Estimated USD Total:</strong> {formatUsd(totals.estimatedGrandTotalUsd)}</p>
-        </div>
-        {includeInternal && isAdmin && (
-          <div className="po-internal-summary">
-            <h3>Internal Cost Summary</h3>
-            <p>Receipt history: {receipts.length} record(s). Received progress: {receivedProgress(items)}</p>
+
+        <button type="button" className="soft po-toggle-internal" onClick={() => setShowInternalDetails(v => !v)}>
+          {showInternalDetails ? 'Hide Internal Cost Details' : 'Show Internal Cost Details'}
+        </button>
+
+        {showInternalDetails && (
+          <div className="po-internal-details">
+            <p><b>Purchase Type:</b> {purchaseTypeLabel(purchaseType)}</p>
+            {isMiddleman && <p><b>Middleman Name:</b> {po.middleman_name || '—'}</p>}
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    {isMiddleman && <><th>Commission %</th><th>Commission Per Unit</th><th>Commission Total</th></>}
+                    <th>Shipping Allocation</th><th>Other Cost Allocation</th><th>Final Landed Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {allocated.map(l => (
+                    <tr key={`internal-${l.id || l.product_sku}`}>
+                      <td>{l.product_name || l.product_sku}</td>
+                      {isMiddleman && <><td>{l.commission_percent}%</td><td>{formatPoMoney(l.commission_per_unit, po.currency)}</td><td>{formatPoMoney(l.commission_total, po.currency)}</td></>}
+                      <td>{formatPoMoney(l.shipping_allocation, po.currency)}</td>
+                      <td>{formatPoMoney(l.other_cost_allocation, po.currency)}</td>
+                      <td>{formatPoMoney(l.final_unit_cost, po.currency)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="hint">Receipt history: {receipts.length} record(s). Received progress: {receivedProgress(items)}</p>
           </div>
         )}
       </div>
-      {isAdmin && !locked && (
+
+      {isAdmin && isMiddleman && !locked && (
         <div className="form-section po-commission-payment no-print">
           <h3>Commission Payment Tracking</h3>
-          <p><strong>Commission Amount Due:</strong> {formatPoMoney(commissionAmountDue(po), po.currency)}</p>
-          <p><strong>Commission Balance:</strong> {formatPoMoney(commissionBalance(po), po.currency)}</p>
-          <p><strong>Status:</strong> {po.commission_payment_status || deriveCommissionPaymentStatus(po)}</p>
+          <p><b>Middleman Name:</b> {po.middleman_name || '—'}</p>
+          <p><strong>Total Commission:</strong> {formatPoMoney(commissionAmountDue(po), po.currency)}</p>
+          <p><strong>Amount Paid:</strong> {formatPoMoney(Number(commPay.commission_amount_paid) || 0, po.currency)}</p>
+          <p><strong>Remaining Commission Balance:</strong> {formatPoMoney(commissionBalance({ ...po, ...commPay, purchase_type: purchaseType }), po.currency)}</p>
+          <p><strong>Payment Status:</strong> {po.commission_payment_status || deriveCommissionPaymentStatus({ ...po, purchase_type: purchaseType })}</p>
           <div className="form-grid">
             <label>Amount Paid<input type="number" min="0" value={commPay.commission_amount_paid} onChange={e => setCommPay({ ...commPay, commission_amount_paid: e.target.value })} /></label>
             <label>Payment Date<input type="date" value={commPay.commission_payment_date} onChange={e => setCommPay({ ...commPay, commission_payment_date: e.target.value })} /></label>
             <label>Payment Method<input value={commPay.commission_payment_method} onChange={e => setCommPay({ ...commPay, commission_payment_method: e.target.value })} /></label>
-            <label>Note<input value={commPay.commission_payment_note} onChange={e => setCommPay({ ...commPay, commission_payment_note: e.target.value })} /></label>
+            <label>Payment Note<input value={commPay.commission_payment_note} onChange={e => setCommPay({ ...commPay, commission_payment_note: e.target.value })} /></label>
           </div>
           <button type="button" onClick={saveCommissionPayment}>Save Commission Payment</button>
         </div>
@@ -376,12 +521,10 @@ export function PurchaseOrdersPage({
     }
   }, [draftPoSeed])
 
-  const filtered = useMemo(() => {
-    return pos.filter(po => {
-      const items = poItemsForOrder(allItems, po.id)
-      return poMatchesFilter(po, filter) && poMatchesSearch(po, items, search)
-    })
-  }, [pos, allItems, filter, search])
+  const filtered = useMemo(() => pos.filter(po => {
+    const items = poItemsForOrder(allItems, po.id)
+    return poMatchesFilter(po, filter) && poMatchesSearch(po, items, search)
+  }), [pos, allItems, filter, search])
 
   const detailPo = pos.find(p => String(p.id) === String(detailId))
   const editPo = pos.find(p => String(p.id) === String(editingId))
@@ -401,24 +544,11 @@ export function PurchaseOrdersPage({
     if (!err) { setReceiveId(''); setView('detail') }
   }
 
-  function downloadCsv(po, allocated) {
-    const header = ['PO Number', 'Supplier', 'Middleman', 'Product / SKU', 'Brand', 'Qty', 'Korean Unit Cost', 'Middleman Commission %', 'Commission Per Unit', 'Product Cost', 'Commission Total', 'Total Line Cost', 'Shipping Allocation', 'Other Cost Allocation', 'Estimated Landed Cost', 'ETA', 'Status', 'Notes']
-    const rows = buildPoCsvRows(po, allocated, allocated)
-    const csv = [header, ...rows].map(cols => cols.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `${po.po_number || 'PO'}_export.csv`
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000)
-  }
-
   if (view === 'create') {
-    const seed = draftPoSeed || null
     return (
       <PurchaseOrderForm
-        header={seed?.header || blankPoHeader(nextPoNumber)}
-        lines={seed?.lines || [blankPoLine()]}
+        header={draftPoSeed?.header || blankPoHeader(nextPoNumber)}
+        lines={draftPoSeed?.lines || [blankPoLine()]}
         inventory={data.inventory}
         isAdmin={isAdmin}
         editing={false}
@@ -430,11 +560,10 @@ export function PurchaseOrdersPage({
   }
 
   if (view === 'edit' && editPo) {
-    const items = poItemsForOrder(allItems, editPo.id)
     return (
       <PurchaseOrderForm
         header={editPo}
-        lines={items}
+        lines={poItemsForOrder(allItems, editPo.id)}
         inventory={data.inventory}
         isAdmin={isAdmin}
         editing
@@ -459,15 +588,18 @@ export function PurchaseOrdersPage({
           onEdit={id => { setEditingId(id); setView('edit') }}
           onReceive={id => setReceiveId(id)}
           onCancel={async id => { if (confirm('Cancel this purchase order?')) await onCancelPo(id); setView('list') }}
-          onPrint={() => window.print()}
-          onDownloadCsv={downloadCsv}
           onUpdateCommission={onUpdateCommissionPayment}
         />
         {receiveId && receivePo && (
           <ReceiveInventoryModal
             po={receivePo}
-            items={poItemsForOrder(allItems, receivePo.id).map(calcLineItem)}
-            allocatedLines={allocateLineCosts(poItemsForOrder(allItems, receivePo.id), Number(receivePo.shipping_cost) || 0, Number(receivePo.other_cost) || 0)}
+            items={poItemsForOrder(allItems, receivePo.id).map(l => calcLineItem(l, resolvePurchaseType(receivePo, poItemsForOrder(allItems, receivePo.id))))}
+            allocatedLines={allocateLineCosts(
+              poItemsForOrder(allItems, receivePo.id),
+              Number(receivePo.shipping_cost) || 0,
+              Number(receivePo.other_cost) || 0,
+              resolvePurchaseType(receivePo, poItemsForOrder(allItems, receivePo.id)),
+            )}
             onCancel={() => setReceiveId('')}
             onConfirm={handleReceive}
             busy={busy}
@@ -481,14 +613,11 @@ export function PurchaseOrdersPage({
     <div className="panel po-list-panel">
       <div className="po-list-head">
         <h2>Purchase Orders</h2>
-        {isAdmin && (
-          <button type="button" onClick={() => { setEditingId(''); setView('create') }}>+ New Purchase Order</button>
-        )}
+        {isAdmin && <button type="button" onClick={() => { setEditingId(''); setView('create') }}>+ New Purchase Order</button>}
       </div>
       <div className="cards po-summary-cards">
         <div className="card"><p>Open Purchase Orders</p><b>{stats.openCount}</b></div>
-        <div className="card"><p>Total Ordered Amount</p><b>{formatKrw(stats.totalOrderedAmount)}</b></div>
-        <div className="card"><p>Expected Commission</p><b>{formatKrw(stats.expectedCommission)}</b></div>
+        <div className="card"><p>Total Purchase Cost (Open)</p><b>{formatKrw(stats.totalOrderedAmount)}</b></div>
         <div className="card"><p>Incoming Units</p><b>{stats.incomingUnits}</b></div>
       </div>
       <div className="po-filters">
@@ -496,43 +625,37 @@ export function PurchaseOrdersPage({
           <button key={f} type="button" className={`soft filter-btn${filter === f ? ' active' : ''}`} onClick={() => setFilter(f)}>{f}</button>
         ))}
       </div>
-      <input className="search po-search" placeholder="Search PO number, supplier, middleman, product, notes..." value={search} onChange={e => setSearch(e.target.value)} />
+      <input className="search po-search" placeholder="Search PO number, supplier, product, notes..." value={search} onChange={e => setSearch(e.target.value)} />
       <div className="table-wrap po-list-table">
         <table>
           <thead>
             <tr>
-              <th>PO Number</th><th>Order Date</th><th>Supplier</th><th>Middleman</th><th>Total Units</th>
-              <th>Product Cost</th><th>Commission</th><th>Shipping</th><th>Grand Total</th><th>ETA</th>
-              <th>Status</th><th>Received Progress</th><th>View</th>{isAdmin && <th>Edit</th>}
+              <th>PO Number</th><th>Order Date</th><th>Supplier</th><th>Purchase Type</th><th>Total Units</th>
+              <th>Total Purchase Cost</th><th>ETA</th><th>Status</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 ? (
-              <tr><td colSpan={isAdmin ? 14 : 13} className="hint">No purchase orders found.</td></tr>
+              <tr><td colSpan={9} className="hint">No purchase orders found.</td></tr>
             ) : filtered.map(po => {
               const items = poItemsForOrder(allItems, po.id)
+              const type = resolvePurchaseType(po, items)
               return (
                 <tr key={po.id}>
                   <td><b>{po.po_number}</b></td>
                   <td>{po.order_date || '—'}</td>
                   <td>{po.supplier || '—'}</td>
-                  <td>{po.middleman_name || '—'}</td>
+                  <td>{purchaseTypeLabel(type)}</td>
                   <td>{po.total_ordered_units ?? '—'}</td>
-                  <td>{formatPoMoney(po.total_product_cost, po.currency)}</td>
-                  <td>{formatPoMoney(po.total_commission, po.currency)}</td>
-                  <td>{formatPoMoney(po.shipping_cost, po.currency)}</td>
                   <td>{formatPoMoney(po.grand_total, po.currency)}</td>
                   <td>{po.eta || '—'}</td>
                   <td><PoStatusBadge status={po.status} /></td>
-                  <td>{receivedProgress(items)}</td>
-                  <td><button type="button" className="link-cell" onClick={() => { setDetailId(po.id); setView('detail') }}>View</button></td>
-                  {isAdmin && (
-                    <td>
-                      {canEditPo(po, role) ? (
-                        <button type="button" className="link-cell" onClick={() => { setEditingId(po.id); setView('edit') }}>Edit</button>
-                      ) : '—'}
-                    </td>
-                  )}
+                  <td className="po-actions-cell">
+                    <button type="button" className="link-cell" onClick={() => { setDetailId(po.id); setView('detail') }}>View</button>
+                    {isAdmin && canEditPo(po, role) && (
+                      <button type="button" className="link-cell" onClick={() => { setEditingId(po.id); setView('edit') }}>Edit</button>
+                    )}
+                  </td>
                 </tr>
               )
             })}
@@ -546,7 +669,7 @@ export function PurchaseOrdersPage({
 export function PurchaseOrderReports({ data, dateFrom, dateTo, onDateFromChange, onDateToChange }) {
   const pos = data.purchase_orders || []
   const items = data.purchase_order_items || []
-  const summary = poReportSummary(pos)
+  const summary = poReportSummary(pos, items)
   const commissionRows = middlemanCommissionReport(pos, items, dateFrom, dateTo)
   const incomingRows = incomingInventoryReport(pos, items)
   const commTotals = reportTotalsForCommission(commissionRows)
@@ -557,16 +680,12 @@ export function PurchaseOrderReports({ data, dateFrom, dateTo, onDateFromChange,
       <h3>Purchase Order Summary</h3>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>PO Number</th><th>Supplier</th><th>Total Units</th><th>Product Cost</th><th>Commission</th><th>Shipping</th><th>Grand Total</th><th>Status</th></tr></thead>
+          <thead><tr><th>PO Number</th><th>Supplier</th><th>Purchase Type</th><th>Total Units</th><th>Total Purchase Cost</th><th>Status</th></tr></thead>
           <tbody>
             {summary.map(r => (
               <tr key={r.id}>
-                <td>{r.po_number}</td><td>{r.supplier}</td><td>{r.total_units}</td>
-                <td>{formatPoMoney(r.product_cost, r.currency)}</td>
-                <td>{formatPoMoney(r.commission, r.currency)}</td>
-                <td>{formatPoMoney(r.shipping, r.currency)}</td>
-                <td>{formatPoMoney(r.grand_total, r.currency)}</td>
-                <td>{r.status}</td>
+                <td>{r.po_number}</td><td>{r.supplier}</td><td>{r.purchase_type}</td><td>{r.total_units}</td>
+                <td>{formatPoMoney(r.total_purchase_cost, r.currency)}</td><td>{r.status}</td>
               </tr>
             ))}
           </tbody>

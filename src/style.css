@@ -424,6 +424,12 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
 .po-internal-toggle{margin-left:auto}
 .dashboard-row-3{grid-template-columns:repeat(3,minmax(140px,1fr))}
 .po-report-dates{margin-bottom:12px}
+.po-actions-cell{display:flex;gap:8px;flex-wrap:wrap}
+.po-internal-banner{background:#fdecea;color:#9b1c1c;text-align:center;font-weight:800;padding:8px;border-radius:8px;margin-bottom:12px}
+.po-internal-details{margin-top:16px;padding:16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px}
+.po-toggle-internal{margin:16px 0}
+.po-detail-summary{margin-bottom:16px}
+.screen-only-hidden{display:none}
 @media(max-width:900px){
   .po-header-grid,.po-line-grid{grid-template-columns:repeat(2,minmax(120px,1fr))}
   .dashboard-row-3{grid-template-columns:repeat(2,minmax(120px,1fr))}
@@ -447,4 +453,7 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .bill-to,.ship-to{width:42%!important;flex:0 0 42%!important;page-break-inside:avoid}
   .ship-to{margin-left:auto!important}
   .address-spacer{display:none!important}
+  .po-detail-main,.po-commission-payment{display:none!important}
+  .po-supplier-doc,.po-internal-doc{display:block!important;margin:0 auto;max-width:7.5in}
+  .po-internal-banner{-webkit-print-color-adjust:exact;print-color-adjust:exact}
 }

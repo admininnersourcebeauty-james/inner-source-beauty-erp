@@ -11,6 +11,10 @@ export const PO_PURCHASE_TYPES = [
   { value: 'middleman', label: 'Through Middleman' },
 ]
 
+/** Stored DB values (see purchase_orders_purchase_type_check): 'direct' | 'middleman' */
+export const PO_TYPE_DIRECT = 'direct'
+export const PO_TYPE_MIDDLEMAN = 'middleman'
+
 export const COMMISSION_PAYMENT_STATUSES = ['Unpaid', 'Partial', 'Paid']
 
 export const PO_OPEN_STATUSES = ['Draft', 'Submitted', 'In Production', 'Shipped', 'Partially Received']
@@ -35,44 +39,110 @@ export function nextPoNumber(purchaseOrders, explicitNo) {
   return `${PO_PREFIX}${String(next).padStart(6, '0')}`
 }
 
+export function isMiddlemanPurchaseType(purchaseType) {
+  return String(purchaseType || '').trim().toLowerCase() === PO_TYPE_MIDDLEMAN
+}
+
 export function resolvePurchaseType(po, items) {
-  if (po?.purchase_type === 'middleman' || po?.purchase_type === 'direct') return po.purchase_type
+  const stored = String(po?.purchase_type || '').trim().toLowerCase()
+  if (stored === PO_TYPE_MIDDLEMAN || stored === PO_TYPE_DIRECT) return stored
   const hasMiddlemanName = String(po?.middleman_name || '').trim().length > 0
   const list = items || []
   const hasCommission = Number(po?.total_commission) > 0
-    || list.some(i => Number(i.commission_percent) > 0 || Number(i.commission_total) > 0)
-  return (hasMiddlemanName || hasCommission) ? 'middleman' : 'direct'
+    || list.some(i => Number(i.commission_percent) > 0 || Number(i.commission_total) > 0 || Number(i.commission_total_usd) > 0)
+  return (hasMiddlemanName || hasCommission) ? PO_TYPE_MIDDLEMAN : PO_TYPE_DIRECT
 }
 
 export function isMiddlemanPo(po, items) {
-  return resolvePurchaseType(po, items) === 'middleman'
+  return isMiddlemanPurchaseType(resolvePurchaseType(po, items))
 }
 
 export function purchaseTypeLabel(type) {
   return PO_PURCHASE_TYPES.find(t => t.value === type)?.label || 'Direct Purchase'
 }
 
-export function calcLineItem(raw, purchaseType) {
+export function resolveExchangeRate(currency, exchangeRate) {
+  if (currency === 'USD') return 1
+  return Math.max(Number(exchangeRate) || 0, 0)
+}
+
+export function resolveFactoryUnitCostUsd(item, currency, exchangeRate) {
+  const hasSaved = item?.factory_unit_cost_usd != null && Number(item.factory_unit_cost_usd) > 0
+  if (hasSaved) return Number(item.factory_unit_cost_usd)
+  const original = Math.max(Number(item?.korean_unit_cost ?? item?.factory_unit_cost_original) || 0, 0)
+  return convertToUsd(original, currency || 'KRW', exchangeRate)
+}
+
+export function calcPoUsdTotalsFromItems(items, po) {
+  const currency = po?.currency || 'KRW'
+  const exchangeRate = resolveExchangeRate(currency, po?.exchange_rate)
+  const purchaseType = resolvePurchaseType(po, items)
+  let productCostUsd = 0
+  let commissionUsd = 0
+  for (const raw of items || []) {
+    const line = calcLineItem(raw, purchaseType, currency, exchangeRate)
+    productCostUsd += line.product_cost_usd
+    if (isMiddlemanPurchaseType(purchaseType)) {
+      commissionUsd += line.commission_total_usd
+    }
+  }
+  return { productCostUsd, commissionUsd, purchaseType, currency, exchangeRate }
+}
+
+export function convertToUsd(amount, currency, exchangeRate) {
+  const value = Number(amount) || 0
+  if (currency === 'USD') return value
+  const rate = resolveExchangeRate(currency, exchangeRate)
+  if (rate <= 0) return 0
+  return value / rate
+}
+
+export function factoryUnitCostLabel(currency) {
+  return currency === 'USD' ? 'Factory Unit Cost (USD)' : `Factory Unit Cost (${currency || 'KRW'})`
+}
+
+export function factoryProductCostLabel(currency) {
+  return currency === 'USD' ? 'Factory Product Cost (USD)' : `Factory Product Cost (${currency || 'KRW'})`
+}
+
+export function calcLineItem(raw, purchaseType, currency = 'KRW', exchangeRate = 1) {
   const orderQty = Math.max(Number(raw.order_qty) || 0, 0)
-  const factoryUnitCost = Math.max(Number(raw.korean_unit_cost) || 0, 0)
-  const isMiddleman = purchaseType === 'middleman'
+  const curr = currency || 'KRW'
+  const rate = resolveExchangeRate(curr, exchangeRate)
+  const factoryUnitOriginal = Math.max(Number(raw.korean_unit_cost) || 0, 0)
+  const hasSavedUsd = raw.factory_unit_cost_usd != null && raw.factory_unit_cost_usd !== ''
+  const factoryUnitUsd = hasSavedUsd
+    ? Math.max(Number(raw.factory_unit_cost_usd) || 0, 0)
+    : convertToUsd(factoryUnitOriginal, curr, rate)
+  const isMiddleman = isMiddlemanPurchaseType(purchaseType)
   const commissionPercent = isMiddleman ? Math.max(Number(raw.commission_percent) || 0, 0) : 0
   const receivedQty = Math.max(Number(raw.received_qty) || 0, 0)
-  const commissionPerUnit = factoryUnitCost * commissionPercent / 100
-  const productCost = orderQty * factoryUnitCost
-  const commissionTotal = orderQty * commissionPerUnit
-  const totalLineCost = productCost + commissionTotal
+  const commissionPerUnitUsd = isMiddleman ? factoryUnitUsd * commissionPercent / 100 : 0
+  const commissionPerUnitOriginal = isMiddleman ? factoryUnitOriginal * commissionPercent / 100 : 0
+  const productCostOriginal = orderQty * factoryUnitOriginal
+  const productCostUsd = orderQty * factoryUnitUsd
+  const commissionTotalUsd = orderQty * commissionPerUnitUsd
+  const commissionTotalOriginal = orderQty * commissionPerUnitOriginal
+  const totalLineCostUsd = productCostUsd + commissionTotalUsd
   const remainingQty = Math.max(orderQty - receivedQty, 0)
   return {
     ...raw,
     order_qty: orderQty,
-    korean_unit_cost: factoryUnitCost,
-    factory_unit_cost: factoryUnitCost,
+    korean_unit_cost: factoryUnitOriginal,
+    factory_unit_cost: factoryUnitOriginal,
+    factory_unit_cost_original: factoryUnitOriginal,
+    factory_unit_cost_usd: factoryUnitUsd,
     commission_percent: commissionPercent,
-    commission_per_unit: commissionPerUnit,
-    product_cost: productCost,
-    commission_total: commissionTotal,
-    total_line_cost: totalLineCost,
+    commission_per_unit: commissionPerUnitUsd,
+    commission_per_unit_original: commissionPerUnitOriginal,
+    commission_per_unit_usd: commissionPerUnitUsd,
+    product_cost: productCostOriginal,
+    product_cost_usd: productCostUsd,
+    commission_total: commissionTotalUsd,
+    commission_total_original: commissionTotalOriginal,
+    commission_total_usd: commissionTotalUsd,
+    total_line_cost: totalLineCostUsd,
+    total_line_cost_usd: totalLineCostUsd,
     received_qty: receivedQty,
     remaining_qty: remainingQty,
   }
@@ -80,32 +150,41 @@ export function calcLineItem(raw, purchaseType) {
 
 export function calcPoTotals(header, lines, receives) {
   const purchaseType = resolvePurchaseType(header, lines)
-  const computed = (lines || []).map(l => calcLineItem(l, purchaseType))
+  const currency = header.currency || 'KRW'
+  const exchangeRate = resolveExchangeRate(currency, header.exchange_rate)
+  const computed = (lines || []).map(l => calcLineItem(l, purchaseType, currency, exchangeRate))
   const totalOrderedUnits = computed.reduce((s, l) => s + l.order_qty, 0)
   const totalProductCost = computed.reduce((s, l) => s + l.product_cost, 0)
-  const totalCommission = purchaseType === 'middleman'
-    ? computed.reduce((s, l) => s + l.commission_total, 0)
+  const totalProductCostUsd = computed.reduce((s, l) => s + l.product_cost_usd, 0)
+  const totalCommissionUsd = isMiddlemanPurchaseType(purchaseType)
+    ? computed.reduce((s, l) => s + l.commission_total_usd, 0)
+    : 0
+  const totalCommissionOriginal = isMiddlemanPurchaseType(purchaseType)
+    ? computed.reduce((s, l) => s + l.commission_total_original, 0)
     : 0
   const receivedShipping = sumReceiveCosts(receives).shippingCost
   const receivedOther = sumReceiveCosts(receives).otherCost
   const shippingCost = receivedShipping || Math.max(Number(header.shipping_cost) || 0, 0)
   const otherCost = receivedOther || Math.max(Number(header.other_cost) || 0, 0)
-  const grandTotal = totalProductCost + totalCommission + shippingCost + otherCost
-  const totalPurchaseCost = grandTotal
-  const currency = header.currency || 'KRW'
-  const exchangeRate = Math.max(Number(header.exchange_rate) || 1, 0.000001)
-  const estimatedGrandTotalUsd = currency === 'USD' ? grandTotal : grandTotal / exchangeRate
+  const totalPurchaseCostUsd = totalProductCostUsd + totalCommissionUsd + shippingCost + otherCost
+  const grandTotalOriginal = totalProductCost + totalCommissionOriginal + (currency === 'USD' ? shippingCost + otherCost : 0)
+  const grandTotal = totalPurchaseCostUsd
   return {
     lines: computed,
     purchaseType,
     totalOrderedUnits,
     totalProductCost,
-    totalCommission,
+    totalProductCostUsd,
+    totalCommission: totalCommissionUsd,
+    totalCommissionOriginal,
+    totalCommissionUsd,
     shippingCost,
     otherCost,
     grandTotal,
-    totalPurchaseCost,
-    estimatedGrandTotalUsd,
+    grandTotalOriginal,
+    totalPurchaseCost: totalPurchaseCostUsd,
+    totalPurchaseCostUsd,
+    estimatedGrandTotalUsd: totalPurchaseCostUsd,
     currency,
     exchangeRate,
   }
@@ -120,28 +199,30 @@ export function sumReceiveCosts(receives) {
 }
 
 export function allocateReceiveCosts(receiveLines, shippingCost, otherCost, purchaseType = 'direct') {
-  const isMiddleman = purchaseType === 'middleman'
+  const isMiddleman = isMiddlemanPurchaseType(purchaseType)
   const active = (receiveLines || []).filter(l => Number(l.receive_now) > 0)
   const totalReceivedValue = active.reduce(
-    (s, l) => s + Number(l.receive_now) * Number(l.factory_unit_cost ?? l.korean_unit_cost ?? 0),
+    (s, l) => s + Number(l.receive_now) * Number(l.factory_unit_cost_usd ?? l.factory_unit_cost ?? 0),
     0,
   ) || 1
   return active.map(line => {
     const receiveQty = Math.max(Number(line.receive_now) || 0, 0)
-    const factoryUnit = Math.max(Number(line.factory_unit_cost ?? line.korean_unit_cost) || 0, 0)
-    const itemValue = receiveQty * factoryUnit
+    const factoryUnitUsd = Math.max(Number(line.factory_unit_cost_usd ?? line.factory_unit_cost) || 0, 0)
+    const itemValue = receiveQty * factoryUnitUsd
     const share = itemValue / totalReceivedValue
     const shippingAllocation = shippingCost * share
     const otherCostAllocation = otherCost * share
-    const commissionPerUnit = isMiddleman ? Math.max(Number(line.commission_per_unit) || 0, 0) : 0
+    const commissionPerUnit = isMiddleman ? Math.max(Number(line.commission_per_unit_usd ?? line.commission_per_unit) || 0, 0) : 0
     const shippingPerUnit = receiveQty > 0 ? shippingAllocation / receiveQty : 0
     const otherPerUnit = receiveQty > 0 ? otherCostAllocation / receiveQty : 0
-    const landedUnitCost = factoryUnit + commissionPerUnit + shippingPerUnit + otherPerUnit
+    const landedUnitCost = factoryUnitUsd + commissionPerUnit + shippingPerUnit + otherPerUnit
     return {
       ...line,
       receive_now: receiveQty,
-      factory_unit_cost: factoryUnit,
+      factory_unit_cost: factoryUnitUsd,
+      factory_unit_cost_usd: factoryUnitUsd,
       commission_per_unit: commissionPerUnit,
+      commission_per_unit_usd: commissionPerUnit,
       shipping_allocation: shippingAllocation,
       other_cost_allocation: otherCostAllocation,
       landed_unit_cost: landedUnitCost,
@@ -160,18 +241,18 @@ export function calcWeightedBuyingPrice(oldQty, oldBuyingPrice, receiveQty, land
   return ((oq * ob) + (rq * landed)) / (oq + rq)
 }
 
-export function allocateLineCosts(lines, shippingCost, otherCost, purchaseType = 'direct') {
-  const isMiddleman = purchaseType === 'middleman'
-  const computed = (lines || []).map(l => calcLineItem(l, purchaseType))
-  const totalProductCost = computed.reduce((s, l) => s + l.product_cost, 0) || 1
+export function allocateLineCosts(lines, shippingCost, otherCost, purchaseType = 'direct', currency = 'KRW', exchangeRate = 1) {
+  const isMiddleman = isMiddlemanPurchaseType(purchaseType)
+  const computed = (lines || []).map(l => calcLineItem(l, purchaseType, currency, exchangeRate))
+  const totalProductCostUsd = computed.reduce((s, l) => s + l.product_cost_usd, 0) || 1
   return computed.map(line => {
-    const share = line.product_cost / totalProductCost
+    const share = line.product_cost_usd / totalProductCostUsd
     const shippingAllocation = shippingCost * share
     const otherCostAllocation = otherCost * share
-    const commissionPerUnit = isMiddleman ? line.commission_per_unit : 0
+    const commissionPerUnit = isMiddleman ? line.commission_per_unit_usd : 0
     const shippingPerUnit = line.order_qty > 0 ? shippingAllocation / line.order_qty : 0
     const otherPerUnit = line.order_qty > 0 ? otherCostAllocation / line.order_qty : 0
-    const finalUnitCost = line.factory_unit_cost + commissionPerUnit + shippingPerUnit + otherPerUnit
+    const finalUnitCost = line.factory_unit_cost_usd + commissionPerUnit + shippingPerUnit + otherPerUnit
     const finalLineCost = finalUnitCost * line.order_qty
     return {
       ...line,
@@ -187,16 +268,20 @@ export function allocateLineCosts(lines, shippingCost, otherCost, purchaseType =
 
 export function validatePoSave(header, lines) {
   const purchaseType = header.purchase_type || 'direct'
+  const currency = header.currency || 'KRW'
   if (!String(header.supplier || '').trim()) return 'Supplier is required.'
-  if (purchaseType === 'middleman' && !String(header.middleman_name || '').trim()) {
+  if (isMiddlemanPurchaseType(purchaseType) && !String(header.middleman_name || '').trim()) {
     return 'Middleman Name is required for Through Middleman purchase orders.'
+  }
+  if (currency !== 'USD' && resolveExchangeRate(currency, header.exchange_rate) <= 0) {
+    return 'Exchange Rate must be greater than 0.'
   }
   const computed = calcPoTotals(header, lines)
   if (!computed.lines.length) return 'Add at least one product line.'
   for (const line of computed.lines) {
     if (line.order_qty < 0) return 'Quantity cannot be negative.'
-    if (line.factory_unit_cost < 0) return 'Factory Unit Cost cannot be negative.'
-    if (purchaseType === 'middleman' && line.commission_percent < 0) {
+    if (line.factory_unit_cost_original < 0) return 'Factory Unit Cost cannot be negative.'
+    if (isMiddlemanPurchaseType(purchaseType) && line.commission_percent < 0) {
       return 'Commission Percent cannot be negative.'
     }
     if (line.order_qty <= 0) return 'Each product line must have Order Qty greater than 0.'
@@ -204,42 +289,68 @@ export function validatePoSave(header, lines) {
   return ''
 }
 
+export function validateReceiveExchangeRate(po) {
+  const currency = po?.currency || 'KRW'
+  if (currency === 'USD') return ''
+  if (resolveExchangeRate(currency, po?.exchange_rate) <= 0) {
+    return 'Exchange Rate must be greater than 0. Edit the purchase order and set a valid exchange rate before receiving inventory.'
+  }
+  return ''
+}
+
 export function normalizePoSavePayload(header, lines, existingPo) {
   const purchaseType = header.purchase_type || 'direct'
+  const currency = header.currency || 'KRW'
   const accumulatedShipping = Number(existingPo?.shipping_cost) || 0
   const accumulatedOther = Number(existingPo?.other_cost) || 0
   const totals = calcPoTotals(
-    { ...header, purchase_type: purchaseType, shipping_cost: accumulatedShipping, other_cost: accumulatedOther },
+    {
+      ...header,
+      purchase_type: purchaseType,
+      exchange_rate: currency === 'USD' ? 1 : header.exchange_rate,
+      shipping_cost: accumulatedShipping,
+      other_cost: accumulatedOther,
+    },
     lines,
     existingPo?.receives,
   )
   const normalizedLines = totals.lines.map(line => ({
     ...line,
-    commission_percent: purchaseType === 'middleman' ? line.commission_percent : 0,
-    commission_per_unit: purchaseType === 'middleman' ? line.commission_per_unit : 0,
-    commission_total: purchaseType === 'middleman' ? line.commission_total : 0,
-    total_line_cost: purchaseType === 'middleman'
-      ? line.product_cost + line.commission_total
-      : line.product_cost,
+    commission_percent: isMiddlemanPurchaseType(purchaseType) ? line.commission_percent : 0,
+    commission_per_unit: isMiddlemanPurchaseType(purchaseType) ? line.commission_per_unit_usd : 0,
+    commission_per_unit_usd: isMiddlemanPurchaseType(purchaseType) ? line.commission_per_unit_usd : 0,
+    commission_total: isMiddlemanPurchaseType(purchaseType) ? line.commission_total_usd : 0,
+    commission_total_usd: isMiddlemanPurchaseType(purchaseType) ? line.commission_total_usd : 0,
+    total_line_cost: isMiddlemanPurchaseType(purchaseType)
+      ? line.product_cost_usd + line.commission_total_usd
+      : line.product_cost_usd,
+    total_line_cost_usd: isMiddlemanPurchaseType(purchaseType)
+      ? line.product_cost_usd + line.commission_total_usd
+      : line.product_cost_usd,
   }))
-  const grandTotal = totals.totalProductCost + totals.totalCommission + accumulatedShipping + accumulatedOther
+  const grandTotalUsd = totals.totalProductCostUsd + totals.totalCommissionUsd + accumulatedShipping + accumulatedOther
   return {
     header: {
       ...header,
       purchase_type: purchaseType,
-      middleman_name: purchaseType === 'middleman' ? (header.middleman_name || '') : '',
+      middleman_name: isMiddlemanPurchaseType(purchaseType) ? (header.middleman_name || '') : '',
+      exchange_rate: currency === 'USD' ? 1 : resolveExchangeRate(currency, header.exchange_rate),
       shipping_cost: accumulatedShipping,
       other_cost: accumulatedOther,
-      total_commission: totals.totalCommission,
-      grand_total: grandTotal,
+      total_product_cost: totals.totalProductCost,
+      total_commission: totals.totalCommissionUsd,
+      total_product_cost_usd: totals.totalProductCostUsd,
+      total_purchase_cost_usd: grandTotalUsd,
+      grand_total: grandTotalUsd,
     },
     lines: normalizedLines,
     totals: {
       ...totals,
       shippingCost: accumulatedShipping,
       otherCost: accumulatedOther,
-      grandTotal,
-      totalPurchaseCost: grandTotal,
+      grandTotal: grandTotalUsd,
+      totalPurchaseCost: grandTotalUsd,
+      totalPurchaseCostUsd: grandTotalUsd,
     },
   }
 }
@@ -284,20 +395,29 @@ export function formatPoMoney(amount, currency) {
   return currency === 'USD' ? formatUsd(amount) : formatKrw(amount)
 }
 
-export function commissionBalance(po) {
-  if (!isMiddlemanPo(po)) return 0
-  const due = Number(po?.total_commission) || 0
+export function commissionBalance(po, items) {
+  if (!isMiddlemanPo(po, items)) return 0
+  const due = commissionAmountDue(po, items)
   const paid = Number(po?.commission_amount_paid) || 0
   return Math.max(due - paid, 0)
 }
 
-export function commissionAmountDue(po) {
-  return isMiddlemanPo(po) ? Number(po?.total_commission) || 0 : 0
+export function commissionAmountDue(po, items) {
+  if (!isMiddlemanPo(po, items)) return 0
+  if (items?.length) {
+    const currency = po?.currency || 'KRW'
+    const rate = resolveExchangeRate(currency, po?.exchange_rate)
+    return items.reduce((s, raw) => {
+      const line = calcLineItem(raw, 'middleman', currency, rate)
+      return s + line.commission_total_usd
+    }, 0)
+  }
+  return Number(po?.total_commission) || 0
 }
 
-export function deriveCommissionPaymentStatus(po) {
-  if (!isMiddlemanPo(po)) return 'Paid'
-  const due = commissionAmountDue(po)
+export function deriveCommissionPaymentStatus(po, items) {
+  if (!isMiddlemanPo(po, items)) return 'Paid'
+  const due = commissionAmountDue(po, items)
   const paid = Number(po?.commission_amount_paid) || 0
   if (due <= 0) return 'Paid'
   if (paid <= 0) return 'Unpaid'
@@ -329,7 +449,9 @@ export function nextReceiveNumber(receives, poNumber) {
   return `${poNumber || 'PO'}-R${String(max + 1).padStart(2, '0')}`
 }
 
-export function validateReceive(header, lines, items) {
+export function validateReceive(header, lines, items, po) {
+  const exchangeError = validateReceiveExchangeRate(po)
+  if (exchangeError) return exchangeError
   const payload = (lines || []).filter(l => Number(l.receive_now) > 0)
   if (!payload.length) return 'At least one item must be received.'
   if (Math.max(Number(header.shipping_cost) || 0, 0) < 0) return 'Shipping Cost cannot be negative.'
@@ -432,7 +554,7 @@ export function poSummaryStats(purchaseOrders, purchaseOrderItems) {
   const openItems = (purchaseOrderItems || []).filter(i => openPoIds.has(String(i.purchase_order_id)))
   return {
     openCount: openPos.length,
-    totalOrderedAmount: openPos.reduce((s, po) => s + Number(po.grand_total || 0), 0),
+    totalOrderedAmount: openPos.reduce((s, po) => s + Number(po.total_purchase_cost_usd ?? po.grand_total) || 0, 0),
     incomingUnits: openItems.reduce((s, l) => s + Math.max(Number(l.order_qty || 0) - Number(l.received_qty || 0), 0), 0),
   }
 }
@@ -531,7 +653,7 @@ export function buildSupplierCsvRows(po, lines) {
     line.product_name || line.product_sku,
     line.product_sku,
     line.order_qty,
-    line.factory_unit_cost,
+    line.factory_unit_cost_original ?? line.factory_unit_cost,
     line.product_cost,
     po.eta,
     po.notes,
@@ -605,10 +727,12 @@ export function buildInternalCsvRows(po, summary) {
   rows.push([
     'TOTALS', po.po_number, '', '', '', '', '', '', '', '', '', '',
     totals.totalProductCost,
-    totals.totalCommission,
+    totals.totalProductCostUsd,
+    totals.exchangeRate,
+    totals.totalCommissionUsd,
     totals.shippingCost,
     totals.otherCost,
-    totals.grandTotal,
+    totals.totalPurchaseCostUsd,
   ])
   return rows
 }
@@ -628,10 +752,10 @@ export function poReportSummary(purchaseOrders, purchaseOrderItems) {
       purchase_type: purchaseTypeLabel(type),
       total_units: Number(po.total_ordered_units) || 0,
       product_cost: Number(po.total_product_cost) || 0,
-      commission: type === 'middleman' ? Number(po.total_commission) || 0 : 0,
+      commission: isMiddlemanPurchaseType(type) ? Number(po.total_commission) || 0 : 0,
       shipping: Number(po.shipping_cost) || 0,
       grand_total: Number(po.grand_total) || 0,
-      total_purchase_cost: Number(po.grand_total) || 0,
+      total_purchase_cost: Number(po.total_purchase_cost_usd ?? po.grand_total) || 0,
       status: po.status,
       currency: po.currency,
     }
@@ -646,7 +770,7 @@ export function middlemanCommissionReport(purchaseOrders, purchaseOrderItems, da
     if (dateFrom && String(po.order_date || '') < dateFrom) continue
     if (dateTo && String(po.order_date || '') > dateTo) continue
     const purchaseType = resolvePurchaseType(po, items)
-    for (const line of items.map(l => calcLineItem(l, purchaseType))) {
+    for (const line of items.map(l => calcLineItem(l, purchaseType, po.currency, po.exchange_rate))) {
       rows.push({
         id: `${po.id}-${line.id}`,
         date: po.order_date,
@@ -655,9 +779,9 @@ export function middlemanCommissionReport(purchaseOrders, purchaseOrderItems, da
         product: line.product_sku || line.product_name,
         qty: line.order_qty,
         commission_percent: line.commission_percent,
-        commission_total: line.commission_total,
+        commission_total: line.commission_total_usd,
         po_status: po.status,
-        payment_status: po.commission_payment_status || deriveCommissionPaymentStatus(po),
+        payment_status: po.commission_payment_status || deriveCommissionPaymentStatus(po, items),
       })
     }
   }

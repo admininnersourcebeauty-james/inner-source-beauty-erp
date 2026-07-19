@@ -26,7 +26,8 @@ import {
   nextPoNumber, calcPoTotals, derivePoStatus, newPoId, buildPoFromReorderItems,
   poSummaryStats, incomingInventoryAlerts, allocateReceiveCosts, calcLineItem,
   deriveCommissionPaymentStatus, normalizePoSavePayload, validatePoSave, validateReceive,
-  resolvePurchaseType, isMiddlemanPo, purchaseTypeLabel, calcWeightedBuyingPrice, nextReceiveNumber,
+  resolvePurchaseType, isMiddlemanPo, isMiddlemanPurchaseType, purchaseTypeLabel, calcWeightedBuyingPrice, nextReceiveNumber,
+  calcPoUsdTotalsFromItems,
 } from './purchaseOrders.js'
 import { PurchaseOrdersPage, PurchaseOrderReports } from './PurchaseOrdersUI.jsx'
 import './style.css'
@@ -437,7 +438,7 @@ function App() {
       purchase_type: totals.purchaseType || header.purchase_type || 'direct',
       order_date: toDbDate(header.order_date || today()),
       supplier: header.supplier || '',
-      middleman_name: totals.purchaseType === 'middleman' ? (header.middleman_name || '') : '',
+      middleman_name: isMiddlemanPurchaseType(totals.purchaseType) ? (header.middleman_name || '') : '',
       currency: header.currency || 'KRW',
       exchange_rate: totals.exchangeRate,
       shipping_cost: totals.shippingCost,
@@ -447,15 +448,17 @@ function App() {
       notes: header.notes || '',
       total_ordered_units: totals.totalOrderedUnits,
       total_product_cost: totals.totalProductCost,
-      total_commission: totals.totalCommission,
+      total_product_cost_usd: totals.totalProductCostUsd,
+      total_commission: totals.totalCommissionUsd,
+      total_purchase_cost_usd: totals.totalPurchaseCostUsd,
       grand_total: totals.grandTotal,
-      commission_payment_status: totals.purchaseType === 'middleman'
-        ? (header.commission_payment_status || deriveCommissionPaymentStatus({ ...header, total_commission: totals.totalCommission }))
+      commission_payment_status: isMiddlemanPurchaseType(totals.purchaseType)
+        ? (header.commission_payment_status || deriveCommissionPaymentStatus({ ...header, total_commission: totals.totalCommissionUsd }))
         : 'Paid',
-      commission_amount_paid: totals.purchaseType === 'middleman' ? Number(header.commission_amount_paid) || 0 : 0,
-      commission_payment_date: totals.purchaseType === 'middleman' ? header.commission_payment_date || null : null,
-      commission_payment_method: totals.purchaseType === 'middleman' ? header.commission_payment_method || '' : '',
-      commission_payment_note: totals.purchaseType === 'middleman' ? header.commission_payment_note || '' : '',
+      commission_amount_paid: isMiddlemanPurchaseType(totals.purchaseType) ? Number(header.commission_amount_paid) || 0 : 0,
+      commission_payment_date: isMiddlemanPurchaseType(totals.purchaseType) ? header.commission_payment_date || null : null,
+      commission_payment_method: isMiddlemanPurchaseType(totals.purchaseType) ? header.commission_payment_method || '' : '',
+      commission_payment_note: isMiddlemanPurchaseType(totals.purchaseType) ? header.commission_payment_note || '' : '',
       created_by: isNew ? createdBy : (header.created_by || createdBy),
       updated_at: new Date().toISOString(),
       ...(isNew ? { created_at: new Date().toISOString() } : {}),
@@ -471,12 +474,16 @@ function App() {
       product_name: line.product_name || line.product_sku || '',
       brand: line.brand || '',
       order_qty: line.order_qty,
-      korean_unit_cost: line.korean_unit_cost,
-      commission_percent: line.commission_percent,
-      commission_per_unit: line.commission_per_unit,
+      korean_unit_cost: line.factory_unit_cost_original ?? line.korean_unit_cost,
+      factory_unit_cost_usd: line.factory_unit_cost_usd,
       product_cost: line.product_cost,
-      commission_total: line.commission_total,
-      total_line_cost: line.total_line_cost,
+      product_cost_usd: line.product_cost_usd,
+      commission_percent: line.commission_percent,
+      commission_per_unit: line.commission_per_unit_usd ?? line.commission_per_unit,
+      commission_per_unit_usd: line.commission_per_unit_usd ?? line.commission_per_unit,
+      commission_total: line.commission_total_usd ?? line.commission_total,
+      commission_total_usd: line.commission_total_usd ?? line.commission_total,
+      total_line_cost: line.total_line_cost_usd ?? line.total_line_cost,
       received_qty: line.received_qty || 0,
       note: line.note || '',
       created_at: line.created_at || new Date().toISOString(),
@@ -537,7 +544,7 @@ function App() {
     const purchaseType = resolvePurchaseType(po, data.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId)))
     const poItems = data.purchase_order_items
       .filter(i => String(i.purchase_order_id) === String(poId))
-      .map(l => calcLineItem(l, purchaseType))
+      .map(l => calcLineItem(l, purchaseType, po.currency, po.exchange_rate))
     const lines = receiveHeader.lines || []
     const shippingCost = Math.max(Number(receiveHeader.shipping_cost) || 0, 0)
     const otherCost = Math.max(Number(receiveHeader.other_cost) || 0, 0)
@@ -545,6 +552,7 @@ function App() {
       { shipping_cost: shippingCost, other_cost: otherCost },
       lines,
       poItems,
+      po,
     )
     if (validationError) {
       setNotice(validationError)
@@ -656,10 +664,9 @@ function App() {
       const newStatus = derivePoStatus(updatedItems, po.status)
       const newShipping = (Number(po.shipping_cost) || 0) + shippingCost
       const newOther = (Number(po.other_cost) || 0) + otherCost
-      const newGrand = (Number(po.total_product_cost) || 0)
-        + (Number(po.total_commission) || 0)
-        + newShipping
-        + newOther
+      const allPoItems = data.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId))
+      const { productCostUsd, commissionUsd } = calcPoUsdTotalsFromItems(allPoItems, po)
+      const newGrand = productCostUsd + commissionUsd + newShipping + newOther
 
       setLocalData(p => ({
         ...p,
@@ -668,6 +675,8 @@ function App() {
           status: newStatus,
           shipping_cost: newShipping,
           other_cost: newOther,
+          total_product_cost_usd: productCostUsd,
+          total_purchase_cost_usd: newGrand,
           grand_total: newGrand,
           updated_at: new Date().toISOString(),
         } : x),

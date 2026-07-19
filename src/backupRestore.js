@@ -26,8 +26,8 @@ const TABLE_NUMERIC = {
   inventory: ['qty', 'buying_price', 'selling_price', 'cost', 'price', 'retail', 'low_stock', 'reorder_limit', 'shipping_cost'],
   orders: ['customer_id', 'inventory_id', 'qty', 'price', 'buying_price', 'profit', 'shipping', 'discount', 'total', 'shipping_cost', 'allocated_qty', 'backorder_qty', 'shipped_qty'],
   payments: ['customer_id', 'order_id', 'amount'],
-  purchase_orders: ['exchange_rate', 'shipping_cost', 'other_cost', 'total_ordered_units', 'total_product_cost', 'total_commission', 'grand_total', 'commission_amount_paid'],
-  purchase_order_items: ['inventory_id', 'order_qty', 'korean_unit_cost', 'commission_percent', 'commission_per_unit', 'product_cost', 'commission_total', 'total_line_cost', 'received_qty'],
+  purchase_orders: ['exchange_rate', 'shipping_cost', 'other_cost', 'total_ordered_units', 'total_product_cost', 'total_product_cost_usd', 'total_commission', 'grand_total', 'total_purchase_cost_usd', 'commission_amount_paid'],
+  purchase_order_items: ['inventory_id', 'order_qty', 'korean_unit_cost', 'factory_unit_cost_usd', 'product_cost_usd', 'commission_percent', 'commission_per_unit', 'commission_per_unit_usd', 'product_cost', 'commission_total', 'commission_total_usd', 'total_line_cost', 'received_qty'],
   purchase_order_receipts: ['inventory_id', 'received_qty', 'inventory_before', 'inventory_after', 'factory_unit_cost', 'commission_per_unit', 'shipping_allocation', 'other_cost_allocation', 'landed_unit_cost', 'buying_price_before', 'buying_price_after'],
   purchase_order_receives: ['shipping_cost', 'other_cost'],
 }

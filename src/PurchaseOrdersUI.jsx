@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react'
 import {
   PO_STATUSES, PO_FILTER_STATUSES, PO_CURRENCIES, PO_PURCHASE_TYPES,
   calcLineItem, calcPoTotals, allocateReceiveCosts, blankPoHeader, blankPoLine,
-  canCancelPo, canEditPo, canReceivePo, commissionAmountDue, commissionBalance,
-  deriveCommissionPaymentStatus, formatKrw, formatPoMoney,
+  canCancelPo, canEditPo, canReceivePo,
+  formatKrw, formatPoMoney,
   poItemsForOrder, poMatchesFilter, poMatchesSearch, receivedProgress,
   poSummaryStats, buildSupplierCsvRows, buildInternalCsvRows, downloadCsv,
   resolvePurchaseType, isMiddlemanPo, purchaseTypeLabel,
@@ -11,7 +11,9 @@ import {
   reportTotalsForCommission, reportTotalsForIncoming,
   internalCostSummary, poReceivesForOrder,
   factoryUnitCostLabel, factoryProductCostLabel, formatUsd,
-  MIDDLEMAN_COMMISSION_UNIT_LABEL, totalUnitCostLabel, migratePoLineCommissionToKrw,
+  MIDDLEMAN_COMMISSION_UNIT_LABEL, totalUnitCostLabel, preparePoFormLines,
+  COMMISSION_PAYMENT_METHODS, poCommissionPaymentsForOrder, commissionPaymentSummary,
+  blankCommissionPaymentEntry, validateCommissionPaymentEntry,
 } from './purchaseOrders.js'
 
 const today = () => new Date().toISOString().slice(0, 10)
@@ -205,25 +207,31 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
     purchase_type: header.purchase_type || initialType,
     order_date: header.order_date || today(),
   }))
-  const [rows, setRows] = useState(() => {
-    const initialLines = lines.length ? lines : [blankPoLine()]
-    const rate = header.exchange_rate || '1350'
-    return initialLines.map(line => migratePoLineCommissionToKrw(line, rate))
-  })
+  const [rows, setRows] = useState(() => preparePoFormLines(
+    lines.length ? lines : [blankPoLine()],
+    header.exchange_rate || '1350',
+  ))
   const isMiddleman = h.purchase_type === 'middleman'
   const totals = useMemo(() => calcPoTotals(h, rows), [h, rows])
 
   function setPurchaseType(type) {
     if (type === 'direct') {
       setH({ ...h, purchase_type: 'direct', middleman_name: '' })
-      setRows(prev => prev.map(r => ({ ...r, middleman_commission_unit_krw: '' })))
+      setRows(prev => prev.map(r => ({ ...r, middleman_commission_unit_krw: '', commission_percent: 0 })))
     } else {
       setH({ ...h, purchase_type: 'middleman' })
     }
   }
 
   function updateLine(idx, patch) {
-    setRows(prev => prev.map((r, i) => i === idx ? { ...r, ...patch } : r))
+    setRows(prev => prev.map((r, i) => {
+      if (i !== idx) return r
+      const next = { ...r, ...patch, commission_percent: 0 }
+      if ('middleman_commission_unit_krw' in patch) {
+        next.commission_percent = 0
+      }
+      return next
+    }))
   }
 
   function pickInventory(idx, invId) {
@@ -313,10 +321,20 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
                 <label>Brand<input value={line.brand} onChange={e => updateLine(idx, { brand: e.target.value })} /></label>
                 <label>Order Qty<input type="number" min="0" value={line.order_qty} onChange={e => updateLine(idx, { order_qty: e.target.value })} /></label>
                 <label>{factoryUnitCostLabel(h.currency)}<input type="number" min="0" step="1" value={line.korean_unit_cost} onChange={e => updateLine(idx, { korean_unit_cost: e.target.value })} /></label>
-                <label>Factory Unit Cost (USD)<span className="po-calc-value">{formatUsd(calc.factory_unit_cost_usd)}</span></label>
+                <label>Converted Unit Cost (USD)<span className="po-calc-value">{formatUsd(calc.factory_unit_cost_usd)}</span></label>
                 {isMiddleman && (
                   <>
-                    <label>{MIDDLEMAN_COMMISSION_UNIT_LABEL}<input type="number" min="0" step="1" placeholder="5000" value={line.middleman_commission_unit_krw ?? ''} onChange={e => updateLine(idx, { middleman_commission_unit_krw: e.target.value })} /></label>
+                    <label>{MIDDLEMAN_COMMISSION_UNIT_LABEL}
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="5000"
+                        name="middleman_commission_unit_krw"
+                        value={line.middleman_commission_unit_krw ?? ''}
+                        onChange={e => updateLine(idx, { middleman_commission_unit_krw: e.target.value, commission_percent: 0 })}
+                      />
+                    </label>
                     <label>Commission Per Unit (USD)<span className="po-calc-value">{formatUsd(calc.commission_per_unit_usd)}</span></label>
                   </>
                 )}
@@ -499,8 +517,129 @@ function InternalCostSheetDoc({ po, summary }) {
   )
 }
 
+function CommissionPaymentStatusBadge({ status }) {
+  const cls = String(status || 'unpaid').toLowerCase()
+  return <span className={`po-commission-status po-commission-status-${cls}`}>{status || 'Unpaid'}</span>
+}
+
+function CommissionPaymentPanel({
+  po, items, payments, isAdmin, canEdit, onAddPayment, onDeletePayment,
+}) {
+  const [entry, setEntry] = useState(() => ({ ...blankCommissionPaymentEntry(), payment_date: today() }))
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const summary = useMemo(() => commissionPaymentSummary(po, items, payments), [po, items, payments])
+
+  async function handleAddPayment(e) {
+    e.preventDefault()
+    setError('')
+    const validationError = validateCommissionPaymentEntry(entry)
+    if (validationError) { setError(validationError); return }
+    setBusy(true)
+    const err = await onAddPayment(po.id, entry)
+    setBusy(false)
+    if (err) { setError(err); return }
+    setEntry({ ...blankCommissionPaymentEntry(), payment_date: today() })
+  }
+
+  async function handleDeletePayment(paymentId) {
+    if (!confirm('Delete this commission payment record?')) return
+    setBusy(true)
+    const err = await onDeletePayment(paymentId)
+    setBusy(false)
+    if (err) setError(err)
+  }
+
+  return (
+    <div className="form-section po-commission-panel no-print">
+      <div className="po-commission-head">
+        <h3>Commission Payment</h3>
+        <p className="hint">Middleman: <b>{po.middleman_name || '—'}</b></p>
+      </div>
+
+      <div className="po-commission-section">
+        <h4>Commission Summary</h4>
+        <div className="cards po-commission-summary-cards">
+          <div className="card"><p>Total Commission Due (USD)</p><b>{formatUsd(summary.due)}</b></div>
+          <div className="card"><p>Total Paid (USD)</p><b>{formatUsd(summary.paid)}</b></div>
+          <div className="card"><p>Remaining Balance (USD)</p><b>{formatUsd(summary.balance)}</b></div>
+          <div className="card"><p>Payment Status</p><b><CommissionPaymentStatusBadge status={summary.status} /></b></div>
+        </div>
+      </div>
+
+      {isAdmin && canEdit && (
+        <div className="po-commission-section">
+          <h4>Add Payment</h4>
+          <form className="po-commission-add-form" onSubmit={handleAddPayment}>
+            <div className="form-grid po-commission-add-grid">
+              <label>Amount Paid (USD)
+                <input type="number" min="0" step="0.01" value={entry.amount}
+                  onChange={e => setEntry({ ...entry, amount: e.target.value })} />
+              </label>
+              <label>Payment Date
+                <input type="date" value={entry.payment_date}
+                  onChange={e => setEntry({ ...entry, payment_date: e.target.value })} />
+              </label>
+              <label>Payment Method
+                <select value={entry.payment_method} onChange={e => setEntry({ ...entry, payment_method: e.target.value })}>
+                  {COMMISSION_PAYMENT_METHODS.map(m => <option key={m}>{m}</option>)}
+                </select>
+              </label>
+              <label>Reference Number
+                <input value={entry.reference_number} onChange={e => setEntry({ ...entry, reference_number: e.target.value })} />
+              </label>
+              <label className="po-notes-field">Notes
+                <textarea rows={2} value={entry.notes} onChange={e => setEntry({ ...entry, notes: e.target.value })} />
+              </label>
+            </div>
+            {error && <p className="hint po-receive-error">{error}</p>}
+            <button type="submit" disabled={busy}>Add Payment</button>
+          </form>
+        </div>
+      )}
+
+      <div className="po-commission-section">
+        <h4>Payment History</h4>
+        {payments.length === 0 ? (
+          <p className="hint">No commission payments recorded yet.</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th><th>Amount</th><th>Method</th><th>Reference</th><th>Notes</th><th>Created By</th>
+                  {isAdmin && canEdit && <th></th>}
+                </tr>
+              </thead>
+              <tbody>
+                {payments.map(payment => (
+                  <tr key={payment.id}>
+                    <td>{String(payment.payment_date || '').slice(0, 10) || '—'}</td>
+                    <td>{formatUsd(payment.amount)}</td>
+                    <td>{payment.payment_method || '—'}</td>
+                    <td>{payment.reference_number || '—'}</td>
+                    <td>{payment.notes || '—'}</td>
+                    <td>{payment.created_by || '—'}</td>
+                    {isAdmin && canEdit && (
+                      <td>
+                        <button type="button" className="danger soft link-cell" disabled={busy}
+                          onClick={() => handleDeletePayment(payment.id)}>Delete</button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function PurchaseOrderDetail({
-  po, items, receipts, receives, isAdmin, onBack, onEdit, onReceive, onCancel, onUpdateCommission,
+  po, items, receipts, receives, commissionPayments, isAdmin, onBack, onEdit, onReceive, onCancel,
+  onAddCommissionPayment, onDeleteCommissionPayment,
 }) {
   const [showInternalDetails, setShowInternalDetails] = useState(false)
   const [printView, setPrintView] = useState('')
@@ -510,25 +649,7 @@ function PurchaseOrderDetail({
   const summary = internalCostSummary(po, items, receives, receipts)
   const { totals, history } = summary
   const lines = totals.lines || []
-  const locked = po.status === 'Received' || po.status === 'Cancelled'
-  const [commPay, setCommPay] = useState({
-    commission_amount_paid: po.commission_amount_paid || '',
-    commission_payment_date: po.commission_payment_date || today(),
-    commission_payment_method: po.commission_payment_method || '',
-    commission_payment_note: po.commission_payment_note || '',
-  })
-
-  function saveCommissionPayment() {
-    onUpdateCommission(po.id, {
-      ...commPay,
-      commission_amount_paid: Number(commPay.commission_amount_paid) || 0,
-      commission_payment_status: deriveCommissionPaymentStatus({
-        ...po,
-        purchase_type: purchaseType,
-        commission_amount_paid: Number(commPay.commission_amount_paid) || 0,
-      }, items),
-    })
-  }
+  const canEditCommissionPayments = isAdmin && po.status !== 'Cancelled'
 
   function exportSupplierCsv() {
     downloadCsv(
@@ -657,22 +778,16 @@ function PurchaseOrderDetail({
         <ReceiveHistoryDetailModal receive={historyDetail} po={po} onClose={() => setHistoryDetail(null)} />
       )}
 
-      {isAdmin && isMiddleman && !locked && (
-        <div className="form-section po-commission-payment no-print">
-          <h3>Commission Payment Tracking</h3>
-          <p><b>Middleman Name:</b> {po.middleman_name || '—'}</p>
-          <p><strong>Total Commission (USD):</strong> {formatUsd(commissionAmountDue(po, items))}</p>
-          <p><strong>Amount Paid (USD):</strong> {formatUsd(Number(commPay.commission_amount_paid) || 0)}</p>
-          <p><strong>Remaining Commission Balance (USD):</strong> {formatUsd(commissionBalance({ ...po, ...commPay, purchase_type: purchaseType }, items))}</p>
-          <p><strong>Payment Status:</strong> {po.commission_payment_status || deriveCommissionPaymentStatus({ ...po, purchase_type: purchaseType }, items)}</p>
-          <div className="form-grid">
-            <label>Amount Paid<input type="number" min="0" value={commPay.commission_amount_paid} onChange={e => setCommPay({ ...commPay, commission_amount_paid: e.target.value })} /></label>
-            <label>Payment Date<input type="date" value={commPay.commission_payment_date} onChange={e => setCommPay({ ...commPay, commission_payment_date: e.target.value })} /></label>
-            <label>Payment Method<input value={commPay.commission_payment_method} onChange={e => setCommPay({ ...commPay, commission_payment_method: e.target.value })} /></label>
-            <label>Payment Note<input value={commPay.commission_payment_note} onChange={e => setCommPay({ ...commPay, commission_payment_note: e.target.value })} /></label>
-          </div>
-          <button type="button" onClick={saveCommissionPayment}>Save Commission Payment</button>
-        </div>
+      {isMiddleman && (
+        <CommissionPaymentPanel
+          po={po}
+          items={items}
+          payments={commissionPayments}
+          isAdmin={isAdmin}
+          canEdit={canEditCommissionPayments}
+          onAddPayment={onAddCommissionPayment}
+          onDeletePayment={onDeleteCommissionPayment}
+        />
       )}
     </div>
   )
@@ -681,7 +796,7 @@ function PurchaseOrderDetail({
 export function PurchaseOrdersPage({
   data, role, isAdmin, selectedPoId, clearSelection, draftPoSeed,
   clearDraftPoSeed, nextPoNumber, onSavePo, onReceivePo, onCancelPo,
-  onUpdateCommissionPayment,
+  onAddCommissionPayment, onDeleteCommissionPayment,
 }) {
   const [view, setView] = useState('list')
   const [filter, setFilter] = useState('All')
@@ -695,6 +810,7 @@ export function PurchaseOrdersPage({
   const allItems = data.purchase_order_items || []
   const allReceipts = data.purchase_order_receipts || []
   const allReceives = data.purchase_order_receives || []
+  const allCommissionPayments = data.purchase_order_commission_payments || []
   const stats = poSummaryStats(pos, allItems)
 
   useEffect(() => {
@@ -769,6 +885,7 @@ export function PurchaseOrdersPage({
     const items = poItemsForOrder(allItems, detailPo.id)
     const receipts = allReceipts.filter(r => String(r.purchase_order_id) === String(detailPo.id))
     const receives = poReceivesForOrder(allReceives, detailPo.id)
+    const commissionPayments = poCommissionPaymentsForOrder(allCommissionPayments, detailPo.id)
     return (
       <>
         <PurchaseOrderDetail
@@ -776,12 +893,14 @@ export function PurchaseOrdersPage({
           items={items}
           receipts={receipts}
           receives={receives}
+          commissionPayments={commissionPayments}
           isAdmin={isAdmin}
           onBack={() => { setView('list'); setDetailId('') }}
           onEdit={id => { setEditingId(id); setView('edit') }}
           onReceive={id => setReceiveId(id)}
           onCancel={async id => { if (confirm('Cancel this purchase order?')) await onCancelPo(id); setView('list') }}
-          onUpdateCommission={onUpdateCommissionPayment}
+          onAddCommissionPayment={onAddCommissionPayment}
+          onDeleteCommissionPayment={onDeleteCommissionPayment}
         />
         {receiveId && receivePo && (
           <ReceiveInventoryModal

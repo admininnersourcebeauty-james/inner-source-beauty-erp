@@ -1,7 +1,7 @@
 import JSZip from 'jszip'
 
 export const CORE_BACKUP_TABLES = ['customers', 'inventory', 'orders', 'payments']
-export const PO_BACKUP_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts', 'purchase_order_receives']
+export const PO_BACKUP_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts', 'purchase_order_receives', 'purchase_order_commission_payments']
 export const BACKUP_TABLES = [...CORE_BACKUP_TABLES, ...PO_BACKUP_TABLES]
 export const BACKUP_VERSION = 2
 export const APP_NAME = 'INNER SOURCE BEAUTY ERP'
@@ -19,6 +19,7 @@ const TABLE_REQUIRED = {
   purchase_order_items: ['id', 'purchase_order_id'],
   purchase_order_receipts: ['id', 'purchase_order_id', 'purchase_order_item_id'],
   purchase_order_receives: ['id', 'purchase_order_id', 'receive_number'],
+  purchase_order_commission_payments: ['id', 'purchase_order_id'],
 }
 
 const TABLE_NUMERIC = {
@@ -30,6 +31,7 @@ const TABLE_NUMERIC = {
   purchase_order_items: ['inventory_id', 'order_qty', 'korean_unit_cost', 'factory_unit_cost_usd', 'product_cost_usd', 'middleman_commission_unit_krw', 'middleman_commission_unit_usd', 'middleman_commission_total_krw', 'middleman_commission_total_usd', 'total_unit_cost_krw', 'total_unit_cost_usd', 'commission_percent', 'commission_per_unit', 'commission_per_unit_usd', 'product_cost', 'commission_total', 'commission_total_usd', 'total_line_cost', 'received_qty'],
   purchase_order_receipts: ['inventory_id', 'received_qty', 'inventory_before', 'inventory_after', 'factory_unit_cost', 'commission_per_unit', 'shipping_allocation', 'other_cost_allocation', 'landed_unit_cost', 'buying_price_before', 'buying_price_after'],
   purchase_order_receives: ['shipping_cost', 'other_cost'],
+  purchase_order_commission_payments: ['amount'],
 }
 
 const TABLE_DATES = {
@@ -41,6 +43,7 @@ const TABLE_DATES = {
   purchase_order_items: ['created_at'],
   purchase_order_receipts: ['created_at', 'received_date'],
   purchase_order_receives: ['created_at', 'received_date'],
+  purchase_order_commission_payments: ['created_at', 'payment_date'],
 }
 
 export function backupZipFilename() {
@@ -231,6 +234,11 @@ export function validateRestoreRows(parsed, existingData = {}) {
         }
       }
       if (table === 'purchase_order_receives') {
+        if (row.purchase_order_id && !poIds.has(String(row.purchase_order_id))) {
+          errors.push({ table, rowNum, reason: `purchase_order_id ${row.purchase_order_id} not found.` })
+        }
+      }
+      if (table === 'purchase_order_commission_payments') {
         if (row.purchase_order_id && !poIds.has(String(row.purchase_order_id))) {
           errors.push({ table, rowNum, reason: `purchase_order_id ${row.purchase_order_id} not found.` })
         }

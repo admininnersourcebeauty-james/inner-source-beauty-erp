@@ -26,6 +26,7 @@ import {
   nextPoNumber, calcPoTotals, derivePoStatus, newPoId, buildPoFromReorderItems,
   poSummaryStats, incomingInventoryAlerts, allocateReceiveCosts, calcLineItem,
   deriveCommissionPaymentStatus, normalizePoSavePayload, validatePoSave, validateReceive,
+  poCommissionPaymentsForOrder, commissionPaymentSummary, validateCommissionPaymentEntry,
   resolvePurchaseType, isMiddlemanPo, isMiddlemanPurchaseType, purchaseTypeLabel, calcWeightedBuyingPrice, nextReceiveNumber,
   calcPoUsdTotalsFromItems,
 } from './purchaseOrders.js'
@@ -33,11 +34,12 @@ import { PurchaseOrdersPage, PurchaseOrderReports } from './PurchaseOrdersUI.jsx
 import './style.css'
 
 const CORE_TABLES = ['customers', 'inventory', 'orders', 'payments']
-const PO_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts', 'purchase_order_receives']
+const PO_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts', 'purchase_order_receives', 'purchase_order_commission_payments']
 const TABLES = [...CORE_TABLES, ...PO_TABLES]
 const EMPTY = {
   customers: [], inventory: [], orders: [], payments: [],
   purchase_orders: [], purchase_order_items: [], purchase_order_receipts: [], purchase_order_receives: [],
+  purchase_order_commission_payments: [],
 }
 const PAYMENT_METHODS = ['Zelle', 'Venmo', 'Cash', 'Credit Card', 'Check', 'ACH/Wire']
 const TERMS = ['COD', 'NET 15', 'NET 30', 'NET 45', 'NET 60']
@@ -150,7 +152,7 @@ function useLocalData() {
   const [data, setData] = useState(() => {
     try {
       const raw = JSON.parse(localStorage.getItem('isb_data_v2')) || {}
-      return { ...EMPTY, ...raw, purchase_orders: raw.purchase_orders || [], purchase_order_items: raw.purchase_order_items || [], purchase_order_receipts: raw.purchase_order_receipts || [], purchase_order_receives: raw.purchase_order_receives || [] }
+      return { ...EMPTY, ...raw, purchase_orders: raw.purchase_orders || [], purchase_order_items: raw.purchase_order_items || [], purchase_order_receipts: raw.purchase_order_receipts || [], purchase_order_receives: raw.purchase_order_receives || [], purchase_order_commission_payments: raw.purchase_order_commission_payments || [] }
     } catch { return EMPTY }
   })
   useEffect(() => localStorage.setItem('isb_data_v2', JSON.stringify(data)), [data])
@@ -484,7 +486,7 @@ function App() {
       middleman_commission_total_usd: line.middleman_commission_total_usd,
       total_unit_cost_krw: line.total_unit_cost_krw,
       total_unit_cost_usd: line.total_unit_cost_usd,
-      commission_percent: line.commission_percent,
+      commission_percent: 0,
       commission_per_unit: line.commission_per_unit_usd ?? line.commission_per_unit,
       commission_per_unit_usd: line.commission_per_unit_usd ?? line.commission_per_unit,
       commission_total: line.commission_total_usd ?? line.commission_total,
@@ -728,23 +730,105 @@ function App() {
     return ''
   }
 
-  async function updatePoCommissionPayment(poId, patch) {
-    if (role !== 'Admin') return
+  async function syncPoCommissionHeader(poId) {
+    const po = data.purchase_orders.find(p => String(p.id) === String(poId))
+    if (!po) return
+    const items = data.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId))
+    const payments = poCommissionPaymentsForOrder(data.purchase_order_commission_payments, poId)
+    const summary = commissionPaymentSummary(po, items, payments)
     const row = {
-      ...patch,
-      commission_payment_status: deriveCommissionPaymentStatus({ ...data.purchase_orders.find(p => String(p.id) === String(poId)), ...patch }),
+      commission_amount_paid: summary.paid,
+      commission_payment_status: summary.status,
       updated_at: new Date().toISOString(),
     }
     if (hasSupabaseConfig && session) {
       const { error } = await supabase.from('purchase_orders').update(row).eq('id', poId)
-      if (error) setNotice(error.message)
-      else await loadCloudData()
+      if (error) { setNotice(error.message); return error.message }
+      await loadCloudData()
     } else {
       setLocalData(p => ({
         ...p,
         purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? { ...x, ...row } : x),
       }))
     }
+    return ''
+  }
+
+  async function addPoCommissionPayment(poId, entry) {
+    if (role !== 'Admin') return 'Only administrators can record commission payments.'
+    const po = data.purchase_orders.find(p => String(p.id) === String(poId))
+    if (!po) return 'Purchase order not found.'
+    if (po.status === 'Cancelled') return 'Cannot add payments to a cancelled purchase order.'
+    const validationError = validateCommissionPaymentEntry(entry)
+    if (validationError) { setNotice(validationError); return validationError }
+
+    const paymentRow = {
+      id: newPoId(),
+      purchase_order_id: poId,
+      amount: Number(entry.amount) || 0,
+      payment_date: toDbDate(entry.payment_date),
+      payment_method: entry.payment_method || '',
+      reference_number: entry.reference_number || '',
+      notes: entry.notes || '',
+      created_by: session?.user?.email || profile.email || role || 'Admin',
+      created_at: new Date().toISOString(),
+    }
+
+    if (hasSupabaseConfig && session) {
+      const { error } = await supabase.from('purchase_order_commission_payments').insert(paymentRow)
+      if (error) { setNotice(error.message); return error.message }
+      await loadCloudData()
+      return syncPoCommissionHeader(poId)
+    }
+
+    setLocalData(p => {
+      const items = p.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId))
+      const nextPayments = [paymentRow, ...(p.purchase_order_commission_payments || [])]
+      const summary = commissionPaymentSummary(po, items, nextPayments)
+      return {
+        ...p,
+        purchase_order_commission_payments: nextPayments,
+        purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? {
+          ...x,
+          commission_amount_paid: summary.paid,
+          commission_payment_status: summary.status,
+          updated_at: new Date().toISOString(),
+        } : x),
+      }
+    })
+    return ''
+  }
+
+  async function deletePoCommissionPayment(paymentId) {
+    if (role !== 'Admin') return 'Only administrators can delete commission payments.'
+    const payment = (data.purchase_order_commission_payments || []).find(p => String(p.id) === String(paymentId))
+    if (!payment) return 'Payment record not found.'
+    const poId = payment.purchase_order_id
+
+    if (hasSupabaseConfig && session) {
+      const { error } = await supabase.from('purchase_order_commission_payments').delete().eq('id', paymentId)
+      if (error) { setNotice(error.message); return error.message }
+      await loadCloudData()
+      return syncPoCommissionHeader(poId)
+    }
+
+    setLocalData(p => {
+      const po = p.purchase_orders.find(x => String(x.id) === String(poId))
+      const items = p.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId))
+      const nextPayments = (p.purchase_order_commission_payments || []).filter(x => String(x.id) !== String(paymentId))
+      const summary = commissionPaymentSummary(po, items, nextPayments)
+      return {
+        ...p,
+        purchase_order_commission_payments: nextPayments,
+        purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? {
+          ...x,
+          commission_amount_paid: summary.paid,
+          commission_payment_status: summary.status,
+          updated_at: new Date().toISOString(),
+        } : x),
+      }
+    })
+    return ''
   }
 
   function createPoFromReorder(reorderItems) {
@@ -1136,6 +1220,7 @@ function App() {
             purchase_order_items: [...(data.purchase_order_items || [])],
             purchase_order_receipts: [...(data.purchase_order_receipts || [])],
             purchase_order_receives: [...(data.purchase_order_receives || [])],
+            purchase_order_commission_payments: [...(data.purchase_order_commission_payments || [])],
           }
         }
         if (rowMode === 'insert_missing' && exists) return 'skipped'
@@ -1252,7 +1337,8 @@ function App() {
             onSavePo={savePurchaseOrder}
             onReceivePo={receivePurchaseOrder}
             onCancelPo={cancelPurchaseOrder}
-            onUpdateCommissionPayment={updatePoCommissionPayment}
+            onAddCommissionPayment={addPoCommissionPayment}
+            onDeleteCommissionPayment={deletePoCommissionPayment}
           />
         )}
         {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteOrder={deleteOrder}
@@ -3755,7 +3841,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
 
   const exportLabels = {
     customers: 'Customers', inventory: 'Inventory', orders: 'Orders', payments: 'Payments',
-    purchase_orders: 'Purchase Orders', purchase_order_items: 'PO Line Items', purchase_order_receipts: 'PO Receipts', purchase_order_receives: 'PO Receives',
+    purchase_orders: 'Purchase Orders', purchase_order_items: 'PO Line Items', purchase_order_receipts: 'PO Receipts', purchase_order_receives: 'PO Receives', purchase_order_commission_payments: 'PO Commission Payments',
   }
 
   function formatLocalBackupDisplay(iso) {

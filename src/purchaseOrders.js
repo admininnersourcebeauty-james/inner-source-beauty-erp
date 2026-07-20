@@ -17,6 +17,10 @@ export const PO_TYPE_MIDDLEMAN = 'middleman'
 
 export const COMMISSION_PAYMENT_STATUSES = ['Unpaid', 'Partial', 'Paid']
 
+export const COMMISSION_PAYMENT_METHODS = [
+  'Wire Transfer', 'Bank Transfer', 'ACH', 'Cash', 'Check', 'Zelle', 'Venmo', 'Other',
+]
+
 export const PO_OPEN_STATUSES = ['Draft', 'Submitted', 'In Production', 'Shipped', 'Partially Received']
 
 const PO_PREFIX = 'ISB-PO-'
@@ -110,22 +114,25 @@ export function factoryProductCostLabel(currency) {
 
 export const MIDDLEMAN_COMMISSION_UNIT_LABEL = 'Middleman Commission Per Unit (KRW)'
 
-/** One-time legacy migration: percent / saved USD commission → KRW per unit for the form. */
-export function migratePoLineCommissionToKrw(line, exchangeRate = 1350) {
-  if (line.middleman_commission_unit_krw != null && line.middleman_commission_unit_krw !== '') {
-    return line
-  }
-  const factory = Math.max(Number(line.korean_unit_cost) || 0, 0)
-  const percent = Math.max(Number(line.commission_percent) || 0, 0)
-  if (percent > 0 && factory > 0) {
-    return { ...line, middleman_commission_unit_krw: factory * percent / 100 }
-  }
-  const savedUsd = Math.max(Number(line.commission_per_unit_usd ?? line.commission_per_unit) || 0, 0)
+/** Load saved lines into the PO form: map legacy DB fields → middleman_commission_unit_krw only. */
+export function preparePoFormLines(lines, exchangeRate = 1350) {
   const rate = Math.max(Number(exchangeRate) || 0, 0)
-  if (savedUsd > 0 && rate > 0) {
-    return { ...line, middleman_commission_unit_krw: savedUsd * rate }
-  }
-  return { ...line, middleman_commission_unit_krw: line.middleman_commission_unit_krw ?? '' }
+  return (lines || []).map(line => {
+    let commissionKrw = line.middleman_commission_unit_krw
+    if (commissionKrw == null || commissionKrw === '') {
+      const savedUsd = Math.max(Number(line.commission_per_unit_usd ?? line.commission_per_unit) || 0, 0)
+      if (savedUsd > 0 && rate > 0) {
+        commissionKrw = savedUsd * rate
+      } else {
+        commissionKrw = ''
+      }
+    }
+    return {
+      ...line,
+      middleman_commission_unit_krw: commissionKrw,
+      commission_percent: 0,
+    }
+  })
 }
 
 export function totalUnitCostLabel(currency) {
@@ -136,30 +143,28 @@ export function calcLineItem(raw, purchaseType, currency = 'KRW', exchangeRate =
   const orderQty = Math.max(Number(raw.order_qty) || 0, 0)
   const curr = currency || 'KRW'
   const rate = resolveExchangeRate(curr, exchangeRate)
-  const factoryUnitOriginal = Math.max(Number(raw.korean_unit_cost) || 0, 0)
-  const hasSavedUsd = raw.factory_unit_cost_usd != null && raw.factory_unit_cost_usd !== ''
-  const factoryUnitUsd = hasSavedUsd
-    ? Math.max(Number(raw.factory_unit_cost_usd) || 0, 0)
-    : convertToUsd(factoryUnitOriginal, curr, rate)
+  const factoryUnitKrw = Math.max(Number(raw.korean_unit_cost) || 0, 0)
   const isMiddleman = isMiddlemanPurchaseType(purchaseType)
   const commissionUnitKrw = isMiddleman ? Math.max(Number(raw.middleman_commission_unit_krw) || 0, 0) : 0
   const receivedQty = Math.max(Number(raw.received_qty) || 0, 0)
+  const factoryUnitUsd = rate > 0 ? factoryUnitKrw / rate : 0
   const commissionPerUnitUsd = isMiddleman && rate > 0 ? commissionUnitKrw / rate : 0
   const commissionUnitUsdStored = commissionPerUnitUsd
-  const totalUnitCostKrw = curr === 'USD' ? 0 : factoryUnitOriginal + commissionUnitKrw
-  const totalUnitCostUsd = factoryUnitUsd + commissionPerUnitUsd
-  const productCostOriginal = orderQty * factoryUnitOriginal
+  const totalUnitCostKrw = factoryUnitKrw + commissionUnitKrw
+  const totalUnitCostUsd = rate > 0 ? totalUnitCostKrw / rate : 0
+  const productCostOriginal = orderQty * factoryUnitKrw
   const productCostUsd = orderQty * factoryUnitUsd
   const commissionTotalKrw = orderQty * commissionUnitKrw
-  const commissionTotalUsd = orderQty * commissionPerUnitUsd
-  const totalLineCostUsd = orderQty * totalUnitCostUsd
+  const commissionTotalUsd = commissionPerUnitUsd * orderQty
+  const totalLineCostUsd = totalUnitCostUsd * orderQty
   const remainingQty = Math.max(orderQty - receivedQty, 0)
   return {
     ...raw,
     order_qty: orderQty,
-    korean_unit_cost: factoryUnitOriginal,
-    factory_unit_cost: factoryUnitOriginal,
-    factory_unit_cost_original: factoryUnitOriginal,
+    korean_unit_cost: factoryUnitKrw,
+    factory_unit_cost: factoryUnitKrw,
+    factory_unit_cost_original: factoryUnitKrw,
+    factory_unit_cost_krw: factoryUnitKrw,
     factory_unit_cost_usd: factoryUnitUsd,
     middleman_commission_unit_krw: commissionUnitKrw,
     middleman_commission_unit_usd: commissionUnitUsdStored,
@@ -440,11 +445,41 @@ export function formatPoMoney(amount, currency) {
   return currency === 'USD' ? formatUsd(amount) : formatKrw(amount)
 }
 
-export function commissionBalance(po, items) {
-  if (!isMiddlemanPo(po, items)) return 0
+export function poCommissionPaymentsForOrder(payments, poId) {
+  return (payments || [])
+    .filter(p => String(p.purchase_order_id) === String(poId))
+    .sort((a, b) => {
+      const dateCmp = String(b.payment_date || '').localeCompare(String(a.payment_date || ''))
+      if (dateCmp !== 0) return dateCmp
+      return String(b.created_at || '').localeCompare(String(a.created_at || ''))
+    })
+}
+
+export function totalCommissionPaid(payments, po) {
+  const list = payments || []
+  if (list.length) {
+    return list.reduce((s, p) => s + Math.max(Number(p.amount) || 0, 0), 0)
+  }
+  return Number(po?.commission_amount_paid) || 0
+}
+
+export function commissionPaymentSummary(po, items, payments) {
+  if (!isMiddlemanPo(po, items)) {
+    return { due: 0, paid: 0, balance: 0, status: 'Paid' }
+  }
   const due = commissionAmountDue(po, items)
-  const paid = Number(po?.commission_amount_paid) || 0
-  return Math.max(due - paid, 0)
+  const paid = totalCommissionPaid(payments, po)
+  const balance = Math.max(due - paid, 0)
+  let status = 'Unpaid'
+  if (due <= 0) status = 'Paid'
+  else if (paid <= 0) status = 'Unpaid'
+  else if (balance <= 0.001) status = 'Paid'
+  else status = 'Partial'
+  return { due, paid, balance, status }
+}
+
+export function commissionBalance(po, items, payments) {
+  return commissionPaymentSummary(po, items, payments).balance
 }
 
 export function commissionAmountDue(po, items) {
@@ -460,14 +495,26 @@ export function commissionAmountDue(po, items) {
   return Number(po?.total_commission) || 0
 }
 
-export function deriveCommissionPaymentStatus(po, items) {
-  if (!isMiddlemanPo(po, items)) return 'Paid'
-  const due = commissionAmountDue(po, items)
-  const paid = Number(po?.commission_amount_paid) || 0
-  if (due <= 0) return 'Paid'
-  if (paid <= 0) return 'Unpaid'
-  if (paid >= due - 0.001) return 'Paid'
-  return 'Partial'
+export function deriveCommissionPaymentStatus(po, items, payments) {
+  return commissionPaymentSummary(po, items, payments).status
+}
+
+export function blankCommissionPaymentEntry() {
+  return {
+    amount: '',
+    payment_date: '',
+    payment_method: 'Wire Transfer',
+    reference_number: '',
+    notes: '',
+  }
+}
+
+export function validateCommissionPaymentEntry(entry) {
+  const amount = Number(entry?.amount) || 0
+  if (amount <= 0) return 'Amount Paid must be greater than 0.'
+  if (!String(entry?.payment_date || '').trim()) return 'Payment Date is required.'
+  if (!String(entry?.payment_method || '').trim()) return 'Payment Method is required.'
+  return ''
 }
 
 export function poItemsForOrder(purchaseOrderItems, poId) {
@@ -826,7 +873,7 @@ export function middlemanCommissionReport(purchaseOrders, purchaseOrderItems, da
         commission_unit_krw: line.middleman_commission_unit_krw,
         commission_total: line.commission_total_usd,
         po_status: po.status,
-        payment_status: po.commission_payment_status || deriveCommissionPaymentStatus(po, items),
+        payment_status: po.commission_payment_status || deriveCommissionPaymentStatus(po, items, null),
       })
     }
   }

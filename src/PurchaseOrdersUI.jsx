@@ -11,6 +11,7 @@ import {
   reportTotalsForCommission, reportTotalsForIncoming,
   internalCostSummary, poReceivesForOrder,
   factoryUnitCostLabel, factoryProductCostLabel, formatUsd,
+  middlemanCommissionUnitLabel, totalUnitCostLabel,
 } from './purchaseOrders.js'
 
 const today = () => new Date().toISOString().slice(0, 10)
@@ -211,7 +212,7 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
   function setPurchaseType(type) {
     if (type === 'direct') {
       setH({ ...h, purchase_type: 'direct', middleman_name: '' })
-      setRows(prev => prev.map(r => ({ ...r, commission_percent: '' })))
+      setRows(prev => prev.map(r => ({ ...r, middleman_commission_unit_krw: '' })))
     } else {
       setH({ ...h, purchase_type: 'middleman' })
     }
@@ -308,16 +309,27 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
                 <label>Brand<input value={line.brand} onChange={e => updateLine(idx, { brand: e.target.value })} /></label>
                 <label>Order Qty<input type="number" min="0" value={line.order_qty} onChange={e => updateLine(idx, { order_qty: e.target.value })} /></label>
                 <label>{factoryUnitCostLabel(h.currency)}<input type="number" min="0" step="1" value={line.korean_unit_cost} onChange={e => updateLine(idx, { korean_unit_cost: e.target.value })} /></label>
-                <label>Converted Unit Cost (USD)<span className="po-calc-value">{formatUsd(calc.factory_unit_cost_usd)}</span></label>
+                <label>Factory Unit Cost (USD)<span className="po-calc-value">{formatUsd(calc.factory_unit_cost_usd)}</span></label>
                 {isMiddleman && (
                   <>
-                    <label>Middleman Commission %<input type="number" min="0" step="0.01" value={line.commission_percent} onChange={e => updateLine(idx, { commission_percent: e.target.value })} /></label>
+                    <label>{middlemanCommissionUnitLabel(h.currency)}<input type="number" min="0" step="1" value={
+                      line.middleman_commission_unit_krw !== '' && line.middleman_commission_unit_krw != null
+                        ? line.middleman_commission_unit_krw
+                        : (calc.middleman_commission_unit_krw || calc.commission_per_unit_original || '')
+                    } onChange={e => updateLine(idx, { middleman_commission_unit_krw: e.target.value })} /></label>
                     <label>Commission Per Unit (USD)<span className="po-calc-value">{formatUsd(calc.commission_per_unit_usd)}</span></label>
+                  </>
+                )}
+                <label>{totalUnitCostLabel(h.currency)}<span className="po-calc-value">{formatPoMoney(calc.total_unit_cost_krw || calc.total_unit_cost_usd, h.currency)}</span></label>
+                <label>Total Unit Cost (USD)<span className="po-calc-value">{formatUsd(calc.total_unit_cost_usd)}</span></label>
+                <label>{factoryProductCostLabel(h.currency)}<span className="po-calc-value">{formatPoMoney(calc.product_cost, h.currency)}</span></label>
+                {isMiddleman && (
+                  <>
+                    <label>Commission Total (KRW)<span className="po-calc-value">{formatKrw(calc.middleman_commission_total_krw)}</span></label>
                     <label>Commission Total (USD)<span className="po-calc-value">{formatUsd(calc.commission_total_usd)}</span></label>
                   </>
                 )}
-                <label>{factoryProductCostLabel(h.currency)}<span className="po-calc-value">{formatPoMoney(calc.product_cost, h.currency)}</span></label>
-                <label>Converted Product Cost (USD)<span className="po-calc-value">{formatUsd(calc.product_cost_usd)}</span></label>
+                <label>Total Purchase Cost (USD)<span className="po-calc-value">{formatUsd(calc.total_purchase_cost_usd)}</span></label>
                 <label>Received Qty<span className="po-calc-value">{calc.received_qty}</span></label>
                 <label>Remaining Qty<span className="po-calc-value">{calc.remaining_qty}</span></label>
                 <label>Note<input value={line.note || ''} onChange={e => updateLine(idx, { note: e.target.value })} /></label>
@@ -333,7 +345,8 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
       <div className="po-totals-box">
         <p><strong>Total Ordered Units:</strong> {totals.totalOrderedUnits}</p>
         <p><strong>Total Factory Product Cost ({h.currency}):</strong> {formatPoMoney(totals.totalProductCost, h.currency)}</p>
-        {isMiddleman && <p><strong>Total Middleman Commission (USD):</strong> {formatUsd(totals.totalCommissionUsd)}</p>}
+        {isMiddleman && <p><strong>Total Commission (KRW):</strong> {formatKrw(totals.lines.reduce((s, l) => s + (l.middleman_commission_total_krw || 0), 0))}</p>}
+        {isMiddleman && <p><strong>Total Commission (USD):</strong> {formatUsd(totals.totalCommissionUsd)}</p>}
         <p><strong>Total Purchase Cost (USD):</strong> {formatUsd(totals.totalProductCostUsd + totals.totalCommissionUsd)}</p>
         <p className="hint">Shipping and other costs are entered when inventory is received, not at PO creation. All inventory costing uses converted USD values.</p>
       </div>
@@ -401,9 +414,10 @@ function InternalCostSheetDoc({ po, summary }) {
           <thead>
             <tr>
               <th>Product</th><th>Qty</th>
-              <th>Factory Unit Cost ({totals.currency})</th><th>Converted Unit Cost (USD)</th>
-              {isMiddleman && <><th>Commission %</th><th>Commission / Unit (USD)</th><th>Commission Total (USD)</th></>}
-              <th>Factory Line Total ({totals.currency})</th><th>Converted Line Total (USD)</th>
+              <th>Factory Unit Cost ({totals.currency})</th><th>Factory Unit Cost (USD)</th>
+              {isMiddleman && <><th>Commission / Unit (KRW)</th><th>Commission / Unit (USD)</th><th>Commission Total (KRW)</th><th>Commission Total (USD)</th></>}
+              <th>Total Unit Cost ({totals.currency})</th><th>Total Unit Cost (USD)</th>
+              <th>Factory Line Total ({totals.currency})</th><th>Total Purchase Cost (USD)</th>
             </tr>
           </thead>
           <tbody>
@@ -413,9 +427,11 @@ function InternalCostSheetDoc({ po, summary }) {
                 <td>{l.order_qty}</td>
                 <td>{formatPoMoney(l.factory_unit_cost_original ?? l.factory_unit_cost, po.currency)}</td>
                 <td>{formatUsd(l.factory_unit_cost_usd)}</td>
-                {isMiddleman && <><td>{l.commission_percent}%</td><td>{formatUsd(l.commission_per_unit_usd)}</td><td>{formatUsd(l.commission_total_usd)}</td></>}
+                {isMiddleman && <><td>{formatKrw(l.middleman_commission_unit_krw)}</td><td>{formatUsd(l.commission_per_unit_usd)}</td><td>{formatKrw(l.middleman_commission_total_krw)}</td><td>{formatUsd(l.commission_total_usd)}</td></>}
+                <td>{formatPoMoney(l.total_unit_cost_krw || l.total_unit_cost_usd, po.currency)}</td>
+                <td>{formatUsd(l.total_unit_cost_usd)}</td>
                 <td>{formatPoMoney(l.product_cost, po.currency)}</td>
-                <td>{formatUsd(l.product_cost_usd)}</td>
+                <td>{formatUsd(l.total_purchase_cost_usd)}</td>
               </tr>
             ))}
           </tbody>
@@ -875,12 +891,12 @@ export function PurchaseOrderReports({ data, dateFrom, dateTo, onDateFromChange,
       <p><strong>Total Commission (USD):</strong> {formatUsd(commTotals.totalCommission)}</p>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Date</th><th>Middleman</th><th>PO Number</th><th>Product</th><th>Qty</th><th>Commission %</th><th>Commission Total</th><th>PO Status</th><th>Payment Status</th></tr></thead>
+          <thead><tr><th>Date</th><th>Middleman</th><th>PO Number</th><th>Product</th><th>Qty</th><th>Commission / Unit (KRW)</th><th>Commission Total</th><th>PO Status</th><th>Payment Status</th></tr></thead>
           <tbody>
             {commissionRows.map(r => (
               <tr key={r.id}>
                 <td>{r.date || '—'}</td><td>{r.middleman || '—'}</td><td>{r.po_number}</td><td>{r.product}</td>
-                <td>{r.qty}</td><td>{r.commission_percent}%</td><td>{formatUsd(r.commission_total)}</td>
+                <td>{r.qty}</td><td>{formatKrw(r.commission_unit_krw)}</td><td>{formatUsd(r.commission_total)}</td>
                 <td>{r.po_status}</td><td>{r.payment_status}</td>
               </tr>
             ))}

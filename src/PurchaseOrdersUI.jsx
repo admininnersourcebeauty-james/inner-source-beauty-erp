@@ -14,6 +14,7 @@ import {
   MIDDLEMAN_COMMISSION_UNIT_LABEL, totalUnitCostLabel, preparePoFormLines,
   COMMISSION_PAYMENT_METHODS, poCommissionPaymentsForOrder, commissionPaymentSummary,
   blankCommissionPaymentEntry, validateCommissionPaymentEntry,
+  commissionPaymentReceiptTotals, commissionPaymentsChronological, formatPrintDate,
 } from './purchaseOrders.js'
 
 const today = () => new Date().toISOString().slice(0, 10)
@@ -517,6 +518,74 @@ function InternalCostSheetDoc({ po, summary }) {
   )
 }
 
+function CommissionPaymentReceiptDoc({ po, items, payment, payments }) {
+  const totals = commissionPaymentReceiptTotals(po, items, payments, payment.id)
+  if (!totals) return null
+  return (
+    <div className="po-print-sheet po-commission-print-sheet po-commission-receipt-doc invoice">
+      <h1>INNER SOURCE BEAUTY</h1>
+      <h2>COMMISSION PAYMENT RECEIPT</h2>
+      <div className="invoice-grid po-commission-print-meta">
+        <p><b>PO Number:</b> {po.po_number || '—'}<br /><b>Supplier:</b> {po.supplier || '—'}</p>
+        <p><b>Middleman Name:</b> {po.middleman_name || '—'}<br /><b>Printed Date:</b> {formatPrintDate(new Date())}</p>
+      </div>
+      <div className="po-commission-print-details">
+        <p><b>Total Commission Due:</b> {formatUsd(totals.due)}</p>
+        <p><b>Payment Amount:</b> {formatUsd(payment.amount)}</p>
+        <p><b>Payment Date:</b> {String(payment.payment_date || '').slice(0, 10) || '—'}</p>
+        <p><b>Payment Method:</b> {payment.payment_method || '—'}</p>
+        <p><b>Reference Number:</b> {payment.reference_number || '—'}</p>
+        <p><b>Notes:</b> {payment.notes || '—'}</p>
+        <p><b>Total Paid After This Payment:</b> {formatUsd(totals.paidAfter)}</p>
+        <p><b>Remaining Balance:</b> {formatUsd(totals.balance)}</p>
+        <p><b>Payment Status:</b> {totals.status}</p>
+      </div>
+    </div>
+  )
+}
+
+function CommissionPaymentHistoryDoc({ po, items, payments }) {
+  const summary = commissionPaymentSummary(po, items, payments)
+  const chronological = commissionPaymentsChronological(payments)
+  return (
+    <div className="po-print-sheet po-commission-print-sheet po-commission-history-doc invoice">
+      <h1>INNER SOURCE BEAUTY</h1>
+      <h2>COMMISSION PAYMENT HISTORY</h2>
+      <div className="invoice-grid po-commission-print-meta">
+        <p><b>PO Number:</b> {po.po_number || '—'}<br /><b>Supplier:</b> {po.supplier || '—'}</p>
+        <p><b>Middleman Name:</b> {po.middleman_name || '—'}<br /><b>Printed Date:</b> {formatPrintDate(new Date())}</p>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th><th>Amount</th><th>Method</th><th>Reference</th><th>Notes</th><th>Created By</th>
+            </tr>
+          </thead>
+          <tbody>
+            {chronological.map(payment => (
+              <tr key={payment.id}>
+                <td>{String(payment.payment_date || '').slice(0, 10) || '—'}</td>
+                <td>{formatUsd(payment.amount)}</td>
+                <td>{payment.payment_method || '—'}</td>
+                <td>{payment.reference_number || '—'}</td>
+                <td>{payment.notes || '—'}</td>
+                <td>{payment.created_by || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="po-totals-box">
+        <p><strong>Total Commission Due:</strong> {formatUsd(summary.due)}</p>
+        <p><strong>Total Paid:</strong> {formatUsd(summary.paid)}</p>
+        <p><strong>Remaining Balance:</strong> {formatUsd(summary.balance)}</p>
+        <p><strong>Status:</strong> {summary.status}</p>
+      </div>
+    </div>
+  )
+}
+
 function CommissionPaymentStatusBadge({ status }) {
   const cls = String(status || 'unpaid').toLowerCase()
   return <span className={`po-commission-status po-commission-status-${cls}`}>{status || 'Unpaid'}</span>
@@ -528,7 +597,38 @@ function CommissionPaymentPanel({
   const [entry, setEntry] = useState(() => ({ ...blankCommissionPaymentEntry(), payment_date: today() }))
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [printView, setPrintView] = useState('')
+  const [printPaymentId, setPrintPaymentId] = useState('')
   const summary = useMemo(() => commissionPaymentSummary(po, items, payments), [po, items, payments])
+  const printPayment = payments.find(p => String(p.id) === String(printPaymentId))
+
+  function triggerCommissionPrint(view, paymentId = '') {
+    const bodyClass = view === 'receipt' ? 'po-print-commission-receipt' : 'po-print-commission-history'
+    setPrintView(view)
+    setPrintPaymentId(paymentId)
+    document.body.classList.add(bodyClass)
+    setTimeout(() => {
+      window.print()
+      document.body.classList.remove(bodyClass)
+      setPrintView('')
+      setPrintPaymentId('')
+    }, 50)
+  }
+
+  function handlePrintReceipt(paymentId) {
+    if (!paymentId) return
+    triggerCommissionPrint('receipt', paymentId)
+  }
+
+  function handlePrintHistory() {
+    if (!payments.length) return
+    triggerCommissionPrint('history')
+  }
+
+  function handlePrintLatestReceipt() {
+    if (!payments.length) return
+    handlePrintReceipt(payments[0].id)
+  }
 
   async function handleAddPayment(e) {
     e.preventDefault()
@@ -551,10 +651,26 @@ function CommissionPaymentPanel({
   }
 
   return (
-    <div className="form-section po-commission-panel no-print">
+    <>
+      {printView === 'receipt' && printPayment && (
+        <CommissionPaymentReceiptDoc po={po} items={items} payment={printPayment} payments={payments} />
+      )}
+      {printView === 'history' && (
+        <CommissionPaymentHistoryDoc po={po} items={items} payments={payments} />
+      )}
+
+      <div className={`form-section po-commission-panel po-commission-screen${printView ? ' screen-only-hidden' : ''}`}>
       <div className="po-commission-head">
         <h3>Commission Payment</h3>
         <p className="hint">Middleman: <b>{po.middleman_name || '—'}</b></p>
+        <div className="po-commission-print-actions no-print">
+          <button type="button" className="soft" disabled={!payments.length} onClick={handlePrintLatestReceipt}>
+            Print Payment Receipt
+          </button>
+          <button type="button" className="soft" disabled={!payments.length} onClick={handlePrintHistory}>
+            Print Payment History
+          </button>
+        </div>
       </div>
 
       <div className="po-commission-section">
@@ -608,7 +724,8 @@ function CommissionPaymentPanel({
               <thead>
                 <tr>
                   <th>Date</th><th>Amount</th><th>Method</th><th>Reference</th><th>Notes</th><th>Created By</th>
-                  {isAdmin && canEdit && <th></th>}
+                  <th className="no-print"></th>
+                  {isAdmin && canEdit && <th className="no-print"></th>}
                 </tr>
               </thead>
               <tbody>
@@ -620,8 +737,13 @@ function CommissionPaymentPanel({
                     <td>{payment.reference_number || '—'}</td>
                     <td>{payment.notes || '—'}</td>
                     <td>{payment.created_by || '—'}</td>
+                    <td className="no-print">
+                      <button type="button" className="soft link-cell" onClick={() => handlePrintReceipt(payment.id)}>
+                        Print
+                      </button>
+                    </td>
                     {isAdmin && canEdit && (
-                      <td>
+                      <td className="no-print">
                         <button type="button" className="danger soft link-cell" disabled={busy}
                           onClick={() => handleDeletePayment(payment.id)}>Delete</button>
                       </td>
@@ -634,6 +756,7 @@ function CommissionPaymentPanel({
         )}
       </div>
     </div>
+    </>
   )
 }
 

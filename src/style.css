@@ -440,7 +440,12 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
 .po-commission-status{display:inline-block;padding:4px 10px;border-radius:999px;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
 .po-commission-status-unpaid{background:#fde8e8;color:#9b1c1c}
 .po-commission-status-partial{background:#fff4df;color:#9a6700}
+.po-commission-status-partial{background:#fff4df;color:#9a6700}
 .po-commission-status-paid{background:#e7f6ed;color:#1f7a3f}
+.po-commission-print-actions{display:flex;flex-wrap:wrap;gap:8px;margin-left:auto}
+.po-commission-print-sheet{display:none}
+.po-commission-print-meta{margin-bottom:18px}
+.po-commission-print-details p{margin:8px 0}
 @media (max-width:900px){
   .po-commission-summary-cards{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
@@ -480,7 +485,19 @@ select.sel{border-color:#2563eb;box-shadow:0 0 0 2px rgba(37,99,235,.2)}
   .bill-to,.ship-to{width:42%!important;flex:0 0 42%!important;page-break-inside:avoid}
   .ship-to{margin-left:auto!important}
   .address-spacer{display:none!important}
-  .po-detail-main,.po-commission-panel{display:none!important}
+  .po-detail-main,.po-commission-screen{display:none!important}
   .po-supplier-doc,.po-internal-doc{display:block!important;margin:0 auto;max-width:7.5in}
+  body.po-print-commission-receipt .po-commission-receipt-doc,
+  body.po-print-commission-history .po-commission-history-doc{display:block!important;margin:0 auto;max-width:7.5in}
+  body.po-print-commission-receipt .po-detail-main,
+  body.po-print-commission-receipt .po-commission-screen,
+  body.po-print-commission-receipt .po-detail-actions,
+  body.po-print-commission-history .po-detail-main,
+  body.po-print-commission-history .po-commission-screen,
+  body.po-print-commission-history .po-detail-actions{display:none!important}
+  body.po-print-commission-receipt .po-supplier-doc,
+  body.po-print-commission-receipt .po-internal-doc,
+  body.po-print-commission-history .po-supplier-doc,
+  body.po-print-commission-history .po-internal-doc{display:none!important}
   .po-internal-banner{-webkit-print-color-adjust:exact;print-color-adjust:exact}
 }

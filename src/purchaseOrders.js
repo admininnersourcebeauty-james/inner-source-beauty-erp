@@ -463,6 +463,37 @@ export function totalCommissionPaid(payments, po) {
   return Number(po?.commission_amount_paid) || 0
 }
 
+export function commissionPaymentsChronological(payments) {
+  return [...(payments || [])].sort((a, b) => {
+    const dateCmp = String(a.payment_date || '').localeCompare(String(b.payment_date || ''))
+    if (dateCmp !== 0) return dateCmp
+    return String(a.created_at || '').localeCompare(String(b.created_at || ''))
+  })
+}
+
+export function commissionPaymentReceiptTotals(po, items, payments, paymentId) {
+  const due = commissionAmountDue(po, items)
+  const chronological = commissionPaymentsChronological(payments)
+  const idx = chronological.findIndex(p => String(p.id) === String(paymentId))
+  if (idx < 0) return null
+  const paidAfter = chronological
+    .slice(0, idx + 1)
+    .reduce((s, p) => s + Math.max(Number(p.amount) || 0, 0), 0)
+  const balance = Math.max(due - paidAfter, 0)
+  let status = 'Unpaid'
+  if (due <= 0) status = 'Paid'
+  else if (paidAfter <= 0) status = 'Unpaid'
+  else if (balance <= 0.001) status = 'Paid'
+  else status = 'Partial'
+  return { due, paidAfter, balance, status }
+}
+
+export function formatPrintDate(value = new Date()) {
+  const d = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
 export function commissionPaymentSummary(po, items, payments) {
   if (!isMiddlemanPo(po, items)) {
     return { due: 0, paid: 0, balance: 0, status: 'Paid' }

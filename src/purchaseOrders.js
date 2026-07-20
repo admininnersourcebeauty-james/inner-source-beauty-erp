@@ -108,34 +108,28 @@ export function factoryProductCostLabel(currency) {
   return currency === 'USD' ? 'Factory Product Cost (USD)' : `Factory Product Cost (${currency || 'KRW'})`
 }
 
-export function middlemanCommissionUnitLabel(currency) {
-  return currency === 'USD'
-    ? 'Middleman Commission Per Unit (USD)'
-    : 'Middleman Commission Per Unit (KRW)'
+export const MIDDLEMAN_COMMISSION_UNIT_LABEL = 'Middleman Commission Per Unit (KRW)'
+
+/** One-time legacy migration: percent / saved USD commission → KRW per unit for the form. */
+export function migratePoLineCommissionToKrw(line, exchangeRate = 1350) {
+  if (line.middleman_commission_unit_krw != null && line.middleman_commission_unit_krw !== '') {
+    return line
+  }
+  const factory = Math.max(Number(line.korean_unit_cost) || 0, 0)
+  const percent = Math.max(Number(line.commission_percent) || 0, 0)
+  if (percent > 0 && factory > 0) {
+    return { ...line, middleman_commission_unit_krw: factory * percent / 100 }
+  }
+  const savedUsd = Math.max(Number(line.commission_per_unit_usd ?? line.commission_per_unit) || 0, 0)
+  const rate = Math.max(Number(exchangeRate) || 0, 0)
+  if (savedUsd > 0 && rate > 0) {
+    return { ...line, middleman_commission_unit_krw: savedUsd * rate }
+  }
+  return { ...line, middleman_commission_unit_krw: line.middleman_commission_unit_krw ?? '' }
 }
 
 export function totalUnitCostLabel(currency) {
   return currency === 'USD' ? 'Total Unit Cost (USD)' : 'Total Unit Cost (KRW)'
-}
-
-/** Resolve per-unit middleman commission in PO original currency (KRW for KRW PO, USD for USD PO). */
-export function resolveMiddlemanCommissionUnitOriginal(raw, factoryUnitOriginal, isMiddleman, currency, exchangeRate) {
-  if (!isMiddleman) return 0
-  const curr = currency || 'KRW'
-  const rate = resolveExchangeRate(curr, exchangeRate)
-  const savedKrw = raw.middleman_commission_unit_krw
-  if (savedKrw != null && savedKrw !== '') {
-    return Math.max(Number(savedKrw) || 0, 0)
-  }
-  const percent = Math.max(Number(raw.commission_percent) || 0, 0)
-  if (percent > 0) {
-    return factoryUnitOriginal * percent / 100
-  }
-  const savedUsd = Math.max(Number(raw.commission_per_unit_usd ?? raw.commission_per_unit) || 0, 0)
-  if (savedUsd > 0) {
-    return curr === 'USD' ? savedUsd : savedUsd * rate
-  }
-  return 0
 }
 
 export function calcLineItem(raw, purchaseType, currency = 'KRW', exchangeRate = 1) {
@@ -148,27 +142,16 @@ export function calcLineItem(raw, purchaseType, currency = 'KRW', exchangeRate =
     ? Math.max(Number(raw.factory_unit_cost_usd) || 0, 0)
     : convertToUsd(factoryUnitOriginal, curr, rate)
   const isMiddleman = isMiddlemanPurchaseType(purchaseType)
-  const commissionUnitOriginal = resolveMiddlemanCommissionUnitOriginal(
-    raw, factoryUnitOriginal, isMiddleman, curr, rate,
-  )
+  const commissionUnitKrw = isMiddleman ? Math.max(Number(raw.middleman_commission_unit_krw) || 0, 0) : 0
   const receivedQty = Math.max(Number(raw.received_qty) || 0, 0)
-  const commissionPerUnitUsd = isMiddleman
-    ? convertToUsd(commissionUnitOriginal, curr, rate)
-    : 0
-  const commissionUnitKrw = isMiddleman
-    ? (curr === 'USD' ? 0 : commissionUnitOriginal)
-    : 0
-  const commissionUnitUsdStored = isMiddleman
-    ? (curr === 'USD' ? commissionUnitOriginal : commissionPerUnitUsd)
-    : 0
-  const totalUnitCostOriginal = factoryUnitOriginal + commissionUnitOriginal
+  const commissionPerUnitUsd = isMiddleman && rate > 0 ? commissionUnitKrw / rate : 0
+  const commissionUnitUsdStored = commissionPerUnitUsd
+  const totalUnitCostKrw = curr === 'USD' ? 0 : factoryUnitOriginal + commissionUnitKrw
   const totalUnitCostUsd = factoryUnitUsd + commissionPerUnitUsd
   const productCostOriginal = orderQty * factoryUnitOriginal
   const productCostUsd = orderQty * factoryUnitUsd
-  const commissionTotalOriginal = orderQty * commissionUnitOriginal
   const commissionTotalKrw = orderQty * commissionUnitKrw
   const commissionTotalUsd = orderQty * commissionPerUnitUsd
-  const totalLineCostOriginal = orderQty * totalUnitCostOriginal
   const totalLineCostUsd = orderQty * totalUnitCostUsd
   const remainingQty = Math.max(orderQty - receivedQty, 0)
   return {
@@ -182,16 +165,14 @@ export function calcLineItem(raw, purchaseType, currency = 'KRW', exchangeRate =
     middleman_commission_unit_usd: commissionUnitUsdStored,
     middleman_commission_total_krw: commissionTotalKrw,
     middleman_commission_total_usd: commissionTotalUsd,
-    total_unit_cost_krw: curr === 'USD' ? 0 : totalUnitCostOriginal,
+    total_unit_cost_krw: totalUnitCostKrw,
     total_unit_cost_usd: totalUnitCostUsd,
-    commission_percent: isMiddleman ? Math.max(Number(raw.commission_percent) || 0, 0) : 0,
+    commission_percent: 0,
     commission_per_unit: commissionPerUnitUsd,
-    commission_per_unit_original: commissionUnitOriginal,
     commission_per_unit_usd: commissionPerUnitUsd,
     product_cost: productCostOriginal,
     product_cost_usd: productCostUsd,
-    commission_total: commissionTotalOriginal,
-    commission_total_original: commissionTotalOriginal,
+    commission_total: commissionTotalUsd,
     commission_total_usd: commissionTotalUsd,
     total_line_cost: totalLineCostUsd,
     total_line_cost_usd: totalLineCostUsd,
@@ -213,7 +194,7 @@ export function calcPoTotals(header, lines, receives) {
     ? computed.reduce((s, l) => s + l.commission_total_usd, 0)
     : 0
   const totalCommissionOriginal = isMiddlemanPurchaseType(purchaseType)
-    ? computed.reduce((s, l) => s + l.commission_total_original, 0)
+    ? computed.reduce((s, l) => s + (l.middleman_commission_total_krw || 0), 0)
     : 0
   const receivedShipping = sumReceiveCosts(receives).shippingCost
   const receivedOther = sumReceiveCosts(receives).otherCost

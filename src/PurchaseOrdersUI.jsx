@@ -11,7 +11,7 @@ import {
   reportTotalsForCommission, reportTotalsForIncoming,
   internalCostSummary, poReceivesForOrder,
   factoryUnitCostLabel, factoryProductCostLabel, formatUsd,
-  middlemanCommissionUnitLabel, totalUnitCostLabel,
+  MIDDLEMAN_COMMISSION_UNIT_LABEL, totalUnitCostLabel, migratePoLineCommissionToKrw,
 } from './purchaseOrders.js'
 
 const today = () => new Date().toISOString().slice(0, 10)
@@ -205,7 +205,11 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
     purchase_type: header.purchase_type || initialType,
     order_date: header.order_date || today(),
   }))
-  const [rows, setRows] = useState(lines.length ? lines : [blankPoLine()])
+  const [rows, setRows] = useState(() => {
+    const initialLines = lines.length ? lines : [blankPoLine()]
+    const rate = header.exchange_rate || '1350'
+    return initialLines.map(line => migratePoLineCommissionToKrw(line, rate))
+  })
   const isMiddleman = h.purchase_type === 'middleman'
   const totals = useMemo(() => calcPoTotals(h, rows), [h, rows])
 
@@ -312,11 +316,7 @@ function PurchaseOrderForm({ header, lines, inventory, isAdmin, editing, onSave,
                 <label>Factory Unit Cost (USD)<span className="po-calc-value">{formatUsd(calc.factory_unit_cost_usd)}</span></label>
                 {isMiddleman && (
                   <>
-                    <label>{middlemanCommissionUnitLabel(h.currency)}<input type="number" min="0" step="1" value={
-                      line.middleman_commission_unit_krw !== '' && line.middleman_commission_unit_krw != null
-                        ? line.middleman_commission_unit_krw
-                        : (calc.middleman_commission_unit_krw || calc.commission_per_unit_original || '')
-                    } onChange={e => updateLine(idx, { middleman_commission_unit_krw: e.target.value })} /></label>
+                    <label>{MIDDLEMAN_COMMISSION_UNIT_LABEL}<input type="number" min="0" step="1" placeholder="5000" value={line.middleman_commission_unit_krw ?? ''} onChange={e => updateLine(idx, { middleman_commission_unit_krw: e.target.value })} /></label>
                     <label>Commission Per Unit (USD)<span className="po-calc-value">{formatUsd(calc.commission_per_unit_usd)}</span></label>
                   </>
                 )}

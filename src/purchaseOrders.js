@@ -21,6 +21,17 @@ export const COMMISSION_PAYMENT_METHODS = [
   'Wire Transfer', 'Bank Transfer', 'ACH', 'Cash', 'Check', 'Zelle', 'Venmo', 'Other',
 ]
 
+export const COMMISSION_TYPES = [
+  { value: '', label: 'None' },
+  { value: 'percentage', label: 'Percentage' },
+  { value: 'fixed_per_unit', label: 'Fixed Per Unit' },
+  { value: 'fixed_total', label: 'Fixed Total' },
+]
+
+export const COMMISSION_TYPE_PERCENTAGE = 'percentage'
+export const COMMISSION_TYPE_FIXED_PER_UNIT = 'fixed_per_unit'
+export const COMMISSION_TYPE_FIXED_TOTAL = 'fixed_total'
+
 export const PO_OPEN_STATUSES = ['Draft', 'Submitted', 'In Production', 'Shipped', 'Partially Received']
 
 const PO_PREFIX = 'ISB-PO-'
@@ -48,16 +59,22 @@ export function isMiddlemanPurchaseType(purchaseType) {
 }
 
 export function resolvePurchaseType(po, items) {
-  const stored = String(po?.purchase_type || '').trim().toLowerCase()
-  if (stored === PO_TYPE_MIDDLEMAN || stored === PO_TYPE_DIRECT) return stored
-  const hasMiddlemanName = String(po?.middleman_name || '').trim().length > 0
   const list = items || []
+  const hasMiddlemanName = String(po?.middleman_name || '').trim().length > 0
+  const hasLineMiddleman = list.some(i => String(i.middleman_name || '').trim().length > 0)
+  const hasLineCommission = list.some(lineHasCommissionSettings)
   const hasCommission = Number(po?.total_commission) > 0
     || list.some(i => Number(i.middleman_commission_unit_krw) > 0
       || Number(i.commission_percent) > 0
       || Number(i.commission_total) > 0
-      || Number(i.commission_total_usd) > 0)
-  return (hasMiddlemanName || hasCommission) ? PO_TYPE_MIDDLEMAN : PO_TYPE_DIRECT
+      || Number(i.commission_total_usd) > 0
+      || lineHasCommissionSettings(i))
+  if (hasMiddlemanName || hasCommission || hasLineMiddleman || hasLineCommission) {
+    return PO_TYPE_MIDDLEMAN
+  }
+  const stored = String(po?.purchase_type || '').trim().toLowerCase()
+  if (stored === PO_TYPE_MIDDLEMAN || stored === PO_TYPE_DIRECT) return stored
+  return PO_TYPE_DIRECT
 }
 
 export function isMiddlemanPo(po, items) {
@@ -114,22 +131,215 @@ export function factoryProductCostLabel(currency) {
 
 export const MIDDLEMAN_COMMISSION_UNIT_LABEL = 'Middleman Commission Per Unit (KRW)'
 
-/** Load saved lines into the PO form: map legacy DB fields → middleman_commission_unit_krw only. */
+export function collectMiddlemanOptions(purchaseOrders = [], inventory = []) {
+  const names = new Set()
+  for (const po of purchaseOrders || []) {
+    const n = String(po?.middleman_name || '').trim()
+    if (n) names.add(n)
+  }
+  for (const item of inventory || []) {
+    const n = String(item?.default_middleman_name || '').trim()
+    if (n) names.add(n)
+  }
+  return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+}
+
+export function normalizeSupplierName(value) {
+  return String(value || '').trim()
+}
+
+export function inventorySupplier(item) {
+  return normalizeSupplierName(item?.supplier)
+}
+
+export function suppliersMatch(a, b) {
+  const left = normalizeSupplierName(a)
+  const right = normalizeSupplierName(b)
+  if (!left || !right) return true
+  return left.toLowerCase() === right.toLowerCase()
+}
+
+export function inventorySupplierMismatch(poSupplier, inventoryItem) {
+  const itemSupplier = inventorySupplier(inventoryItem)
+  const headerSupplier = normalizeSupplierName(poSupplier)
+  if (!headerSupplier || !itemSupplier) return false
+  return !suppliersMatch(headerSupplier, itemSupplier)
+}
+
+export function inventoryItemsWithSupplierMismatch(poSupplier, items) {
+  return (items || []).filter(item => inventorySupplierMismatch(poSupplier, item))
+}
+
+export function collectSupplierOptions(purchaseOrders = [], inventory = []) {
+  const names = new Set()
+  for (const po of purchaseOrders || []) {
+    const n = normalizeSupplierName(po?.supplier)
+    if (n) names.add(n)
+  }
+  for (const item of inventory || []) {
+    const n = inventorySupplier(item)
+    if (n) names.add(n)
+  }
+  return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+}
+
+export function resolvePoSupplierFromInventoryItems(items, currentPoSupplier = '') {
+  if (normalizeSupplierName(currentPoSupplier)) return normalizeSupplierName(currentPoSupplier)
+  const suppliers = [...new Set((items || []).map(inventorySupplier).filter(Boolean))]
+  return suppliers.length === 1 ? suppliers[0] : ''
+}
+
+export function applyInventorySupplierToPoHeader(header, inventoryItem) {
+  const headerSupplier = normalizeSupplierName(header?.supplier)
+  const itemSupplier = inventorySupplier(inventoryItem)
+  if (!headerSupplier && itemSupplier) {
+    return { ...header, supplier: itemSupplier }
+  }
+  return header
+}
+
+export function normalizeCommissionType(raw) {
+  const t = String(raw?.commission_type || raw?.default_commission_type || '').trim().toLowerCase()
+  if (t === COMMISSION_TYPE_PERCENTAGE || t === COMMISSION_TYPE_FIXED_PER_UNIT || t === COMMISSION_TYPE_FIXED_TOTAL) {
+    return t
+  }
+  if (Number(raw?.commission_percent) > 0) return COMMISSION_TYPE_PERCENTAGE
+  if (Number(raw?.middleman_commission_unit_krw) > 0) return COMMISSION_TYPE_FIXED_PER_UNIT
+  return ''
+}
+
+export function resolveCommissionValue(raw) {
+  if (raw?.commission_value != null && raw.commission_value !== '') {
+    return Math.max(Number(raw.commission_value) || 0, 0)
+  }
+  if (raw?.default_commission_value != null && raw.default_commission_value !== '') {
+    return Math.max(Number(raw.default_commission_value) || 0, 0)
+  }
+  const type = normalizeCommissionType(raw)
+  if (type === COMMISSION_TYPE_PERCENTAGE) return Math.max(Number(raw.commission_percent) || 0, 0)
+  if (type === COMMISSION_TYPE_FIXED_PER_UNIT) return Math.max(Number(raw.middleman_commission_unit_krw) || 0, 0)
+  return 0
+}
+
+export function lineHasCommissionSettings(raw) {
+  const type = normalizeCommissionType(raw)
+  const value = resolveCommissionValue(raw)
+  return !!type && value > 0
+}
+
+export function calcLineCommissionTotals(raw, orderQty, productCostOriginal, currency = 'KRW', exchangeRate = 1) {
+  const rate = resolveExchangeRate(currency, exchangeRate)
+  const type = normalizeCommissionType(raw)
+  const value = resolveCommissionValue(raw)
+  if (!type || value <= 0) {
+    return { totalKrw: 0, totalUsd: 0, unitKrw: 0, unitUsd: 0, commissionType: '', commissionValue: 0 }
+  }
+
+  let totalInPoCurrency = 0
+  if (type === COMMISSION_TYPE_PERCENTAGE) {
+    totalInPoCurrency = productCostOriginal * value / 100
+  } else if (type === COMMISSION_TYPE_FIXED_PER_UNIT) {
+    totalInPoCurrency = orderQty * value
+  } else if (type === COMMISSION_TYPE_FIXED_TOTAL) {
+    totalInPoCurrency = value
+  }
+
+  let totalKrw = 0
+  let totalUsd = 0
+  if (currency === 'USD') {
+    totalUsd = totalInPoCurrency
+    totalKrw = rate > 0 ? totalUsd * rate : 0
+  } else {
+    totalKrw = totalInPoCurrency
+    totalUsd = rate > 0 ? totalKrw / rate : 0
+  }
+
+  const unitKrw = orderQty > 0 ? totalKrw / orderQty : 0
+  const unitUsd = orderQty > 0 ? totalUsd / orderQty : 0
+  return { totalKrw, totalUsd, unitKrw, unitUsd, commissionType: type, commissionValue: value }
+}
+
+export function formatCommissionTypeLabel(type) {
+  return COMMISSION_TYPES.find(t => t.value === type)?.label || 'None'
+}
+
+export function formatDefaultCommissionDisplay(item, currency = 'KRW') {
+  const type = normalizeCommissionType(item)
+  const value = resolveCommissionValue(item)
+  const middleman = String(item?.default_middleman_name || '').trim()
+  if (!middleman && (!type || value <= 0)) return 'Not Set'
+  let commissionLabel = 'Not Set'
+  if (type && value > 0) {
+    if (type === COMMISSION_TYPE_PERCENTAGE) commissionLabel = `${value}%`
+    else if (type === COMMISSION_TYPE_FIXED_PER_UNIT) {
+      commissionLabel = currency === 'USD' ? `$${value.toFixed(2)}/unit` : `${formatKrw(value)}/unit`
+    } else if (type === COMMISSION_TYPE_FIXED_TOTAL) {
+      commissionLabel = currency === 'USD' ? `$${value.toFixed(2)} total` : `${formatKrw(value)} total`
+    }
+  }
+  if (!middleman) return commissionLabel
+  if (commissionLabel === 'Not Set') return middleman
+  return `${middleman} — ${commissionLabel}`
+}
+
+export function validateInventoryCommissionDefaults(fields) {
+  const type = normalizeCommissionType(fields)
+  const value = resolveCommissionValue(fields)
+  const middleman = String(fields?.default_middleman_name || '').trim()
+  if (value < 0) return 'Commission value cannot be negative.'
+  if (type === COMMISSION_TYPE_PERCENTAGE && value > 100) return 'Percentage must be between 0 and 100.'
+  if (type && value > 0 && !middleman) return 'Select a Default Middle Man when commission is set.'
+  if (middleman && type && value <= 0) return 'Commission value must be greater than 0 when a type is selected.'
+  return ''
+}
+
+export function validateLineCommissionFields(line) {
+  const type = normalizeCommissionType(line)
+  const value = resolveCommissionValue(line)
+  if (value < 0) return 'Commission value cannot be negative.'
+  if (type === COMMISSION_TYPE_PERCENTAGE && value > 100) return 'Percentage must be between 0 and 100.'
+  return ''
+}
+
+export function applyInventoryDefaultsToPoLine(inventoryItem, partialLine = {}, currency = 'KRW', exchangeRate = 1350) {
+  if (!inventoryItem) return partialLine
+  const base = buildPoLineFromInventoryItem(inventoryItem, currency, exchangeRate)
+  return {
+    ...base,
+    ...partialLine,
+    inventory_id: inventoryItem.id,
+    product_sku: partialLine.product_sku ?? base.product_sku,
+    product_name: partialLine.product_name ?? base.product_name,
+    brand: partialLine.brand ?? base.brand,
+    korean_unit_cost: partialLine.korean_unit_cost ?? base.korean_unit_cost,
+    middleman_name: partialLine.middleman_name ?? inventoryItem.default_middleman_name ?? '',
+    commission_type: partialLine.commission_type ?? inventoryItem.default_commission_type ?? '',
+    commission_value: partialLine.commission_value ?? (
+      inventoryItem.default_commission_value != null && inventoryItem.default_commission_value !== ''
+        ? String(inventoryItem.default_commission_value)
+        : ''
+    ),
+  }
+}
+
+/** Load saved lines into the PO form with legacy field mapping. */
 export function preparePoFormLines(lines, exchangeRate = 1350) {
-  const rate = Math.max(Number(exchangeRate) || 0, 0)
   return (lines || []).map(line => {
-    let commissionKrw = line.middleman_commission_unit_krw
-    if (commissionKrw == null || commissionKrw === '') {
-      const savedUsd = Math.max(Number(line.commission_per_unit_usd ?? line.commission_per_unit) || 0, 0)
-      if (savedUsd > 0 && rate > 0) {
-        commissionKrw = savedUsd * rate
-      } else {
-        commissionKrw = ''
-      }
+    let commissionType = String(line.commission_type || '').trim().toLowerCase()
+    let commissionValue = line.commission_value
+    if (!commissionType && Number(line.middleman_commission_unit_krw) > 0) {
+      commissionType = COMMISSION_TYPE_FIXED_PER_UNIT
+      commissionValue = line.middleman_commission_unit_krw
+    } else if (!commissionType && Number(line.commission_percent) > 0) {
+      commissionType = COMMISSION_TYPE_PERCENTAGE
+      commissionValue = line.commission_percent
     }
     return {
       ...line,
-      middleman_commission_unit_krw: commissionKrw,
+      middleman_name: line.middleman_name || '',
+      commission_type: commissionType,
+      commission_value: commissionValue ?? '',
+      middleman_commission_unit_krw: '',
       commission_percent: 0,
     }
   })
@@ -144,18 +354,18 @@ export function calcLineItem(raw, purchaseType, currency = 'KRW', exchangeRate =
   const curr = currency || 'KRW'
   const rate = resolveExchangeRate(curr, exchangeRate)
   const factoryUnitKrw = Math.max(Number(raw.korean_unit_cost) || 0, 0)
-  const isMiddleman = isMiddlemanPurchaseType(purchaseType)
-  const commissionUnitKrw = isMiddleman ? Math.max(Number(raw.middleman_commission_unit_krw) || 0, 0) : 0
   const receivedQty = Math.max(Number(raw.received_qty) || 0, 0)
   const factoryUnitUsd = rate > 0 ? factoryUnitKrw / rate : 0
-  const commissionPerUnitUsd = isMiddleman && rate > 0 ? commissionUnitKrw / rate : 0
-  const commissionUnitUsdStored = commissionPerUnitUsd
-  const totalUnitCostKrw = factoryUnitKrw + commissionUnitKrw
-  const totalUnitCostUsd = rate > 0 ? totalUnitCostKrw / rate : 0
   const productCostOriginal = orderQty * factoryUnitKrw
   const productCostUsd = orderQty * factoryUnitUsd
-  const commissionTotalKrw = orderQty * commissionUnitKrw
-  const commissionTotalUsd = commissionPerUnitUsd * orderQty
+  const commission = calcLineCommissionTotals(raw, orderQty, productCostOriginal, curr, rate)
+  const hasCommission = commission.totalKrw > 0 || commission.totalUsd > 0
+  const commissionUnitKrw = hasCommission ? commission.unitKrw : 0
+  const commissionPerUnitUsd = hasCommission ? commission.unitUsd : 0
+  const commissionTotalKrw = commission.totalKrw
+  const commissionTotalUsd = commission.totalUsd
+  const totalUnitCostKrw = factoryUnitKrw + (orderQty > 0 ? commissionUnitKrw : 0)
+  const totalUnitCostUsd = rate > 0 ? totalUnitCostKrw / rate : factoryUnitUsd
   const totalLineCostUsd = totalUnitCostUsd * orderQty
   const remainingQty = Math.max(orderQty - receivedQty, 0)
   return {
@@ -166,13 +376,16 @@ export function calcLineItem(raw, purchaseType, currency = 'KRW', exchangeRate =
     factory_unit_cost_original: factoryUnitKrw,
     factory_unit_cost_krw: factoryUnitKrw,
     factory_unit_cost_usd: factoryUnitUsd,
+    middleman_name: String(raw.middleman_name || '').trim(),
+    commission_type: commission.commissionType || normalizeCommissionType(raw),
+    commission_value: commission.commissionValue || resolveCommissionValue(raw),
     middleman_commission_unit_krw: commissionUnitKrw,
-    middleman_commission_unit_usd: commissionUnitUsdStored,
+    middleman_commission_unit_usd: commissionPerUnitUsd,
     middleman_commission_total_krw: commissionTotalKrw,
     middleman_commission_total_usd: commissionTotalUsd,
     total_unit_cost_krw: totalUnitCostKrw,
     total_unit_cost_usd: totalUnitCostUsd,
-    commission_percent: 0,
+    commission_percent: commission.commissionType === COMMISSION_TYPE_PERCENTAGE ? commission.commissionValue : 0,
     commission_per_unit: commissionPerUnitUsd,
     commission_per_unit_usd: commissionPerUnitUsd,
     product_cost: productCostOriginal,
@@ -185,6 +398,27 @@ export function calcLineItem(raw, purchaseType, currency = 'KRW', exchangeRate =
     received_qty: receivedQty,
     remaining_qty: remainingQty,
   }
+}
+
+export function resolvePoShippingOther(header, receives) {
+  const headerShipping = Math.max(Number(header?.shipping_cost) || 0, 0)
+  const headerOther = Math.max(Number(header?.other_cost) || 0, 0)
+  const receivedShipping = sumReceiveCosts(receives).shippingCost
+  const receivedOther = sumReceiveCosts(receives).otherCost
+  return {
+    shippingCost: headerShipping || receivedShipping,
+    otherCost: headerOther || receivedOther,
+  }
+}
+
+export function poShippingPerUnit(shippingCost, totalOrderedUnits) {
+  const units = Math.max(Number(totalOrderedUnits) || 0, 1)
+  return Math.max(Number(shippingCost) || 0, 0) / units
+}
+
+export function poOtherPerUnit(otherCost, totalOrderedUnits) {
+  const units = Math.max(Number(totalOrderedUnits) || 0, 1)
+  return Math.max(Number(otherCost) || 0, 0) / units
 }
 
 export function calcPoTotals(header, lines, receives) {
@@ -201,10 +435,7 @@ export function calcPoTotals(header, lines, receives) {
   const totalCommissionOriginal = isMiddlemanPurchaseType(purchaseType)
     ? computed.reduce((s, l) => s + (l.middleman_commission_total_krw || 0), 0)
     : 0
-  const receivedShipping = sumReceiveCosts(receives).shippingCost
-  const receivedOther = sumReceiveCosts(receives).otherCost
-  const shippingCost = receivedShipping || Math.max(Number(header.shipping_cost) || 0, 0)
-  const otherCost = receivedOther || Math.max(Number(header.other_cost) || 0, 0)
+  const { shippingCost, otherCost } = resolvePoShippingOther(header, receives)
   const totalPurchaseCostUsd = totalProductCostUsd + totalCommissionUsd + shippingCost + otherCost
   const grandTotalOriginal = totalProductCost + totalCommissionOriginal + (currency === 'USD' ? shippingCost + otherCost : 0)
   const grandTotal = totalPurchaseCostUsd
@@ -237,12 +468,26 @@ export function sumReceiveCosts(receives) {
   }
 }
 
-export function allocateReceiveCosts(receiveLines, shippingCost, otherCost, purchaseType = 'direct') {
+export function allocateReceiveCosts(receiveLines, shippingCost, otherCost, purchaseType = 'direct', po = null, allItems = null) {
   const isMiddleman = isMiddlemanPurchaseType(purchaseType)
   const active = (receiveLines || []).filter(l => Number(l.receive_now) > 0)
+  const poItems = allItems || receiveLines
+  const poTotals = po ? calcPoTotals(po, poItems) : null
+  const totalOrderedUnits = Math.max(Number(poTotals?.totalOrderedUnits) || 0, 0)
+    || active.reduce((s, l) => s + Math.max(Number(l.order_qty) || 0, 0), 0)
+    || 1
+  const poShippingPerUnitUsd = po
+    ? poShippingPerUnit(Math.max(Number(po.shipping_cost) || Number(poTotals?.shippingCost) || 0, 0), totalOrderedUnits)
+    : 0
+  const poOtherPerUnitUsd = po
+    ? poOtherPerUnit(Math.max(Number(po.other_cost) || Number(poTotals?.otherCost) || 0, 0), totalOrderedUnits)
+    : 0
+  const usePoLevelCosts = po && (poShippingPerUnitUsd > 0 || poOtherPerUnitUsd > 0)
+  const batchShipping = usePoLevelCosts ? 0 : Math.max(Number(shippingCost) || 0, 0)
+  const batchOther = usePoLevelCosts ? 0 : Math.max(Number(otherCost) || 0, 0)
   const lineUnitUsd = (line) => {
     const factoryUnitUsd = Math.max(Number(line.factory_unit_cost_usd ?? line.factory_unit_cost) || 0, 0)
-    const commissionPerUnit = isMiddleman
+    const commissionPerUnit = (isMiddleman || lineHasCommissionSettings(line))
       ? Math.max(Number(line.commission_per_unit_usd ?? line.commission_per_unit) || 0, 0)
       : 0
     const totalUnitUsd = Math.max(Number(line.total_unit_cost_usd) || 0, factoryUnitUsd + commissionPerUnit)
@@ -257,11 +502,20 @@ export function allocateReceiveCosts(receiveLines, shippingCost, otherCost, purc
     const { factoryUnitUsd, commissionPerUnit, totalUnitUsd } = lineUnitUsd(line)
     const itemValue = receiveQty * totalUnitUsd
     const share = itemValue / totalReceivedValue
-    const shippingAllocation = shippingCost * share
-    const otherCostAllocation = otherCost * share
-    const shippingPerUnit = receiveQty > 0 ? shippingAllocation / receiveQty : 0
-    const otherPerUnit = receiveQty > 0 ? otherCostAllocation / receiveQty : 0
-    const landedUnitCost = totalUnitUsd + shippingPerUnit + otherPerUnit
+    const batchShippingAllocation = batchShipping * share
+    const batchOtherAllocation = batchOther * share
+    const batchShippingPerUnit = receiveQty > 0 ? batchShippingAllocation / receiveQty : 0
+    const batchOtherPerUnit = receiveQty > 0 ? batchOtherAllocation / receiveQty : 0
+    const shippingPerUnit = poShippingPerUnitUsd + batchShippingPerUnit
+    const otherPerUnit = poOtherPerUnitUsd + batchOtherPerUnit
+    const shippingAllocation = shippingPerUnit * receiveQty
+    const otherCostAllocation = otherPerUnit * receiveQty
+    const unitCosts = calcReceiveInventoryUnitCosts(
+      factoryUnitUsd,
+      commissionPerUnit,
+      shippingPerUnit,
+      otherPerUnit,
+    )
     return {
       ...line,
       receive_now: receiveQty,
@@ -270,37 +524,65 @@ export function allocateReceiveCosts(receiveLines, shippingCost, otherCost, purc
       commission_per_unit: commissionPerUnit,
       commission_per_unit_usd: commissionPerUnit,
       total_unit_cost_usd: totalUnitUsd,
+      shipping_per_unit: shippingPerUnit,
+      other_per_unit: otherPerUnit,
+      inventory_buying_per_unit: unitCosts.inventoryBuyingPerUnit,
       shipping_allocation: shippingAllocation,
       other_cost_allocation: otherCostAllocation,
-      landed_unit_cost: landedUnitCost,
-      final_unit_cost: landedUnitCost,
+      landed_unit_cost: unitCosts.landedUnitCost,
+      final_unit_cost: unitCosts.landedUnitCost,
     }
   })
 }
 
-export function calcWeightedBuyingPrice(oldQty, oldBuyingPrice, receiveQty, landedUnitCost) {
+export function calcWeightedAverage(oldQty, oldValue, receiveQty, unitValue) {
   const oq = Math.max(Number(oldQty) || 0, 0)
   const rq = Math.max(Number(receiveQty) || 0, 0)
-  const landed = Number(landedUnitCost) || 0
-  if (rq <= 0) return Number(oldBuyingPrice) || 0
-  if (oq <= 0) return landed
-  const ob = Number(oldBuyingPrice) || 0
-  return ((oq * ob) + (rq * landed)) / (oq + rq)
+  const unit = Number(unitValue) || 0
+  if (rq <= 0) return Number(oldValue) || 0
+  if (oq <= 0) return unit
+  const ov = Number(oldValue) || 0
+  return ((oq * ov) + (rq * unit)) / (oq + rq)
+}
+
+export function calcWeightedBuyingPrice(oldQty, oldBuyingPrice, receiveQty, landedUnitCost) {
+  return calcWeightedAverage(oldQty, oldBuyingPrice, receiveQty, landedUnitCost)
+}
+
+export function calcReceiveInventoryUnitCosts(factoryUnitUsd, commissionPerUnit, shippingPerUnit, otherPerUnit) {
+  const factory = Math.max(Number(factoryUnitUsd) || 0, 0)
+  const commission = Math.max(Number(commissionPerUnit) || 0, 0)
+  const shipping = Math.max(Number(shippingPerUnit) || 0, 0)
+  const other = Math.max(Number(otherPerUnit) || 0, 0)
+  const inventoryBuyingPerUnit = factory + commission + other
+  const landedUnitCost = inventoryBuyingPerUnit + shipping
+  return {
+    shippingPerUnit: shipping,
+    otherPerUnit: other,
+    inventoryBuyingPerUnit,
+    landedUnitCost,
+  }
 }
 
 export function allocateLineCosts(lines, shippingCost, otherCost, purchaseType = 'direct', currency = 'KRW', exchangeRate = 1) {
   const isMiddleman = isMiddlemanPurchaseType(purchaseType)
   const computed = (lines || []).map(l => calcLineItem(l, purchaseType, currency, exchangeRate))
-  const totalProductCostUsd = computed.reduce((s, l) => s + l.product_cost_usd, 0) || 1
+  const totalOrderedUnits = computed.reduce((s, l) => s + l.order_qty, 0) || 1
+  const shippingPerUnit = poShippingPerUnit(shippingCost, totalOrderedUnits)
+  const otherPerUnit = poOtherPerUnit(otherCost, totalOrderedUnits)
   return computed.map(line => {
-    const share = line.product_cost_usd / totalProductCostUsd
-    const shippingAllocation = shippingCost * share
-    const otherCostAllocation = otherCost * share
-    const commissionPerUnit = isMiddleman ? line.commission_per_unit_usd : 0
-    const shippingPerUnit = line.order_qty > 0 ? shippingAllocation / line.order_qty : 0
-    const otherPerUnit = line.order_qty > 0 ? otherCostAllocation / line.order_qty : 0
-    const totalUnitUsd = line.total_unit_cost_usd || (line.factory_unit_cost_usd + commissionPerUnit)
-    const finalUnitCost = totalUnitUsd + shippingPerUnit + otherPerUnit
+    const commissionPerUnit = lineHasCommissionSettings(line) || isMiddlemanPurchaseType(purchaseType)
+      ? line.commission_per_unit_usd
+      : 0
+    const shippingAllocation = shippingPerUnit * line.order_qty
+    const otherCostAllocation = otherPerUnit * line.order_qty
+    const unitCosts = calcReceiveInventoryUnitCosts(
+      line.factory_unit_cost_usd,
+      commissionPerUnit,
+      shippingPerUnit,
+      otherPerUnit,
+    )
+    const finalUnitCost = unitCosts.landedUnitCost
     const finalLineCost = finalUnitCost * line.order_qty
     return {
       ...line,
@@ -315,22 +597,23 @@ export function allocateLineCosts(lines, shippingCost, otherCost, purchaseType =
 }
 
 export function validatePoSave(header, lines) {
-  const purchaseType = header.purchase_type || 'direct'
+  const purchaseType = resolvePurchaseType(header, lines)
   const currency = header.currency || 'KRW'
   if (!String(header.supplier || '').trim()) return 'Supplier is required.'
-  if (isMiddlemanPurchaseType(purchaseType) && !String(header.middleman_name || '').trim()) {
-    return 'Middleman Name is required for Through Middleman purchase orders.'
-  }
   if (currency !== 'USD' && resolveExchangeRate(currency, header.exchange_rate) <= 0) {
     return 'Exchange Rate must be greater than 0.'
   }
   const computed = calcPoTotals(header, lines)
   if (!computed.lines.length) return 'Add at least one product line.'
+  if (Math.max(Number(header.shipping_cost) || 0, 0) < 0) return 'Shipping Cost cannot be negative.'
+  if (Math.max(Number(header.other_cost) || 0, 0) < 0) return 'Other Cost cannot be negative.'
   for (const line of computed.lines) {
     if (line.order_qty < 0) return 'Quantity cannot be negative.'
     if (line.factory_unit_cost_original < 0) return 'Factory Unit Cost cannot be negative.'
-    if (isMiddlemanPurchaseType(purchaseType) && line.middleman_commission_unit_krw < 0) {
-      return 'Middleman Commission Per Unit cannot be negative.'
+    const commissionErr = validateLineCommissionFields(line)
+    if (commissionErr) return commissionErr
+    if (lineHasCommissionSettings(line) && !String(line.middleman_name || '').trim()) {
+      return `Middle Man is required for ${line.product_sku || line.product_name || 'a product line'} with commission.`
     }
     if (line.order_qty <= 0) return 'Each product line must have Order Qty greater than 0.'
   }
@@ -349,44 +632,49 @@ export function validateReceiveExchangeRate(po) {
 export function normalizePoSavePayload(header, lines, existingPo) {
   const purchaseType = header.purchase_type || 'direct'
   const currency = header.currency || 'KRW'
-  const accumulatedShipping = Number(existingPo?.shipping_cost) || 0
-  const accumulatedOther = Number(existingPo?.other_cost) || 0
+  const shippingCost = Math.max(Number(header.shipping_cost) || 0, 0)
+  const otherCost = Math.max(Number(header.other_cost) || 0, 0)
   const totals = calcPoTotals(
     {
       ...header,
       purchase_type: purchaseType,
       exchange_rate: currency === 'USD' ? 1 : header.exchange_rate,
-      shipping_cost: accumulatedShipping,
-      other_cost: accumulatedOther,
+      shipping_cost: shippingCost,
+      other_cost: otherCost,
     },
     lines,
     existingPo?.receives,
   )
   const normalizedLines = totals.lines.map(line => ({
     ...line,
-    middleman_commission_unit_krw: isMiddlemanPurchaseType(purchaseType) ? line.middleman_commission_unit_krw : 0,
-    middleman_commission_unit_usd: isMiddlemanPurchaseType(purchaseType) ? line.middleman_commission_unit_usd : 0,
-    middleman_commission_total_krw: isMiddlemanPurchaseType(purchaseType) ? line.middleman_commission_total_krw : 0,
-    middleman_commission_total_usd: isMiddlemanPurchaseType(purchaseType) ? line.middleman_commission_total_usd : 0,
-    total_unit_cost_krw: isMiddlemanPurchaseType(purchaseType) ? line.total_unit_cost_krw : line.factory_unit_cost_original,
+    middleman_name: line.middleman_name || '',
+    commission_type: line.commission_type || '',
+    commission_value: line.commission_value || 0,
+    middleman_commission_unit_krw: line.middleman_commission_unit_krw || 0,
+    middleman_commission_unit_usd: line.middleman_commission_unit_usd || 0,
+    middleman_commission_total_krw: line.middleman_commission_total_krw || 0,
+    middleman_commission_total_usd: line.middleman_commission_total_usd || 0,
+    total_unit_cost_krw: line.total_unit_cost_krw,
     total_unit_cost_usd: line.total_unit_cost_usd,
-    commission_percent: 0,
-    commission_per_unit: isMiddlemanPurchaseType(purchaseType) ? line.commission_per_unit_usd : 0,
-    commission_per_unit_usd: isMiddlemanPurchaseType(purchaseType) ? line.commission_per_unit_usd : 0,
-    commission_total: isMiddlemanPurchaseType(purchaseType) ? line.commission_total_usd : 0,
-    commission_total_usd: isMiddlemanPurchaseType(purchaseType) ? line.commission_total_usd : 0,
+    commission_percent: line.commission_type === COMMISSION_TYPE_PERCENTAGE ? line.commission_value : 0,
+    commission_per_unit: line.commission_per_unit_usd || 0,
+    commission_per_unit_usd: line.commission_per_unit_usd || 0,
+    commission_total: line.commission_total_usd || 0,
+    commission_total_usd: line.commission_total_usd || 0,
     total_line_cost: line.total_line_cost_usd,
     total_line_cost_usd: line.total_line_cost_usd,
   }))
-  const grandTotalUsd = totals.totalProductCostUsd + totals.totalCommissionUsd + accumulatedShipping + accumulatedOther
+  const derivedMiddleman = normalizedLines.map(l => l.middleman_name).find(Boolean) || header.middleman_name || ''
+  const resolvedType = totals.purchaseType || resolvePurchaseType(header, lines)
+  const grandTotalUsd = totals.totalProductCostUsd + totals.totalCommissionUsd + shippingCost + otherCost
   return {
     header: {
       ...header,
-      purchase_type: purchaseType,
-      middleman_name: isMiddlemanPurchaseType(purchaseType) ? (header.middleman_name || '') : '',
+      purchase_type: resolvedType,
+      middleman_name: isMiddlemanPurchaseType(resolvedType) ? derivedMiddleman : '',
       exchange_rate: currency === 'USD' ? 1 : resolveExchangeRate(currency, header.exchange_rate),
-      shipping_cost: accumulatedShipping,
-      other_cost: accumulatedOther,
+      shipping_cost: shippingCost,
+      other_cost: otherCost,
       total_product_cost: totals.totalProductCost,
       total_commission: totals.totalCommissionUsd,
       total_product_cost_usd: totals.totalProductCostUsd,
@@ -396,8 +684,8 @@ export function normalizePoSavePayload(header, lines, existingPo) {
     lines: normalizedLines,
     totals: {
       ...totals,
-      shippingCost: accumulatedShipping,
-      otherCost: accumulatedOther,
+      shippingCost,
+      otherCost,
       grandTotal: grandTotalUsd,
       totalPurchaseCost: grandTotalUsd,
       totalPurchaseCostUsd: grandTotalUsd,
@@ -455,12 +743,34 @@ export function poCommissionPaymentsForOrder(payments, poId) {
     })
 }
 
+export function paymentAmountKrw(payment, po) {
+  const krw = Number(payment?.amount_krw) || 0
+  if (krw > 0) return krw
+  const usd = Number(payment?.amount) || 0
+  if (usd <= 0) return 0
+  const rate = resolveExchangeRate(po?.currency || 'KRW', po?.exchange_rate)
+  return rate > 0 ? usd * rate : 0
+}
+
+export function paymentAmountUsd(payment, po) {
+  return convertCommissionKrwToUsd(paymentAmountKrw(payment, po), po)
+}
+
+export function convertCommissionKrwToUsd(krw, po) {
+  const rate = resolveExchangeRate(po?.currency || 'KRW', po?.exchange_rate)
+  if (rate <= 0) return 0
+  return (Number(krw) || 0) / rate
+}
+
 export function totalCommissionPaid(payments, po) {
   const list = payments || []
   if (list.length) {
-    return list.reduce((s, p) => s + Math.max(Number(p.amount) || 0, 0), 0)
+    return list.reduce((s, p) => s + Math.max(paymentAmountKrw(p, po), 0), 0)
   }
-  return Number(po?.commission_amount_paid) || 0
+  const legacyUsd = Number(po?.commission_amount_paid) || 0
+  if (legacyUsd <= 0) return 0
+  const rate = resolveExchangeRate(po?.currency || 'KRW', po?.exchange_rate)
+  return rate > 0 ? legacyUsd * rate : 0
 }
 
 export function commissionPaymentsChronological(payments) {
@@ -472,58 +782,68 @@ export function commissionPaymentsChronological(payments) {
 }
 
 export function commissionPaymentReceiptTotals(po, items, payments, paymentId) {
-  const due = commissionAmountDue(po, items)
+  const dueKrw = commissionAmountDue(po, items)
   const chronological = commissionPaymentsChronological(payments)
   const idx = chronological.findIndex(p => String(p.id) === String(paymentId))
   if (idx < 0) return null
-  const paidAfter = chronological
+  const paidAfterKrw = chronological
     .slice(0, idx + 1)
-    .reduce((s, p) => s + Math.max(Number(p.amount) || 0, 0), 0)
-  const balance = Math.max(due - paidAfter, 0)
+    .reduce((s, p) => s + Math.max(paymentAmountKrw(p, po), 0), 0)
+  const balanceKrw = Math.max(dueKrw - paidAfterKrw, 0)
   let status = 'Unpaid'
-  if (due <= 0) status = 'Paid'
-  else if (paidAfter <= 0) status = 'Unpaid'
-  else if (balance <= 0.001) status = 'Paid'
+  if (dueKrw <= 0) status = 'Paid'
+  else if (paidAfterKrw <= 0) status = 'Unpaid'
+  else if (balanceKrw <= 0) status = 'Paid'
   else status = 'Partial'
-  return { due, paidAfter, balance, status }
+  return { dueKrw, paidAfterKrw, balanceKrw, status }
 }
 
-export function formatPrintDate(value = new Date()) {
-  const d = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-}
+export { formatDisplayDate, formatPrintDate } from './dateFormat.js'
 
 export function commissionPaymentSummary(po, items, payments) {
   if (!isMiddlemanPo(po, items)) {
-    return { due: 0, paid: 0, balance: 0, status: 'Paid' }
+    return {
+      dueKrw: 0, paidKrw: 0, balanceKrw: 0, status: 'Paid',
+      dueUsd: 0, paidUsd: 0, balanceUsd: 0,
+    }
   }
-  const due = commissionAmountDue(po, items)
-  const paid = totalCommissionPaid(payments, po)
-  const balance = Math.max(due - paid, 0)
+  const dueKrw = commissionAmountDue(po, items)
+  const paidKrw = totalCommissionPaid(payments, po)
+  const balanceKrw = Math.max(dueKrw - paidKrw, 0)
   let status = 'Unpaid'
-  if (due <= 0) status = 'Paid'
-  else if (paid <= 0) status = 'Unpaid'
-  else if (balance <= 0.001) status = 'Paid'
+  if (dueKrw <= 0) status = 'Paid'
+  else if (paidKrw <= 0) status = 'Unpaid'
+  else if (balanceKrw <= 0) status = 'Paid'
   else status = 'Partial'
-  return { due, paid, balance, status }
+  return {
+    dueKrw,
+    paidKrw,
+    balanceKrw,
+    status,
+    dueUsd: convertCommissionKrwToUsd(dueKrw, po),
+    paidUsd: convertCommissionKrwToUsd(paidKrw, po),
+    balanceUsd: convertCommissionKrwToUsd(balanceKrw, po),
+  }
 }
 
 export function commissionBalance(po, items, payments) {
-  return commissionPaymentSummary(po, items, payments).balance
+  return commissionPaymentSummary(po, items, payments).balanceKrw
 }
 
 export function commissionAmountDue(po, items) {
   if (!isMiddlemanPo(po, items)) return 0
   if (items?.length) {
+    const purchaseType = resolvePurchaseType(po, items)
     const currency = po?.currency || 'KRW'
     const rate = resolveExchangeRate(currency, po?.exchange_rate)
     return items.reduce((s, raw) => {
-      const line = calcLineItem(raw, 'middleman', currency, rate)
-      return s + line.commission_total_usd
+      const line = calcLineItem(raw, purchaseType, currency, rate)
+      return s + Math.max(Number(line.middleman_commission_total_krw) || 0, 0)
     }, 0)
   }
-  return Number(po?.total_commission) || 0
+  const rate = resolveExchangeRate(po?.currency || 'KRW', po?.exchange_rate)
+  const legacyUsd = Number(po?.total_commission) || 0
+  return rate > 0 && legacyUsd > 0 ? legacyUsd * rate : 0
 }
 
 export function deriveCommissionPaymentStatus(po, items, payments) {
@@ -532,7 +852,7 @@ export function deriveCommissionPaymentStatus(po, items, payments) {
 
 export function blankCommissionPaymentEntry() {
   return {
-    amount: '',
+    amount_krw: '',
     payment_date: '',
     payment_method: 'Wire Transfer',
     reference_number: '',
@@ -541,8 +861,8 @@ export function blankCommissionPaymentEntry() {
 }
 
 export function validateCommissionPaymentEntry(entry) {
-  const amount = Number(entry?.amount) || 0
-  if (amount <= 0) return 'Amount Paid must be greater than 0.'
+  const amountKrw = Number(entry?.amount_krw) || 0
+  if (amountKrw <= 0) return 'Amount Paid (KRW) must be greater than 0.'
   if (!String(entry?.payment_date || '').trim()) return 'Payment Date is required.'
   if (!String(entry?.payment_method || '').trim()) return 'Payment Method is required.'
   return ''
@@ -572,6 +892,76 @@ export function nextReceiveNumber(receives, poNumber) {
   return `${poNumber || 'PO'}-R${String(max + 1).padStart(2, '0')}`
 }
 
+export function normalizePoSku(value) {
+  return String(value || '').trim()
+}
+
+export function findInventoryBySku(inventory, sku) {
+  const key = normalizePoSku(sku).toLowerCase()
+  if (!key) return null
+  return (inventory || []).find(i => normalizePoSku(i.style).toLowerCase() === key) || null
+}
+
+export function resolvePoLineInventoryId(line, inventory) {
+  if (line?.inventory_id) return line.inventory_id
+  const match = findInventoryBySku(inventory, line?.product_sku || line?.product_name)
+  return match?.id || null
+}
+
+export function buildInventoryRowFromPoLine(line, po, {
+  landedUnitCost = 0,
+  inventoryBuyingPerUnit = 0,
+  shippingPerUnit = 0,
+  qty = 0,
+  sellingPrice = 0,
+} = {}) {
+  const sku = normalizePoSku(line?.product_sku || line?.product_name)
+  const buying = Math.max(Number(inventoryBuyingPerUnit || landedUnitCost) || 0, 0)
+  const shipping = Math.max(Number(shippingPerUnit) || 0, 0)
+  const selling = Math.max(Number(sellingPrice) || 0, 0)
+  return {
+    style: sku,
+    brand: normalizePoSku(line?.brand) || normalizePoSku(po?.supplier) || '',
+    category: '',
+    qty: Math.max(Number(qty) || 0, 0),
+    buying_price: buying,
+    shipping_cost: shipping,
+    selling_price: selling,
+    cost: buying,
+    price: selling,
+    low_stock: 5,
+  }
+}
+
+export function resolveInventorySellingPrice(item) {
+  return Number(item?.selling_price ?? item?.price ?? item?.retail ?? 0)
+}
+
+export function defaultReceiveSellingPrice(poLine, inventory) {
+  const invId = resolvePoLineInventoryId(poLine, inventory)
+  if (!invId) return ''
+  const inv = (inventory || []).find(i => String(i.id) === String(invId))
+  const selling = resolveInventorySellingPrice(inv)
+  return selling > 0 ? String(selling) : ''
+}
+
+export function parseReceiveSellingPrice(value) {
+  if (value === '' || value == null) return 0
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return NaN
+  return n
+}
+
+export function applyReceiveSellingPriceToInventory(inv, sellingPriceInput) {
+  const parsed = parseReceiveSellingPrice(sellingPriceInput)
+  if (parsed <= 0 || Number.isNaN(parsed)) return inv
+  return {
+    ...inv,
+    selling_price: parsed,
+    price: parsed,
+  }
+}
+
 export function validateReceive(header, lines, items, po) {
   const exchangeError = validateReceiveExchangeRate(po)
   if (exchangeError) return exchangeError
@@ -582,11 +972,17 @@ export function validateReceive(header, lines, items, po) {
   for (const row of payload) {
     const item = (items || []).find(i => String(i.id) === String(row.purchase_order_item_id))
     if (!item) return 'PO line item not found.'
+    const sku = normalizePoSku(item.product_sku || item.product_name)
+    if (!sku) {
+      return `Product SKU is required before receiving inventory (${item.product_name || item.product_sku || 'line item'}).`
+    }
     const receiveNow = Number(row.receive_now)
     if (receiveNow < 0) return 'Receiving quantity cannot be negative.'
     if (receiveNow > item.remaining_qty) {
       return `Cannot receive ${receiveNow} when only ${item.remaining_qty} remaining for ${item.product_sku || item.product_name}.`
     }
+    const sellingPrice = parseReceiveSellingPrice(row.selling_price)
+    if (Number.isNaN(sellingPrice)) return 'Selling Price (USD) must be 0 or greater.'
   }
   return ''
 }
@@ -719,7 +1115,159 @@ export function poMatchesFilter(po, filter) {
   return po.status === filter
 }
 
+export function inventoryBuyingPrice(item) {
+  return Math.max(Number(item?.buying_price ?? item?.cost ?? 0), 0)
+}
+
+export function factoryUnitCostFromInventory(item, currency = 'KRW', exchangeRate = 1350) {
+  const buyingUsd = inventoryBuyingPrice(item)
+  if (buyingUsd <= 0) return ''
+  const curr = currency || 'KRW'
+  const rate = resolveExchangeRate(curr, exchangeRate)
+  if (curr === 'USD') return buyingUsd
+  return rate > 0 ? buyingUsd * rate : ''
+}
+
+export function buildPoLineFromInventoryItem(item, currency = 'KRW', exchangeRate = 1350) {
+  const factoryCost = factoryUnitCostFromInventory(item, currency, exchangeRate)
+  return {
+    ...blankPoLine({ id: item.id, style: item.style, brand: item.brand }),
+    korean_unit_cost: factoryCost !== '' ? String(factoryCost) : '',
+    middleman_name: item.default_middleman_name || '',
+    commission_type: item.default_commission_type || '',
+    commission_value: item.default_commission_value != null && item.default_commission_value !== ''
+      ? String(item.default_commission_value)
+      : '',
+  }
+}
+
+let manualBulkRowSeq = 0
+
+export function blankManualBulkProductRow() {
+  manualBulkRowSeq += 1
+  return {
+    _key: `manual-${manualBulkRowSeq}-${Date.now()}`,
+    product_name: '',
+    product_sku: '',
+    brand: '',
+    supplier: '',
+    order_qty: '',
+    korean_unit_cost: '',
+    middleman_name: '',
+    commission_type: '',
+    commission_value: '',
+    note: '',
+  }
+}
+
+export function inventorySearchHaystack(item) {
+  return [
+    item?.style,
+    item?.product_name,
+    item?.brand,
+    item?.category,
+    item?.supplier,
+    inventorySupplier(item),
+  ].filter(Boolean).join(' ').toLowerCase()
+}
+
+export function isBlankManualBulkRow(row) {
+  return !String(row?.product_name || '').trim()
+    && !String(row?.product_sku || '').trim()
+    && !String(row?.brand || '').trim()
+    && !String(row?.supplier || '').trim()
+    && !String(row?.order_qty || '').trim()
+    && !String(row?.korean_unit_cost || '').trim()
+    && !String(row?.middleman_name || '').trim()
+    && !String(row?.commission_type || '').trim()
+    && !String(row?.commission_value || '').trim()
+    && !String(row?.note || '').trim()
+}
+
+export function validateManualBulkRow(row) {
+  if (isBlankManualBulkRow(row)) return { ok: true, blank: true, errors: {} }
+  const errors = {}
+  if (!String(row.product_name || '').trim()) errors.product_name = 'Product Name is required.'
+  const qty = Number(row.order_qty)
+  if (!Number.isFinite(qty) || qty <= 0) errors.order_qty = 'Order Qty must be greater than 0.'
+  if (row.korean_unit_cost === '' || row.korean_unit_cost == null) {
+    errors.korean_unit_cost = 'Factory Unit Cost is required.'
+  } else {
+    const cost = Number(row.korean_unit_cost)
+    if (Number.isNaN(cost) || cost < 0) errors.korean_unit_cost = 'Factory Unit Cost cannot be negative.'
+  }
+  const commissionErr = validateLineCommissionFields(row)
+  if (commissionErr) errors.commission_value = commissionErr
+  if (lineHasCommissionSettings(row) && !String(row.middleman_name || '').trim()) {
+    errors.middleman_name = 'Middle Man is required when commission is set.'
+  }
+  return { ok: Object.keys(errors).length === 0, blank: false, errors }
+}
+
+export function validateManualBulkRows(rows) {
+  const errorsByKey = {}
+  let hasComplete = false
+  for (const row of rows || []) {
+    const result = validateManualBulkRow(row)
+    if (result.blank) continue
+    hasComplete = true
+    if (!result.ok) errorsByKey[row._key] = result.errors
+  }
+  return { ok: Object.keys(errorsByKey).length === 0, hasComplete, errorsByKey }
+}
+
+export function buildPoLineFromManualBulkRow(row, currency = 'KRW', exchangeRate = 1350) {
+  const productName = String(row.product_name || '').trim()
+  const productSku = String(row.product_sku || '').trim() || productName
+  return {
+    ...blankPoLine(),
+    inventory_id: null,
+    product_name: productName,
+    product_sku: productSku,
+    brand: String(row.brand || '').trim(),
+    order_qty: String(row.order_qty),
+    korean_unit_cost: row.korean_unit_cost !== '' && row.korean_unit_cost != null ? String(row.korean_unit_cost) : '',
+    middleman_name: String(row.middleman_name || '').trim(),
+    commission_type: row.commission_type || '',
+    commission_value: row.commission_value ?? '',
+    note: String(row.note || '').trim(),
+  }
+}
+
+export function isDuplicateManualPoLine(existingLines, candidate) {
+  const name = String(candidate?.product_name || '').trim()
+  const sku = String(candidate?.product_sku || '').trim()
+  if (!name) return false
+  return (existingLines || []).some(line => {
+    if (line?.inventory_id) return false
+    return String(line?.product_name || '').trim() === name
+      && String(line?.product_sku || '').trim() === sku
+  })
+}
+
+export function supplierItemsFromManualRows(manualRows) {
+  return (manualRows || [])
+    .map(row => ({ supplier: row.supplier || '' }))
+    .filter(item => normalizeSupplierName(item.supplier))
+}
+
+export function isBlankPoFormLine(line) {
+  return !line?.inventory_id
+    && !String(line?.product_sku || '').trim()
+    && !String(line?.order_qty || '').trim()
+}
+
 export function blankPoLine(inventoryItem) {
+  const base = {
+    order_qty: '',
+    korean_unit_cost: '',
+    middleman_name: '',
+    commission_type: '',
+    commission_value: '',
+    middleman_commission_unit_krw: '',
+    received_qty: 0,
+    note: '',
+  }
   if (inventoryItem) {
     return {
       id: '',
@@ -727,11 +1275,7 @@ export function blankPoLine(inventoryItem) {
       product_sku: inventoryItem.style || '',
       product_name: inventoryItem.style || '',
       brand: inventoryItem.brand || '',
-      order_qty: '',
-      korean_unit_cost: '',
-      middleman_commission_unit_krw: '',
-      received_qty: 0,
-      note: '',
+      ...base,
     }
   }
   return {
@@ -740,11 +1284,7 @@ export function blankPoLine(inventoryItem) {
     product_sku: '',
     product_name: '',
     brand: '',
-    order_qty: '',
-    korean_unit_cost: '',
-    middleman_commission_unit_krw: '',
-    received_qty: 0,
-    note: '',
+    ...base,
   }
 }
 
@@ -757,6 +1297,8 @@ export function blankPoHeader(poNumber) {
     middleman_name: '',
     currency: 'KRW',
     exchange_rate: '1350',
+    shipping_cost: '',
+    other_cost: '',
     eta: '',
     status: 'Draft',
     notes: '',
@@ -894,10 +1436,11 @@ export function middlemanCommissionReport(purchaseOrders, purchaseOrderItems, da
     if (dateTo && String(po.order_date || '') > dateTo) continue
     const purchaseType = resolvePurchaseType(po, items)
     for (const line of items.map(l => calcLineItem(l, purchaseType, po.currency, po.exchange_rate))) {
+      if (!(line.middleman_commission_total_krw > 0 || line.commission_total_usd > 0)) continue
       rows.push({
         id: `${po.id}-${line.id}`,
         date: po.order_date,
-        middleman: po.middleman_name,
+        middleman: line.middleman_name || po.middleman_name,
         po_number: po.po_number,
         product: line.product_sku || line.product_name,
         qty: line.order_qty,

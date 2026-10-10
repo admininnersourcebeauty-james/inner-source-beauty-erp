@@ -1,0 +1,102 @@
+<section class="isb-benefits" id="isb-benefits-{{ section.id }}">
+  <div class="isb-benefits__grid page-width">
+    {%- for block in section.blocks -%}
+      <div class="isb-benefits__item{% unless forloop.last %} isb-benefits__item--divider{% endunless %}" {{ block.shopify_attributes }}>
+        <div class="isb-benefits__icon">
+          {%- case block.settings.icon -%}
+            {%- when 'leaf' -%}{% render 'isb-icon-leaf' %}
+            {%- when 'sparkle' -%}{% render 'isb-icon-sparkle' %}
+            {%- when 'shield' -%}{% render 'isb-icon-shield' %}
+            {%- else -%}{% render 'isb-icon-atom' %}
+          {%- endcase -%}
+        </div>
+        {%- if block.settings.title != blank -%}
+          <h3 class="isb-benefits__title">{{ block.settings.title | escape }}</h3>
+        {%- endif -%}
+        {%- if block.settings.text != blank -%}
+          <p class="isb-benefits__text">{{ block.settings.text | newline_to_br }}</p>
+        {%- endif -%}
+      </div>
+    {%- endfor -%}
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Benefits",
+  "tag": "section",
+  "class": "isb-section-benefits",
+  "max_blocks": 4,
+  "blocks": [
+    {
+      "type": "benefit",
+      "name": "Benefit",
+      "settings": [
+        {
+          "type": "select",
+          "id": "icon",
+          "label": "Icon",
+          "options": [
+            { "value": "atom", "label": "Science / atom" },
+            { "value": "leaf", "label": "Leaf" },
+            { "value": "sparkle", "label": "Sparkle" },
+            { "value": "shield", "label": "Shield" }
+          ],
+          "default": "atom"
+        },
+        {
+          "type": "text",
+          "id": "title",
+          "label": "Title",
+          "default": "SCIENCE-DRIVEN"
+        },
+        {
+          "type": "textarea",
+          "id": "text",
+          "label": "Description",
+          "default": "Advanced formulas\nbacked by research."
+        }
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "ISB Benefits",
+      "blocks": [
+        {
+          "type": "benefit",
+          "settings": {
+            "icon": "atom",
+            "title": "SCIENCE-DRIVEN",
+            "text": "Advanced formulas\nbacked by research."
+          }
+        },
+        {
+          "type": "benefit",
+          "settings": {
+            "icon": "leaf",
+            "title": "CLEAN INGREDIENTS",
+            "text": "Carefully selected,\nsafe and effective."
+          }
+        },
+        {
+          "type": "benefit",
+          "settings": {
+            "icon": "sparkle",
+            "title": "VISIBLE RESULTS",
+            "text": "Real results you\ncan see and feel."
+          }
+        },
+        {
+          "type": "benefit",
+          "settings": {
+            "icon": "shield",
+            "title": "TRUSTED QUALITY",
+            "text": "Tested for safety.\nMade with integrity."
+          }
+        }
+      ]
+    }
+  ]
+}
+{% endschema %}

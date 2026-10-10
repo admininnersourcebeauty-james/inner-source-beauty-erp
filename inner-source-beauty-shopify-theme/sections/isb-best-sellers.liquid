@@ -1,0 +1,107 @@
+<section class="isb-best-sellers" id="isb-best-sellers-{{ section.id }}">
+  <div class="page-width">
+    <div class="isb-best-sellers__header">
+      <div class="isb-section-title isb-section-title--center">
+        <span class="isb-section-title__line"></span>
+        <h2 class="isb-section-title__text">{{ section.settings.heading | escape }}</h2>
+        <span class="isb-section-title__line"></span>
+      </div>
+      {%- if section.settings.view_all_label != blank -%}
+        <a href="{{ section.settings.collection.url | default: routes.all_products_collection_url }}" class="isb-best-sellers__view-all">
+          {{ section.settings.view_all_label | escape }}
+        </a>
+      {%- endif -%}
+    </div>
+
+    <div class="isb-best-sellers__grid">
+      {%- assign product_blocks = section.blocks | where: 'type', 'product' -%}
+      {%- if product_blocks.size > 0 -%}
+        {%- for block in product_blocks limit: 4 -%}
+          {%- assign featured_product = block.settings.product -%}
+          {%- if featured_product != blank -%}
+            <div {{ block.shopify_attributes }}>
+              {% render 'isb-product-card', product: featured_product, subtitle_override: block.settings.subtitle %}
+            </div>
+          {%- endif -%}
+        {%- endfor -%}
+      {%- elsif section.settings.collection != blank -%}
+        {%- for featured_product in section.settings.collection.products limit: section.settings.products_to_show -%}
+          {% render 'isb-product-card', product: featured_product %}
+        {%- endfor -%}
+      {%- else -%}
+        {%- for i in (1..4) -%}
+          <article class="isb-product-card isb-product-card--placeholder">
+            <div class="isb-product-card__image-wrap">{{ 'product-' | append: i | placeholder_svg_tag: 'isb-placeholder-svg' }}</div>
+            <div class="isb-product-card__info">
+              <h3 class="isb-product-card__title">Product {{ i }}</h3>
+              <p class="isb-product-card__subtitle">Select a collection or products</p>
+              <p class="isb-product-card__price">$0.00</p>
+              <button type="button" class="isb-btn isb-btn--outline" disabled>ADD TO CART</button>
+            </div>
+          </article>
+        {%- endfor -%}
+      {%- endif -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Best Sellers",
+  "tag": "section",
+  "class": "isb-section-best-sellers",
+  "settings": [
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "BEST SELLERS"
+    },
+    {
+      "type": "text",
+      "id": "view_all_label",
+      "label": "View all link label",
+      "default": "VIEW ALL PRODUCTS →"
+    },
+    {
+      "type": "collection",
+      "id": "collection",
+      "label": "Collection",
+      "info": "Used when no product blocks are added"
+    },
+    {
+      "type": "range",
+      "id": "products_to_show",
+      "min": 2,
+      "max": 4,
+      "step": 1,
+      "label": "Products from collection",
+      "default": 4
+    }
+  ],
+  "blocks": [
+    {
+      "type": "product",
+      "name": "Product",
+      "settings": [
+        {
+          "type": "product",
+          "id": "product",
+          "label": "Product"
+        },
+        {
+          "type": "text",
+          "id": "subtitle",
+          "label": "Subtitle override",
+          "info": "Optional short description under the product title"
+        }
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "ISB Best Sellers"
+    }
+  ]
+}
+{% endschema %}

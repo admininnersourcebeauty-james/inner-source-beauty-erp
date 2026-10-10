@@ -1,0 +1,45 @@
+{%- liquid
+  assign card_product = product
+  assign subtitle = subtitle_override
+  if subtitle == blank and card_product.metafields.custom.subtitle != blank
+    assign subtitle = card_product.metafields.custom.subtitle
+  endif
+  if subtitle == blank
+    assign subtitle = card_product.description | strip_html | truncate: 60
+  endif
+-%}
+
+<article class="isb-product-card">
+  <a href="{{ card_product.url }}" class="isb-product-card__image-link">
+    <div class="isb-product-card__image-wrap">
+      {%- if card_product.featured_image -%}
+        {{ card_product.featured_image | image_url: width: 800 | image_tag:
+          class: 'isb-product-card__image',
+          widths: '300, 400, 500, 600, 800',
+          sizes: '(max-width: 549px) 50vw, (max-width: 989px) 33vw, 25vw',
+          alt: card_product.featured_image.alt | default: card_product.title,
+          loading: 'lazy'
+        }}
+      {%- else -%}
+        {{ 'product-1' | placeholder_svg_tag: 'isb-placeholder-svg' }}
+      {%- endif -%}
+    </div>
+  </a>
+
+  <div class="isb-product-card__info">
+    <h3 class="isb-product-card__title">
+      <a href="{{ card_product.url }}">{{ card_product.title | escape }}</a>
+    </h3>
+    {%- if subtitle != blank -%}
+      <p class="isb-product-card__subtitle">{{ subtitle | escape }}</p>
+    {%- endif -%}
+    <p class="isb-product-card__price">{{ card_product.price | money }}</p>
+
+    {%- form 'product', card_product, class: 'isb-product-card__form', novalidate: 'novalidate' -%}
+      <input type="hidden" name="id" value="{{ card_product.selected_or_first_available_variant.id }}">
+      <button type="submit" class="isb-btn isb-btn--outline" name="add"{% unless card_product.available %} disabled{% endunless %}>
+        {%- if card_product.available -%}ADD TO CART{%- else -%}SOLD OUT{%- endif -%}
+      </button>
+    {%- endform -%}
+  </div>
+</article>

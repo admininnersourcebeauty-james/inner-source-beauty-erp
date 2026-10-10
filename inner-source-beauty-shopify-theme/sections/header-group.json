@@ -1,0 +1,17 @@
+{
+  "name": "Header",
+  "type": "header",
+  "sections": {
+    "isb-announcement-bar": {
+      "type": "isb-announcement-bar",
+      "settings": {
+        "text": "FREE SHIPPING ON ALL ORDERS OVER $75"
+      }
+    },
+    "isb-header": {
+      "type": "isb-header",
+      "settings": {}
+    }
+  },
+  "order": ["isb-announcement-bar", "isb-header"]
+}

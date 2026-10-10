@@ -1,0 +1,52 @@
+<section class="main-product page-width">
+  <div class="main-product__grid">
+    <div class="main-product__media">
+      {%- if product.featured_image -%}
+        {{ product.featured_image | image_url: width: 1200 | image_tag:
+          loading: 'eager',
+          sizes: '(max-width: 749px) 100vw, 50vw',
+          widths: '400, 600, 800, 1000, 1200',
+          alt: product.featured_image.alt | default: product.title
+        }}
+      {%- endif -%}
+    </div>
+
+    <div class="main-product__info">
+      <h1 class="main-product__title">{{ product.title | escape }}</h1>
+      <p class="main-product__price">{{ product.selected_or_first_available_variant.price | money }}</p>
+
+      {%- if product.description != blank -%}
+        <div class="main-product__description rte">{{ product.description }}</div>
+      {%- endif -%}
+
+      {%- form 'product', product, class: 'main-product__form' -%}
+        {%- unless product.has_only_default_variant -%}
+          {%- for option in product.options_with_values -%}
+            <label>
+              {{ option.name }}
+              <select name="options[{{ option.name | escape }}]">
+                {%- for value in option.values -%}
+                  <option value="{{ value | escape }}"{% if option.selected_value == value %} selected{% endif %}>{{ value }}</option>
+                {%- endfor -%}
+              </select>
+            </label>
+          {%- endfor -%}
+        {%- endunless -%}
+
+        <input type="hidden" name="id" value="{{ product.selected_or_first_available_variant.id }}">
+        <button type="submit" name="add"{% unless product.available %} disabled{% endunless %}>
+          {%- if product.available -%}Add to cart{%- else -%}Sold out{%- endif -%}
+        </button>
+      {%- endform -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Product information",
+  "tag": "section",
+  "class": "section-main-product",
+  "settings": []
+}
+{% endschema %}

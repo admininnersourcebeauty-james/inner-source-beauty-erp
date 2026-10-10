@@ -1,0 +1,95 @@
+<section class="isb-hero" id="isb-hero-{{ section.id }}">
+  <div class="isb-hero__grid">
+    <div class="isb-hero__content">
+      {%- if section.settings.eyebrow != blank -%}
+        <p class="isb-hero__eyebrow">{{ section.settings.eyebrow | escape }}</p>
+      {%- endif -%}
+
+      {%- if section.settings.heading != blank -%}
+        <h1 class="isb-hero__heading">{{ section.settings.heading | newline_to_br }}</h1>
+      {%- endif -%}
+
+      <div class="isb-hero__divider" aria-hidden="true">
+        <span class="isb-hero__divider-line"></span>
+        <span class="isb-hero__divider-dot"></span>
+        <span class="isb-hero__divider-line"></span>
+      </div>
+
+      {%- if section.settings.body != blank -%}
+        <div class="isb-hero__body rte">{{ section.settings.body }}</div>
+      {%- endif -%}
+
+      {%- if section.settings.button_label != blank -%}
+        <a href="{{ section.settings.button_link | default: routes.all_products_collection_url }}" class="isb-btn isb-btn--gold">
+          {{ section.settings.button_label | escape }}
+        </a>
+      {%- endif -%}
+    </div>
+
+    <div class="isb-hero__media">
+      {%- if section.settings.image != blank -%}
+        {{ section.settings.image | image_url: width: 1600 | image_tag:
+          class: 'isb-hero__image',
+          widths: '600, 800, 1000, 1200, 1400, 1600',
+          sizes: '(max-width: 749px) 100vw, 50vw',
+          alt: section.settings.image.alt | default: section.settings.heading,
+          loading: 'eager',
+          fetchpriority: 'high'
+        }}
+      {%- else -%}
+        <div class="isb-hero__placeholder">
+          {{ 'lifestyle-1' | placeholder_svg_tag: 'isb-placeholder-svg' }}
+        </div>
+      {%- endif -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Hero",
+  "tag": "section",
+  "class": "isb-section-hero",
+  "settings": [
+    {
+      "type": "text",
+      "id": "eyebrow",
+      "label": "Eyebrow",
+      "default": "EVERY FACE HAS A STORY"
+    },
+    {
+      "type": "textarea",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Beauty\nBegins Within."
+    },
+    {
+      "type": "richtext",
+      "id": "body",
+      "label": "Body text",
+      "default": "<p>Advanced skincare and aesthetic solutions powered by science and guided by care—helping you look radiant, feel confident, and become the best version of yourself.</p>"
+    },
+    {
+      "type": "text",
+      "id": "button_label",
+      "label": "Button label",
+      "default": "SHOP NOW →"
+    },
+    {
+      "type": "url",
+      "id": "button_link",
+      "label": "Button link"
+    },
+    {
+      "type": "image_picker",
+      "id": "image",
+      "label": "Hero image"
+    }
+  ],
+  "presets": [
+    {
+      "name": "ISB Hero"
+    }
+  ]
+}
+{% endschema %}

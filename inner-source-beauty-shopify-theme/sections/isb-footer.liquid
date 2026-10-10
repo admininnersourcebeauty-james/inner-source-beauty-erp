@@ -1,0 +1,26 @@
+<footer class="isb-footer">
+  <div class="page-width isb-footer__inner">
+    <p class="isb-footer__copy">&copy; {{ 'now' | date: '%Y' }} {{ shop.name }}. {{ section.settings.note | escape }}</p>
+  </div>
+</footer>
+
+{% schema %}
+{
+  "name": "ISB Footer",
+  "tag": "section",
+  "class": "isb-section-footer",
+  "settings": [
+    {
+      "type": "text",
+      "id": "note",
+      "label": "Footer note",
+      "default": "All rights reserved."
+    }
+  ],
+  "presets": [
+    {
+      "name": "ISB Footer"
+    }
+  ]
+}
+{% endschema %}

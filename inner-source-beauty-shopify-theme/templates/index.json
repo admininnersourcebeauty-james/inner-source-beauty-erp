@@ -1,0 +1,108 @@
+{
+  "sections": {
+    "isb-hero": {
+      "type": "isb-hero",
+      "settings": {
+        "eyebrow": "EVERY FACE HAS A STORY",
+        "heading": "Beauty\nBegins Within.",
+        "body": "<p>Advanced skincare and aesthetic solutions powered by science and guided by care—helping you look radiant, feel confident, and become the best version of yourself.</p>",
+        "button_label": "SHOP NOW →"
+      }
+    },
+    "isb-benefits": {
+      "type": "isb-benefits",
+      "blocks": {
+        "benefit-1": {
+          "type": "benefit",
+          "settings": {
+            "icon": "atom",
+            "title": "SCIENCE-DRIVEN",
+            "text": "Advanced formulas\nbacked by research."
+          }
+        },
+        "benefit-2": {
+          "type": "benefit",
+          "settings": {
+            "icon": "leaf",
+            "title": "CLEAN INGREDIENTS",
+            "text": "Carefully selected,\nsafe and effective."
+          }
+        },
+        "benefit-3": {
+          "type": "benefit",
+          "settings": {
+            "icon": "sparkle",
+            "title": "VISIBLE RESULTS",
+            "text": "Real results you\ncan see and feel."
+          }
+        },
+        "benefit-4": {
+          "type": "benefit",
+          "settings": {
+            "icon": "shield",
+            "title": "TRUSTED QUALITY",
+            "text": "Tested for safety.\nMade with integrity."
+          }
+        }
+      },
+      "block_order": ["benefit-1", "benefit-2", "benefit-3", "benefit-4"]
+    },
+    "isb-best-sellers": {
+      "type": "isb-best-sellers",
+      "settings": {
+        "heading": "BEST SELLERS",
+        "view_all_label": "VIEW ALL PRODUCTS →",
+        "products_to_show": 4
+      }
+    },
+    "isb-story": {
+      "type": "isb-story",
+      "settings": {
+        "eyebrow": "OUR STORY",
+        "heading": "More Than Beauty.\nMeaningful Connection.",
+        "body": "<p>We believe true beauty comes from within. Our mission is to deliver innovative solutions with compassion, integrity, and care—building relationships that last.</p>",
+        "button_label": "LEARN MORE ABOUT US →"
+      }
+    },
+    "isb-testimonials": {
+      "type": "isb-testimonials",
+      "settings": {
+        "heading": "WHAT OUR CUSTOMERS SAY"
+      },
+      "blocks": {
+        "testimonial-1": {
+          "type": "testimonial",
+          "settings": {
+            "quote": "These products have completely transformed my skin. I feel more confident than ever!",
+            "author": "Jessica L.",
+            "rating": 5
+          }
+        },
+        "testimonial-2": {
+          "type": "testimonial",
+          "settings": {
+            "quote": "The quality is incredible. My skin has never looked or felt better.",
+            "author": "Amanda K.",
+            "rating": 5
+          }
+        },
+        "testimonial-3": {
+          "type": "testimonial",
+          "settings": {
+            "quote": "You can feel the care in every product. Highly recommend!",
+            "author": "Sophia M.",
+            "rating": 5
+          }
+        }
+      },
+      "block_order": ["testimonial-1", "testimonial-2", "testimonial-3"]
+    }
+  },
+  "order": [
+    "isb-hero",
+    "isb-benefits",
+    "isb-best-sellers",
+    "isb-story",
+    "isb-testimonials"
+  ]
+}

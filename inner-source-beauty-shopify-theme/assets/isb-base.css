@@ -1,0 +1,144 @@
+/* Inner Source Beauty — base reset & non-homepage essentials */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  color: var(--isb-dark, #1D1D1B);
+  background: var(--isb-cream, #FFFDF8);
+  font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.page-width {
+  width: min(100% - 3rem, 1320px);
+  margin-inline: auto;
+}
+
+.skip-to-content {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 9999;
+  padding: 0.75rem 1rem;
+  background: #1D1D1B;
+  color: #FFFDF8;
+}
+
+.skip-to-content:focus {
+  left: 1rem;
+  top: 1rem;
+}
+
+.main-content:focus {
+  outline: none;
+}
+
+/* Minimal product / cart pages — functional only, not homepage styled */
+.template-product .main-product,
+.template-cart .main-cart {
+  padding: 3rem 0;
+}
+
+.main-product__grid,
+.main-cart__inner {
+  display: grid;
+  gap: 2rem;
+}
+
+@media (min-width: 750px) {
+  .main-product__grid {
+    grid-template-columns: 1fr 1fr;
+    align-items: start;
+  }
+}
+
+.main-product__title {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 500;
+  margin: 0 0 1rem;
+}
+
+.main-product__price {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 1.5rem;
+}
+
+.main-product__description {
+  margin-bottom: 1.5rem;
+}
+
+.main-product__form button,
+.main-cart__checkout,
+.main-cart__update {
+  appearance: none;
+  border: 1px solid #1D1D1B;
+  background: #1D1D1B;
+  color: #FFFDF8;
+  padding: 0.875rem 1.5rem;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.75rem;
+}
+
+.main-cart__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.main-cart__table th,
+.main-cart__table td {
+  padding: 0.75rem;
+  border-bottom: 1px solid #DFD4C4;
+  text-align: left;
+}
+
+.main-cart__actions {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 1.5rem;
+}
+
+.main-cart__checkout {
+  background: #B37A16;
+  border-color: #B37A16;
+}
+
+.isb-placeholder-svg {
+  width: 100%;
+  height: 100%;
+  background: #F5EBDD;
+}

@@ -1,0 +1,88 @@
+<section class="isb-story" id="isb-story-{{ section.id }}">
+  <div class="isb-story__grid page-width">
+    <div class="isb-story__content">
+      {%- if section.settings.eyebrow != blank -%}
+        <p class="isb-story__eyebrow">{{ section.settings.eyebrow | escape }}</p>
+      {%- endif -%}
+
+      {%- if section.settings.heading != blank -%}
+        <h2 class="isb-story__heading">{{ section.settings.heading | newline_to_br }}</h2>
+      {%- endif -%}
+
+      {%- if section.settings.body != blank -%}
+        <div class="isb-story__body rte">{{ section.settings.body }}</div>
+      {%- endif -%}
+
+      {%- if section.settings.button_label != blank -%}
+        <a href="{{ section.settings.button_link | default: '/pages/about-us' }}" class="isb-btn isb-btn--outline">
+          {{ section.settings.button_label | escape }}
+        </a>
+      {%- endif -%}
+    </div>
+
+    <div class="isb-story__media">
+      {%- if section.settings.image != blank -%}
+        {{ section.settings.image | image_url: width: 1200 | image_tag:
+          class: 'isb-story__image',
+          widths: '400, 600, 800, 1000, 1200',
+          sizes: '(max-width: 749px) 100vw, 50vw',
+          alt: section.settings.image.alt | default: section.settings.heading,
+          loading: 'lazy'
+        }}
+      {%- else -%}
+        <div class="isb-story__placeholder">
+          {{ 'collection-1' | placeholder_svg_tag: 'isb-placeholder-svg' }}
+        </div>
+      {%- endif -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Our Story",
+  "tag": "section",
+  "class": "isb-section-story",
+  "settings": [
+    {
+      "type": "text",
+      "id": "eyebrow",
+      "label": "Eyebrow",
+      "default": "OUR STORY"
+    },
+    {
+      "type": "textarea",
+      "id": "heading",
+      "label": "Heading",
+      "default": "More Than Beauty.\nMeaningful Connection."
+    },
+    {
+      "type": "richtext",
+      "id": "body",
+      "label": "Body text",
+      "default": "<p>We believe true beauty comes from within. Our mission is to deliver innovative solutions with compassion, integrity, and care—building relationships that last.</p>"
+    },
+    {
+      "type": "text",
+      "id": "button_label",
+      "label": "Button label",
+      "default": "LEARN MORE ABOUT US →"
+    },
+    {
+      "type": "url",
+      "id": "button_link",
+      "label": "Button link"
+    },
+    {
+      "type": "image_picker",
+      "id": "image",
+      "label": "Story image"
+    }
+  ],
+  "presets": [
+    {
+      "name": "ISB Our Story"
+    }
+  ]
+}
+{% endschema %}

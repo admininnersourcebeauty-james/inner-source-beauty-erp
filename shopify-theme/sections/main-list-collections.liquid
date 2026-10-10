@@ -1,0 +1,22 @@
+<section class="page-width" style="padding: 3rem 0;">
+  <h1>Collections</h1>
+  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1.5rem; margin-top: 2rem;">
+    {%- for collection in collections -%}
+      <a href="{{ collection.url }}">
+        {%- if collection.featured_image -%}
+          {{ collection.featured_image | image_url: width: 600 | image_tag: loading: 'lazy', alt: collection.title }}
+        {%- endif -%}
+        <h2 style="font-size: 1rem; margin: 0.75rem 0 0;">{{ collection.title | escape }}</h2>
+      </a>
+    {%- endfor -%}
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Collections list",
+  "tag": "section",
+  "class": "section-main-list-collections",
+  "settings": []
+}
+{% endschema %}

@@ -1,0 +1,108 @@
+<section class="isb-best-sellers isb-reveal" id="isb-best-sellers-{{ section.id }}">
+  <div class="isb-best-sellers__wrap">
+    <div class="isb-best-sellers__header">
+      <div class="isb-section-title isb-section-title--center">
+        <h2 class="isb-section-title__text">{{ section.settings.heading | escape }}</h2>
+      </div>
+    </div>
+
+    <div class="isb-best-sellers__grid">
+      {%- assign product_blocks = section.blocks | where: 'type', 'product' -%}
+      {%- if product_blocks.size > 0 -%}
+        {%- for block in product_blocks limit: 4 -%}
+          <div {{ block.shopify_attributes }}>
+            {% render 'isb-product-card',
+              product: block.settings.product,
+              title_override: block.settings.title,
+              subtitle_override: block.settings.subtitle,
+              price_override: block.settings.price,
+              image_override: block.settings.image,
+              url_override: block.settings.link,
+              fallback_image: block.settings.fallback_asset
+            %}
+          </div>
+        {%- endfor -%}
+      {%- elsif section.settings.collection != blank -%}
+        {%- for featured_product in section.settings.collection.products limit: section.settings.products_to_show -%}
+          {% render 'isb-product-card', product: featured_product %}
+        {%- endfor -%}
+      {%- else -%}
+        {%- assign defaults = 'Exosome Serum|Renew. Repair. Radiate.|$89.00|isb-product-1.jpg,PDRN Complex|Cellular renewal. Deep repair.|$125.00|isb-product-2.jpg,Recovery Repair Cream|Restore. Hydrate. Heal.|$78.00|isb-product-3.jpg,Peptide Glow Essence|Illuminate. Firm. Revitalize.|$95.00|isb-product-4.jpg' | split: ',' -%}
+        {%- for item in defaults -%}
+          {%- assign parts = item | split: '|' -%}
+          {% render 'isb-product-card',
+            title_override: parts[0],
+            subtitle_override: parts[1],
+            price_override: parts[2],
+            fallback_image: parts[3],
+            url_override: routes.all_products_collection_url
+          %}
+        {%- endfor -%}
+      {%- endif -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Best Sellers",
+  "tag": "section",
+  "class": "isb-section-best-sellers",
+  "settings": [
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "BEST SELLERS"
+    },
+    {
+      "type": "text",
+      "id": "view_all_label",
+      "label": "View all link",
+      "default": "VIEW ALL PRODUCTS →"
+    },
+    {
+      "type": "collection",
+      "id": "collection",
+      "label": "Collection",
+      "info": "Used when no product blocks are added"
+    },
+    {
+      "type": "range",
+      "id": "products_to_show",
+      "min": 2,
+      "max": 4,
+      "step": 1,
+      "label": "Products from collection",
+      "default": 4
+    }
+  ],
+  "blocks": [
+    {
+      "type": "product",
+      "name": "Product",
+      "settings": [
+        { "type": "product", "id": "product", "label": "Shopify product" },
+        { "type": "image_picker", "id": "image", "label": "Image override" },
+        { "type": "text", "id": "title", "label": "Title override" },
+        { "type": "text", "id": "subtitle", "label": "Subtitle" },
+        { "type": "text", "id": "price", "label": "Price display override" },
+        { "type": "url", "id": "link", "label": "Link override" },
+        {
+          "type": "select",
+          "id": "fallback_asset",
+          "label": "Default photo",
+          "options": [
+            { "value": "isb-product-1.jpg", "label": "Product 1" },
+            { "value": "isb-product-2.jpg", "label": "Product 2" },
+            { "value": "isb-product-3.jpg", "label": "Product 3" },
+            { "value": "isb-product-4.jpg", "label": "Product 4" }
+          ],
+          "default": "isb-product-1.jpg"
+        }
+      ]
+    }
+  ],
+  "presets": [{ "name": "ISB Best Sellers" }]
+}
+{% endschema %}

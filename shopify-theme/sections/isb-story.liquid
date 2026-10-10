@@ -1,0 +1,89 @@
+<section class="isb-story isb-reveal" id="isb-story-{{ section.id }}">
+  <div class="isb-story__grid">
+    <div class="isb-story__content">
+      {%- if section.settings.eyebrow != blank -%}
+        <p class="isb-story__eyebrow">{{ section.settings.eyebrow | escape }}</p>
+      {%- endif -%}
+
+      {%- if section.settings.heading != blank -%}
+        <h2 class="isb-story__heading">{{ section.settings.heading | newline_to_br }}</h2>
+      {%- endif -%}
+
+      {%- if section.settings.body != blank -%}
+        <div class="isb-story__body rte">{{ section.settings.body }}</div>
+      {%- endif -%}
+
+      {%- if section.settings.button_label != blank -%}
+        <a href="{{ section.settings.button_link | default: '/pages/about-us' }}" class="isb-btn isb-btn--outline">
+          {{ section.settings.button_label | escape }}
+        </a>
+      {%- endif -%}
+    </div>
+
+    <div class="isb-story__media">
+      {%- if section.settings.image != blank -%}
+        {{ section.settings.image | image_url: width: 1200 | image_tag:
+          class: 'isb-story__image',
+          widths: '600, 800, 1000, 1200',
+          sizes: '(max-width: 768px) 100vw, 50vw',
+          alt: section.settings.image.alt | default: 'Inner Source Beauty',
+          loading: 'lazy'
+        }}
+      {%- else -%}
+        <img
+          class="isb-story__image"
+          src="{{ 'isb-story-lifestyle.jpg' | asset_url }}"
+          alt="Inner Source Beauty skincare collection"
+          loading="lazy"
+          width="1200"
+          height="900"
+        >
+      {%- endif -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Our Story",
+  "tag": "section",
+  "class": "isb-section-story",
+  "settings": [
+    {
+      "type": "text",
+      "id": "eyebrow",
+      "label": "Eyebrow",
+      "default": "OUR STORY"
+    },
+    {
+      "type": "textarea",
+      "id": "heading",
+      "label": "Headline",
+      "default": "More Than Beauty.\nMeaningful Connection."
+    },
+    {
+      "type": "richtext",
+      "id": "body",
+      "label": "Paragraph",
+      "default": "<p>We believe true beauty comes from within. Our mission is to deliver innovative solutions with compassion, integrity, and care—building relationships that last.</p>"
+    },
+    {
+      "type": "text",
+      "id": "button_label",
+      "label": "Button label",
+      "default": "LEARN MORE"
+    },
+    {
+      "type": "url",
+      "id": "button_link",
+      "label": "Button link"
+    },
+    {
+      "type": "image_picker",
+      "id": "image",
+      "label": "Lifestyle image"
+    }
+  ],
+  "presets": [{ "name": "ISB Our Story" }]
+}
+{% endschema %}

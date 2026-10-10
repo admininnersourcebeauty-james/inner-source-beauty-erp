@@ -1,0 +1,86 @@
+<section class="isb-collection isb-reveal" id="isb-collection-{{ section.id }}">
+  <div class="isb-collection__wrap">
+    <div class="isb-collection__banner">
+      {%- if section.settings.image != blank -%}
+        {{ section.settings.image | image_url: width: 1800 | image_tag:
+          class: 'isb-collection__image',
+          widths: '800, 1200, 1600, 1800',
+          sizes: '100vw',
+          alt: section.settings.heading,
+          loading: 'lazy'
+        }}
+      {%- else -%}
+        <img
+          class="isb-collection__image"
+          src="{{ 'isb-collection-banner.jpg' | asset_url }}"
+          alt="{{ section.settings.heading | escape }}"
+          loading="lazy"
+          width="1800"
+          height="600"
+        >
+      {%- endif -%}
+
+      <div class="isb-collection__overlay">
+        {%- if section.settings.eyebrow != blank -%}
+          <p class="isb-collection__eyebrow">{{ section.settings.eyebrow | escape }}</p>
+        {%- endif -%}
+        {%- if section.settings.heading != blank -%}
+          <h2 class="isb-collection__heading">{{ section.settings.heading | escape }}</h2>
+        {%- endif -%}
+        {%- if section.settings.text != blank -%}
+          <p class="isb-collection__text">{{ section.settings.text | escape }}</p>
+        {%- endif -%}
+        {%- if section.settings.button_label != blank -%}
+          <a href="{{ section.settings.button_link | default: routes.all_products_collection_url }}" class="isb-btn isb-btn--gold">
+            {{ section.settings.button_label | escape }}
+          </a>
+        {%- endif -%}
+      </div>
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Collection Banner",
+  "tag": "section",
+  "class": "isb-section-collection",
+  "settings": [
+    {
+      "type": "text",
+      "id": "eyebrow",
+      "label": "Eyebrow",
+      "default": "THE COLLECTION"
+    },
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Discover Our Complete Skincare Line"
+    },
+    {
+      "type": "textarea",
+      "id": "text",
+      "label": "Description",
+      "default": "Redefine your skincare routine with our premium collection."
+    },
+    {
+      "type": "text",
+      "id": "button_label",
+      "label": "Button label",
+      "default": "SHOP ALL PRODUCTS"
+    },
+    {
+      "type": "url",
+      "id": "button_link",
+      "label": "Button link"
+    },
+    {
+      "type": "image_picker",
+      "id": "image",
+      "label": "Banner image"
+    }
+  ],
+  "presets": [{ "name": "ISB Collection Banner" }]
+}
+{% endschema %}

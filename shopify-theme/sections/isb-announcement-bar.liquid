@@ -1,0 +1,27 @@
+<div class="isb-announcement" role="region" aria-label="Announcement">
+  <div class="isb-announcement__inner page-width">
+    {% render 'isb-icon-truck' %}
+    <p class="isb-announcement__text">{{ section.settings.text | escape }}</p>
+  </div>
+</div>
+
+{% schema %}
+{
+  "name": "ISB Announcement bar",
+  "tag": "section",
+  "class": "isb-section-announcement",
+  "settings": [
+    {
+      "type": "text",
+      "id": "text",
+      "label": "Announcement text",
+      "default": "FREE SHIPPING ON ALL ORDERS OVER $75"
+    }
+  ],
+  "presets": [
+    {
+      "name": "ISB Announcement bar"
+    }
+  ]
+}
+{% endschema %}

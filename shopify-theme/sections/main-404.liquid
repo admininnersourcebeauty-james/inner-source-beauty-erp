@@ -1,0 +1,14 @@
+<section class="page-width" style="padding: 4rem 0; text-align: center;">
+  <h1>{{ 'templates.404.title' | t }}</h1>
+  <p>{{ 'templates.404.subtext' | t }}</p>
+  <p><a href="{{ routes.root_url }}">{{ 'general.continue_shopping' | t }}</a></p>
+</section>
+
+{% schema %}
+{
+  "name": "404 page",
+  "tag": "section",
+  "class": "section-main-404",
+  "settings": []
+}
+{% endschema %}

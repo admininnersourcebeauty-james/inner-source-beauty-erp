@@ -1,0 +1,73 @@
+{%- liquid
+  assign card_product = product
+  assign card_title = title_override
+  assign card_subtitle = subtitle_override
+  assign card_price = price_override
+  assign card_image = image_override
+  assign card_url = url_override
+
+  if card_product != blank
+    unless card_title != blank
+      assign card_title = card_product.title
+    endunless
+    unless card_url != blank
+      assign card_url = card_product.url
+    endunless
+    unless card_price != blank
+      assign card_price = card_product.price | money
+    endunless
+    unless card_subtitle != blank
+      if card_product.metafields.custom.subtitle != blank
+        assign card_subtitle = card_product.metafields.custom.subtitle
+      else
+        assign card_subtitle = card_product.description | strip_html | truncate: 55
+      endif
+    endunless
+  endif
+-%}
+
+<article class="isb-product-card">
+  <a href="{{ card_url | default: '#' }}" class="isb-product-card__image-link">
+    <div class="isb-product-card__image-wrap">
+      {%- if card_product != blank and card_product.featured_image -%}
+        {{ card_product.featured_image | image_url: width: 800 | image_tag:
+          class: 'isb-product-card__image',
+          widths: '400, 600, 800',
+          sizes: '(max-width: 480px) 50vw, 25vw',
+          alt: card_product.title,
+          loading: 'lazy'
+        }}
+      {%- elsif card_image != blank -%}
+        {{ card_image | image_url: width: 800 | image_tag:
+          class: 'isb-product-card__image',
+          widths: '400, 600, 800',
+          sizes: '(max-width: 480px) 50vw, 25vw',
+          alt: card_title,
+          loading: 'lazy'
+        }}
+      {%- elsif fallback_image != blank -%}
+        <img class="isb-product-card__image" src="{{ fallback_image | asset_url }}" alt="{{ card_title | escape }}" loading="lazy" width="800" height="800">
+      {%- endif -%}
+    </div>
+  </a>
+
+  <div class="isb-product-card__info">
+    <h3 class="isb-product-card__title">
+      <a href="{{ card_url | default: '#' }}">{{ card_title | escape }}</a>
+    </h3>
+    {%- if card_subtitle != blank -%}
+      <p class="isb-product-card__subtitle">{{ card_subtitle | escape }}</p>
+    {%- endif -%}
+    {%- if card_price != blank -%}
+      <p class="isb-product-card__price">{{ card_price }}</p>
+    {%- endif -%}
+
+    {%- if card_product != blank -%}
+      <a href="{{ card_product.url }}" class="isb-btn isb-btn--outline">SHOP NOW</a>
+    {%- elsif card_url != blank -%}
+      <a href="{{ card_url }}" class="isb-btn isb-btn--outline">SHOP NOW</a>
+    {%- else -%}
+      <a href="{{ routes.all_products_collection_url }}" class="isb-btn isb-btn--outline">SHOP NOW</a>
+    {%- endif -%}
+  </div>
+</article>

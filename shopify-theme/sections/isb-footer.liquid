@@ -1,0 +1,120 @@
+<footer class="isb-footer">
+  <div class="isb-footer__grid">
+    <div class="isb-footer__brand">
+      {%- assign logo = section.settings.logo | default: settings.logo -%}
+      {%- if logo != blank -%}
+        <div class="isb-footer__logo">
+          {{ logo | image_url: width: 240 | image_tag: alt: shop.name, loading: 'lazy' }}
+        </div>
+      {%- else -%}
+        <img class="isb-footer__logo" src="{{ 'isb-logo.svg' | asset_url }}" alt="{{ shop.name | escape }}" width="220" height="52" loading="lazy">
+      {%- endif -%}
+      <div class="isb-footer__contact">
+        {%- if section.settings.address != blank -%}
+          <p>{{ section.settings.address | newline_to_br }}</p>
+        {%- endif -%}
+        {%- if section.settings.phone != blank -%}
+          <p><a href="tel:{{ section.settings.phone | replace: '-', '' | replace: ' ', '' }}">{{ section.settings.phone | escape }}</a></p>
+        {%- endif -%}
+        {%- if section.settings.website != blank -%}
+          <p><a href="{{ section.settings.website }}" target="_blank" rel="noopener">{{ section.settings.website | remove: 'https://' | remove: 'http://' }}</a></p>
+        {%- endif -%}
+      </div>
+    </div>
+
+    <div>
+      <h3 class="isb-footer__heading">{{ section.settings.nav_heading | escape }}</h3>
+      <ul class="isb-footer__links">
+        {%- if section.settings.menu != blank -%}
+          {%- for link in section.settings.menu.links -%}
+            <li><a href="{{ link.url }}">{{ link.title | escape }}</a></li>
+          {%- endfor -%}
+        {%- else -%}
+          <li><a href="{{ routes.all_products_collection_url }}">Shop</a></li>
+          <li><a href="{{ routes.collections_url }}">Best Sellers</a></li>
+          <li><a href="/pages/about-us">About Us</a></li>
+          <li><a href="/blogs/journal">Journal</a></li>
+          <li><a href="/pages/contact">Contact</a></li>
+        {%- endif -%}
+      </ul>
+    </div>
+
+    <div>
+      <h3 class="isb-footer__heading">{{ section.settings.info_heading | escape }}</h3>
+      <ul class="isb-footer__links">
+        <li><a href="/pages/shipping">Shipping & Returns</a></li>
+        <li><a href="/pages/privacy-policy">Privacy Policy</a></li>
+        <li><a href="/pages/terms">Terms of Service</a></li>
+        <li><a href="{{ routes.account_url }}">My Account</a></li>
+      </ul>
+    </div>
+
+    <div>
+      <h3 class="isb-footer__heading">{{ section.settings.newsletter_heading | escape }}</h3>
+      <p class="isb-footer__newsletter-text">{{ section.settings.newsletter_text | escape }}</p>
+      {% form 'customer', class: 'isb-footer__form' %}
+        <input type="hidden" name="contact[tags]" value="newsletter">
+        <input
+          type="email"
+          name="contact[email]"
+          class="isb-footer__input"
+          placeholder="{{ section.settings.newsletter_placeholder | escape }}"
+          required
+          autocomplete="email"
+        >
+        <button type="submit" class="isb-footer__submit">{{ section.settings.newsletter_button | escape }}</button>
+      {% endform %}
+      <div class="isb-footer__social">
+        {%- if section.settings.instagram != blank -%}
+          <a href="{{ section.settings.instagram }}" target="_blank" rel="noopener">Instagram</a>
+        {%- endif -%}
+        {%- if section.settings.facebook != blank -%}
+          <a href="{{ section.settings.facebook }}" target="_blank" rel="noopener">Facebook</a>
+        {%- endif -%}
+        {%- if section.settings.tiktok != blank -%}
+          <a href="{{ section.settings.tiktok }}" target="_blank" rel="noopener">TikTok</a>
+        {%- endif -%}
+      </div>
+    </div>
+  </div>
+
+  <div class="isb-footer__bottom">
+    <p class="isb-footer__copy">&copy; {{ 'now' | date: '%Y' }} {{ shop.name }}. {{ section.settings.copyright | escape }}</p>
+  </div>
+</footer>
+
+{% schema %}
+{
+  "name": "ISB Footer",
+  "tag": "section",
+  "class": "isb-section-footer",
+  "settings": [
+    { "type": "image_picker", "id": "logo", "label": "Logo override" },
+    {
+      "type": "textarea",
+      "id": "address",
+      "label": "Address",
+      "default": "11511 GARVEY AVE\nEL MONTE CA 91732"
+    },
+    { "type": "text", "id": "phone", "label": "Phone", "default": "714-249-5678" },
+    { "type": "url", "id": "website", "label": "Website", "default": "https://innersourcebeauty.com" },
+    { "type": "text", "id": "nav_heading", "label": "Navigation heading", "default": "Navigation" },
+    { "type": "link_list", "id": "menu", "label": "Footer menu" },
+    { "type": "text", "id": "info_heading", "label": "Info heading", "default": "Information" },
+    { "type": "text", "id": "newsletter_heading", "label": "Newsletter heading", "default": "Newsletter" },
+    {
+      "type": "text",
+      "id": "newsletter_text",
+      "label": "Newsletter text",
+      "default": "Subscribe for exclusive offers and skincare insights."
+    },
+    { "type": "text", "id": "newsletter_placeholder", "label": "Email placeholder", "default": "Your email address" },
+    { "type": "text", "id": "newsletter_button", "label": "Subscribe button", "default": "Subscribe" },
+    { "type": "url", "id": "instagram", "label": "Instagram URL" },
+    { "type": "url", "id": "facebook", "label": "Facebook URL" },
+    { "type": "url", "id": "tiktok", "label": "TikTok URL" },
+    { "type": "text", "id": "copyright", "label": "Copyright note", "default": "All rights reserved." }
+  ],
+  "presets": [{ "name": "ISB Footer" }]
+}
+{% endschema %}

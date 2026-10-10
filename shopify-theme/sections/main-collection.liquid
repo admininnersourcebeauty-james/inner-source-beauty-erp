@@ -1,0 +1,29 @@
+<section class="page-width" style="padding: 3rem 0;">
+  <h1>{{ collection.title | escape }}</h1>
+  {%- if collection.description != blank -%}
+    <div class="rte">{{ collection.description }}</div>
+  {%- endif -%}
+
+  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1.5rem; margin-top: 2rem;">
+    {%- for product in collection.products -%}
+      <article>
+        <a href="{{ product.url }}">
+          {%- if product.featured_image -%}
+            {{ product.featured_image | image_url: width: 600 | image_tag: loading: 'lazy', alt: product.title }}
+          {%- endif -%}
+          <h2 style="font-size: 1rem; margin: 0.75rem 0 0.25rem;">{{ product.title | escape }}</h2>
+          <p style="margin: 0; font-weight: 600;">{{ product.price | money }}</p>
+        </a>
+      </article>
+    {%- endfor -%}
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Collection",
+  "tag": "section",
+  "class": "section-main-collection",
+  "settings": []
+}
+{% endschema %}

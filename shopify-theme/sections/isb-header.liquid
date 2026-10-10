@@ -1,0 +1,128 @@
+<header class="isb-header{% if section.settings.enable_sticky %} isb-header--sticky{% endif %}" data-isb-header>
+  <div class="isb-header__inner page-width">
+    <div class="isb-header__left">
+      <button type="button" class="isb-header__menu-toggle" aria-label="Open menu" aria-expanded="false" aria-controls="isb-mobile-nav" data-isb-menu-toggle>
+        <span></span><span></span><span></span>
+      </button>
+
+      <nav class="isb-header__nav" aria-label="Primary">
+        <ul class="isb-header__menu">
+          {%- if section.settings.menu != blank -%}
+            {%- for link in section.settings.menu.links -%}
+              <li class="isb-header__menu-item{% if link.links.size > 0 %} isb-header__menu-item--has-dropdown{% endif %}">
+                <a href="{{ link.url }}" class="isb-header__menu-link{% if link.active %} is-active{% endif %}">
+                  {{ link.title | escape }}
+                  {%- if link.links.size > 0 -%}{% render 'isb-icon-chevron-down' %}{%- endif -%}
+                </a>
+                {%- if link.links.size > 0 -%}
+                  <ul class="isb-header__dropdown">
+                    {%- for child in link.links -%}
+                      <li><a href="{{ child.url }}">{{ child.title | escape }}</a></li>
+                    {%- endfor -%}
+                  </ul>
+                {%- endif -%}
+              </li>
+            {%- endfor -%}
+          {%- else -%}
+            <li class="isb-header__menu-item"><a href="{{ routes.root_url }}" class="isb-header__menu-link">Home</a></li>
+            <li class="isb-header__menu-item"><a href="{{ routes.all_products_collection_url }}" class="isb-header__menu-link">Shop</a></li>
+            <li class="isb-header__menu-item"><a href="{{ routes.collections_url }}" class="isb-header__menu-link">Collections</a></li>
+            <li class="isb-header__menu-item"><a href="/pages/about-us" class="isb-header__menu-link">About Us</a></li>
+            <li class="isb-header__menu-item"><a href="/pages/contact" class="isb-header__menu-link">Contact Us</a></li>
+          {%- endif -%}
+        </ul>
+      </nav>
+    </div>
+
+    <a href="{{ routes.root_url }}" class="isb-header__logo" aria-label="{{ shop.name | escape }} home">
+      {%- assign logo = section.settings.logo | default: settings.logo -%}
+      {%- if logo != blank -%}
+        {{ logo | image_url: width: 400 | image_tag:
+          class: 'isb-header__logo-image',
+          widths: '120, 180, 240, 320, 400',
+          sizes: '(max-width: 749px) 140px, 180px',
+          alt: shop.name,
+          loading: 'eager'
+        }}
+      {%- else -%}
+        <img class="isb-header__logo-image" src="{{ 'isb-logo.svg' | asset_url }}" alt="{{ shop.name | escape }}" width="220" height="52" loading="eager">
+      {%- endif -%}
+    </a>
+
+    <div class="isb-header__icons">
+      <a href="{{ routes.search_url }}" class="isb-header__icon-link" aria-label="Search">
+        {% render 'isb-icon-search' %}
+      </a>
+      <a href="{{ routes.account_url }}" class="isb-header__icon-link" aria-label="Account">
+        {% render 'isb-icon-account' %}
+      </a>
+      <a href="{{ routes.cart_url }}" class="isb-header__icon-link isb-header__cart-link" aria-label="Cart">
+        {% render 'isb-icon-cart' %}
+        <span class="isb-header__cart-count{% if cart.item_count == 0 %} is-empty{% endif %}" data-cart-count>{{ cart.item_count }}</span>
+      </a>
+    </div>
+  </div>
+
+  <div class="isb-mobile-nav" id="isb-mobile-nav" hidden data-isb-mobile-nav>
+    <div class="isb-mobile-nav__panel">
+      <button type="button" class="isb-mobile-nav__close" aria-label="Close menu" data-isb-menu-close>&times;</button>
+      <nav aria-label="Mobile">
+        <ul class="isb-mobile-nav__menu">
+          {%- if section.settings.menu != blank -%}
+            {%- for link in section.settings.menu.links -%}
+              <li>
+                <a href="{{ link.url }}">{{ link.title | escape }}</a>
+                {%- if link.links.size > 0 -%}
+                  <ul>
+                    {%- for child in link.links -%}
+                      <li><a href="{{ child.url }}">{{ child.title | escape }}</a></li>
+                    {%- endfor -%}
+                  </ul>
+                {%- endif -%}
+              </li>
+            {%- endfor -%}
+          {%- else -%}
+            <li><a href="{{ routes.root_url }}">Home</a></li>
+            <li><a href="{{ routes.all_products_collection_url }}">Shop</a></li>
+            <li><a href="{{ routes.collections_url }}">Collections</a></li>
+            <li><a href="/pages/about-us">About Us</a></li>
+            <li><a href="/pages/contact">Contact Us</a></li>
+          {%- endif -%}
+        </ul>
+      </nav>
+    </div>
+  </div>
+</header>
+
+{% schema %}
+{
+  "name": "ISB Header",
+  "tag": "section",
+  "class": "isb-section-header",
+  "settings": [
+    {
+      "type": "image_picker",
+      "id": "logo",
+      "label": "Logo override",
+      "info": "Leave blank to use theme settings logo"
+    },
+    {
+      "type": "link_list",
+      "id": "menu",
+      "label": "Main menu",
+      "default": "main-menu"
+    },
+    {
+      "type": "checkbox",
+      "id": "enable_sticky",
+      "label": "Enable sticky header",
+      "default": true
+    }
+  ],
+  "presets": [
+    {
+      "name": "ISB Header"
+    }
+  ]
+}
+{% endschema %}

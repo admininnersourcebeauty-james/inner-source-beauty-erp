@@ -1,0 +1,24 @@
+<section class="page-width" style="padding: 3rem 0;">
+  <h1>{{ 'general.search.search' | t }}</h1>
+  <form action="{{ routes.search_url }}" method="get" role="search" style="margin: 1.5rem 0;">
+    <input type="search" name="q" value="{{ search.terms | escape }}" placeholder="{{ 'general.search.search' | t }}" style="width: 100%; max-width: 420px; padding: 0.75rem;">
+  </form>
+
+  {%- if search.performed -%}
+    <p>{{ 'templates.search.results_with_count_and_term' | t: terms: search.terms, count: search.results_count }}</p>
+    <div style="display: grid; gap: 1rem; margin-top: 1.5rem;">
+      {%- for item in search.results -%}
+        <a href="{{ item.url }}">{{ item.title | escape }}</a>
+      {%- endfor -%}
+    </div>
+  {%- endif -%}
+</section>
+
+{% schema %}
+{
+  "name": "Search results",
+  "tag": "section",
+  "class": "section-main-search",
+  "settings": []
+}
+{% endschema %}

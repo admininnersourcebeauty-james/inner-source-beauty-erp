@@ -1,0 +1,92 @@
+<section class="isb-hero isb-reveal" id="isb-hero-{{ section.id }}">
+  <div class="isb-hero__grid">
+    <div class="isb-hero__content">
+      {%- if section.settings.eyebrow != blank -%}
+        <p class="isb-hero__eyebrow">{{ section.settings.eyebrow | escape }}</p>
+      {%- endif -%}
+
+      {%- if section.settings.heading != blank -%}
+        <h1 class="isb-hero__heading">{{ section.settings.heading | newline_to_br }}</h1>
+      {%- endif -%}
+
+      {%- if section.settings.body != blank -%}
+        <div class="isb-hero__body rte">{{ section.settings.body }}</div>
+      {%- endif -%}
+
+      {%- if section.settings.button_label != blank -%}
+        <a href="{{ section.settings.button_link | default: routes.all_products_collection_url }}" class="isb-btn isb-btn--gold isb-btn--full">
+          {{ section.settings.button_label | escape }}
+        </a>
+      {%- endif -%}
+    </div>
+
+    <div class="isb-hero__media">
+      {%- if section.settings.image != blank -%}
+        {{ section.settings.image | image_url: width: 1800 | image_tag:
+          class: 'isb-hero__image',
+          widths: '800, 1000, 1200, 1400, 1600, 1800',
+          sizes: '(max-width: 768px) 100vw, 52vw',
+          alt: section.settings.image.alt | default: 'Inner Source Beauty',
+          loading: 'eager',
+          fetchpriority: 'high'
+        }}
+      {%- else -%}
+        <img
+          class="isb-hero__image"
+          src="{{ 'isb-hero-model.jpg' | asset_url }}"
+          alt="Inner Source Beauty — luxury skincare"
+          loading="eager"
+          fetchpriority="high"
+          width="1800"
+          height="1200"
+        >
+      {%- endif -%}
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Hero",
+  "tag": "section",
+  "class": "isb-section-hero",
+  "settings": [
+    {
+      "type": "text",
+      "id": "eyebrow",
+      "label": "Subtitle",
+      "default": "INNER SOURCE BEAUTY"
+    },
+    {
+      "type": "textarea",
+      "id": "heading",
+      "label": "Headline",
+      "default": "Beauty Begins Within."
+    },
+    {
+      "type": "richtext",
+      "id": "body",
+      "label": "Paragraph",
+      "default": "<p>Advanced skincare and aesthetic solutions powered by science and guided by care.</p>"
+    },
+    {
+      "type": "text",
+      "id": "button_label",
+      "label": "Button label",
+      "default": "SHOP NOW"
+    },
+    {
+      "type": "url",
+      "id": "button_link",
+      "label": "Button link"
+    },
+    {
+      "type": "image_picker",
+      "id": "image",
+      "label": "Hero image",
+      "info": "Leave blank to use the default luxury model photo"
+    }
+  ],
+  "presets": [{ "name": "ISB Hero" }]
+}
+{% endschema %}

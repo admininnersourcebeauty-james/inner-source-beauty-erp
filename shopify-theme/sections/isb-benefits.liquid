@@ -1,0 +1,74 @@
+<section class="isb-benefits isb-reveal" id="isb-benefits-{{ section.id }}">
+  <div class="isb-benefits__grid">
+    {%- for block in section.blocks -%}
+      <div class="isb-benefits__item{% unless forloop.last %} isb-benefits__item--divider{% endunless %}" {{ block.shopify_attributes }}>
+        <div class="isb-benefits__icon">
+          {%- case block.settings.icon -%}
+            {%- when 'leaf' -%}{% render 'isb-icon-leaf' %}
+            {%- when 'sparkle' -%}{% render 'isb-icon-sparkle' %}
+            {%- when 'shield' -%}{% render 'isb-icon-shield' %}
+            {%- else -%}{% render 'isb-icon-atom' %}
+          {%- endcase -%}
+        </div>
+        {%- if block.settings.title != blank -%}
+          <h3 class="isb-benefits__title">{{ block.settings.title | escape }}</h3>
+        {%- endif -%}
+        {%- if block.settings.text != blank -%}
+          <p class="isb-benefits__text">{{ block.settings.text | newline_to_br }}</p>
+        {%- endif -%}
+      </div>
+    {%- endfor -%}
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "ISB Features",
+  "tag": "section",
+  "class": "isb-section-benefits",
+  "max_blocks": 4,
+  "blocks": [
+    {
+      "type": "benefit",
+      "name": "Feature",
+      "settings": [
+        {
+          "type": "select",
+          "id": "icon",
+          "label": "Icon",
+          "options": [
+            { "value": "atom", "label": "Science" },
+            { "value": "leaf", "label": "Leaf" },
+            { "value": "sparkle", "label": "Sparkle" },
+            { "value": "shield", "label": "Shield" }
+          ],
+          "default": "atom"
+        },
+        {
+          "type": "text",
+          "id": "title",
+          "label": "Title",
+          "default": "Science Driven"
+        },
+        {
+          "type": "textarea",
+          "id": "text",
+          "label": "Description",
+          "default": "Advanced formulas backed by research."
+        }
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "ISB Features",
+      "blocks": [
+        { "type": "benefit", "settings": { "icon": "atom", "title": "Science Driven", "text": "Advanced formulas backed by research." } },
+        { "type": "benefit", "settings": { "icon": "leaf", "title": "Clean Ingredients", "text": "Carefully selected, safe and effective." } },
+        { "type": "benefit", "settings": { "icon": "sparkle", "title": "Visible Results", "text": "Real results you can see and feel." } },
+        { "type": "benefit", "settings": { "icon": "shield", "title": "Trusted Quality", "text": "Tested for safety. Made with integrity." } }
+      ]
+    }
+  ]
+}
+{% endschema %}

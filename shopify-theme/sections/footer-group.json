@@ -1,0 +1,11 @@
+{
+  "name": "Footer",
+  "type": "footer",
+  "sections": {
+    "isb-footer": {
+      "type": "isb-footer",
+      "settings": {}
+    }
+  },
+  "order": ["isb-footer"]
+}

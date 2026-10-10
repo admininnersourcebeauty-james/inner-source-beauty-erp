@@ -1,7 +1,7 @@
-/** Minimum stock / reorder helpers — reads reorder_limit (falls back to low_stock). */
+/** Minimum stock helpers — uses inventory.low_stock (legacy reorder_limit read fallback only). */
 
 export function itemMinimumStock(item) {
-  const raw = item?.reorder_limit ?? item?.low_stock
+  const raw = item?.low_stock ?? item?.reorder_limit
   if (raw == null || raw === '') return null
   const n = Number(raw)
   return Number.isFinite(n) ? n : null
@@ -116,5 +116,5 @@ export function reorderListItems(inventory) {
 export function minimumStockPayload(formValue) {
   const n = Number(formValue)
   const val = Number.isFinite(n) ? Math.max(n, 0) : 0
-  return { reorder_limit: val, low_stock: val }
+  return { low_stock: val }
 }

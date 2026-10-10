@@ -1,49 +1,59 @@
 import JSZip from 'jszip'
 
-export const CORE_BACKUP_TABLES = ['customers', 'inventory', 'orders', 'payments']
+export const CORE_BACKUP_TABLES = ['customers', 'inventory', 'orders', 'order_items', 'order_tracking_numbers', 'payments']
 export const PO_BACKUP_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts', 'purchase_order_receives', 'purchase_order_commission_payments']
-export const BACKUP_TABLES = [...CORE_BACKUP_TABLES, ...PO_BACKUP_TABLES]
+export const EXPENSE_BACKUP_TABLES = ['expenses']
+export const BACKUP_TABLES = [...CORE_BACKUP_TABLES, ...PO_BACKUP_TABLES, ...EXPENSE_BACKUP_TABLES]
 export const BACKUP_VERSION = 2
 export const APP_NAME = 'INNER SOURCE BEAUTY ERP'
 export const LAST_BACKUP_KEY = 'isb_last_backup_at'
 
-const PROFILE_SAFE_KEYS = ['id', 'email', 'role', 'created_at']
+const PROFILE_SAFE_KEYS = ['id', 'email', 'role', 'full_name', 'status', 'active', 'last_login', 'updated_at', 'display_name', 'name', 'first_name', 'last_name', 'created_at']
 const SENSITIVE_KEY = /password|token|secret|api_key|service_role|anon_key|env/i
 
 const TABLE_REQUIRED = {
   customers: ['id'],
   inventory: ['id'],
   orders: ['id', 'invoice_no'],
+  order_items: ['id', 'order_id'],
+  order_tracking_numbers: ['id', 'order_id'],
   payments: ['id'],
   purchase_orders: ['id', 'po_number'],
   purchase_order_items: ['id', 'purchase_order_id'],
   purchase_order_receipts: ['id', 'purchase_order_id', 'purchase_order_item_id'],
   purchase_order_receives: ['id', 'purchase_order_id', 'receive_number'],
   purchase_order_commission_payments: ['id', 'purchase_order_id'],
+  expenses: ['id', 'expense_date', 'description'],
 }
 
 const TABLE_NUMERIC = {
   customers: [],
-  inventory: ['qty', 'buying_price', 'selling_price', 'cost', 'price', 'retail', 'low_stock', 'reorder_limit', 'shipping_cost'],
-  orders: ['customer_id', 'inventory_id', 'qty', 'price', 'buying_price', 'profit', 'shipping', 'discount', 'total', 'shipping_cost', 'allocated_qty', 'backorder_qty', 'shipped_qty'],
+  inventory: ['qty', 'buying_price', 'selling_price', 'cost', 'price', 'retail', 'low_stock', 'shipping_cost', 'default_commission_value'],
+  orders: ['customer_id', 'inventory_id', 'qty', 'price', 'buying_price', 'profit', 'shipping', 'discount', 'tax', 'total', 'shipping_cost', 'allocated_qty', 'backorder_qty', 'shipped_qty'],
+  order_items: ['order_id', 'inventory_id', 'qty', 'price', 'discount', 'line_total', 'buying_price', 'shipping_cost', 'profit', 'allocated_qty', 'backorder_qty', 'shipped_qty', 'sort_order'],
+  order_tracking_numbers: ['order_id'],
   payments: ['customer_id', 'order_id', 'amount'],
   purchase_orders: ['exchange_rate', 'shipping_cost', 'other_cost', 'total_ordered_units', 'total_product_cost', 'total_product_cost_usd', 'total_commission', 'grand_total', 'total_purchase_cost_usd', 'commission_amount_paid'],
-  purchase_order_items: ['inventory_id', 'order_qty', 'korean_unit_cost', 'factory_unit_cost_usd', 'product_cost_usd', 'middleman_commission_unit_krw', 'middleman_commission_unit_usd', 'middleman_commission_total_krw', 'middleman_commission_total_usd', 'total_unit_cost_krw', 'total_unit_cost_usd', 'commission_percent', 'commission_per_unit', 'commission_per_unit_usd', 'product_cost', 'commission_total', 'commission_total_usd', 'total_line_cost', 'received_qty'],
+  purchase_order_items: ['inventory_id', 'order_qty', 'korean_unit_cost', 'factory_unit_cost_usd', 'product_cost_usd', 'middleman_commission_unit_krw', 'middleman_commission_unit_usd', 'middleman_commission_total_krw', 'middleman_commission_total_usd', 'total_unit_cost_krw', 'total_unit_cost_usd', 'commission_percent', 'commission_per_unit', 'commission_per_unit_usd', 'product_cost', 'commission_total', 'commission_total_usd', 'total_line_cost', 'received_qty', 'commission_value'],
   purchase_order_receipts: ['inventory_id', 'received_qty', 'inventory_before', 'inventory_after', 'factory_unit_cost', 'commission_per_unit', 'shipping_allocation', 'other_cost_allocation', 'landed_unit_cost', 'buying_price_before', 'buying_price_after'],
   purchase_order_receives: ['shipping_cost', 'other_cost'],
-  purchase_order_commission_payments: ['amount'],
+  purchase_order_commission_payments: ['amount', 'amount_krw'],
+  expenses: ['amount'],
 }
 
 const TABLE_DATES = {
   customers: ['created_at'],
   inventory: ['created_at', 'expiration_date'],
   orders: ['created_at', 'due_date', 'order_date', 'fulfillment_date', 'voided_at'],
+  order_items: ['created_at'],
+  order_tracking_numbers: ['created_at'],
   payments: ['created_at', 'payment_date'],
   purchase_orders: ['created_at', 'order_date', 'eta', 'commission_payment_date', 'updated_at'],
   purchase_order_items: ['created_at'],
   purchase_order_receipts: ['created_at', 'received_date'],
   purchase_order_receives: ['created_at', 'received_date'],
   purchase_order_commission_payments: ['created_at', 'payment_date'],
+  expenses: ['created_at', 'expense_date', 'updated_at'],
 }
 
 export function backupZipFilename() {
@@ -209,6 +219,22 @@ export function validateRestoreRows(parsed, existingData = {}) {
           errors.push({ table, rowNum, reason: `inventory_id ${row.inventory_id} not found in backup or current data.` })
         }
       }
+      if (table === 'order_items') {
+        if (row.order_id && !orderIds.has(String(row.order_id))) {
+          errors.push({ table, rowNum, reason: `order_id ${row.order_id} not found in backup or current data.` })
+        }
+        if (row.inventory_id && String(row.inventory_id).trim() && !inventoryIds.has(String(row.inventory_id))) {
+          errors.push({ table, rowNum, reason: `inventory_id ${row.inventory_id} not found in backup or current data.` })
+        }
+      }
+      if (table === 'order_tracking_numbers') {
+        if (row.order_id && !orderIds.has(String(row.order_id))) {
+          errors.push({ table, rowNum, reason: `order_id ${row.order_id} not found in backup or current data.` })
+        }
+        if (row.tracking_number != null && !String(row.tracking_number).trim()) {
+          errors.push({ table, rowNum, reason: 'tracking_number cannot be empty.' })
+        }
+      }
       if (table === 'payments') {
         if (row.customer_id && String(row.customer_id).trim() && !customerIds.has(String(row.customer_id))) {
           errors.push({ table, rowNum, reason: `customer_id ${row.customer_id} not found in backup or current data.` })
@@ -258,14 +284,31 @@ export async function readBackupZip(file) {
     throw new Error(`Unsupported backup version: ${manifest.backup_version}`)
   }
   for (const table of CORE_BACKUP_TABLES) {
+    if (table === 'order_tracking_numbers') continue
     if (!zip.file(`${table}.json`)) throw new Error(`Missing required file: ${table}.json`)
   }
   const parsed = { manifest }
   for (const table of CORE_BACKUP_TABLES) {
-    const text = await zip.file(`${table}.json`).async('string')
-    parsed[table] = parseJsonTable(text, `${table}.json`)
+    const file = zip.file(`${table}.json`)
+    if (file) {
+      const text = await file.async('string')
+      parsed[table] = parseJsonTable(text, `${table}.json`)
+    } else if (table === 'order_tracking_numbers') {
+      parsed[table] = []
+    } else {
+      throw new Error(`Missing required file: ${table}.json`)
+    }
   }
   for (const table of PO_BACKUP_TABLES) {
+    const file = zip.file(`${table}.json`)
+    if (file) {
+      const text = await file.async('string')
+      parsed[table] = parseJsonTable(text, `${table}.json`)
+    } else {
+      parsed[table] = []
+    }
+  }
+  for (const table of EXPENSE_BACKUP_TABLES) {
     const file = zip.file(`${table}.json`)
     if (file) {
       const text = await file.async('string')
@@ -285,6 +328,16 @@ function coerceRow(row) {
   return out
 }
 
+function normalizeOrderRestoreRow(row) {
+  const out = coerceRow(row)
+  if (out.internal_note == null && out.note != null && String(out.note).trim()) {
+    out.internal_note = String(out.note).trim()
+  }
+  if (out.internal_note == null) out.internal_note = ''
+  if (out.customer_note == null) out.customer_note = ''
+  return out
+}
+
 export async function executeRestore({ parsed, mode, existingData, persistTable, onProgress }) {
   const validationErrors = validateRestoreRows(parsed, existingData)
   if (validationErrors.length) {
@@ -298,7 +351,9 @@ export async function executeRestore({ parsed, mode, existingData, persistTable,
 
   for (const table of tablesToRestore) {
     onProgress?.(`Restoring ${table}...`)
-    const rows = (parsed[table] || []).map(coerceRow)
+    const rows = (parsed[table] || []).map(row => (
+      table === 'orders' ? normalizeOrderRestoreRow(row) : coerceRow(row)
+    ))
     const existingIds = new Set((existingData[table] || []).map(r => String(r.id)))
 
     for (const row of rows) {

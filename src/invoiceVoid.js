@@ -15,9 +15,15 @@ export function isVoidOrder(order) {
   return String(order?.status || '').trim().toLowerCase() === 'void'
 }
 
-export function voidRestoreQty(order) {
-  const { allocated_qty, fulfilled_qty } = normalizeFulfillment(order)
-  return Math.max(Number(allocated_qty) - Number(fulfilled_qty), 0)
+export function voidRestoreQty(order, orderItems) {
+  if (orderItems?.length) {
+    const sum = orderItems
+      .filter(item => String(item.order_id) === String(order?.id))
+      .reduce((s, line) => s + Math.max(Number(line.allocated_qty || 0), 0), 0)
+    if (sum > 0) return sum
+  }
+  const { allocated_qty } = normalizeFulfillment(order)
+  return Math.max(Number(allocated_qty) || 0, 0)
 }
 
 export function voidPaymentStatusDisplay(paidAmount) {
@@ -63,7 +69,7 @@ export function statusMatchesFilterWithVoid(order, filter) {
 
 export function buildVoidPayload(order, payments, { reason, note, voidedBy }) {
   const paid = orderPaidTotal(payments, order)
-  const { fulfilled_qty } = normalizeFulfillment(order)
+  const { allocated_qty } = normalizeFulfillment(order)
   return {
     status: 'Void',
     void_reason: reason,
@@ -72,7 +78,7 @@ export function buildVoidPayload(order, payments, { reason, note, voidedBy }) {
     voided_by: voidedBy || '',
     allocated_qty: 0,
     backorder_qty: 0,
-    shipped_qty: fulfilled_qty,
+    shipped_qty: Number(order?.shipped_qty ?? allocated_qty ?? 0),
     payment_status: voidPaymentStatusDisplay(paid),
   }
 }
@@ -88,5 +94,5 @@ export function formatVoidDate(iso) {
 }
 
 export const ORDER_FILTER_STATUSES = [
-  'Open', 'Back Order', 'Ready to Fulfill', 'Partially Fulfilled', 'Completed', 'Cancelled', 'Void',
+  'Completed', 'Back Order', 'Partially Allocated', 'Cancelled', 'Void',
 ]

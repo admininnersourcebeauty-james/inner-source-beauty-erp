@@ -1,0 +1,37 @@
+{
+  "current": {
+    "logo_width": 180,
+    "sections": {
+      "header-group": {
+        "type": "header",
+        "sections": {
+          "isb-announcement-bar": {
+            "type": "isb-announcement-bar",
+            "settings": {
+              "text": "FREE SHIPPING ON ALL ORDERS OVER $75"
+            }
+          },
+          "isb-header": {
+            "type": "isb-header",
+            "settings": {
+              "enable_sticky": true
+            }
+          }
+        },
+        "order": ["isb-announcement-bar", "isb-header"]
+      },
+      "footer-group": {
+        "type": "footer",
+        "sections": {
+          "isb-footer": {
+            "type": "isb-footer",
+            "settings": {
+              "note": "All rights reserved."
+            }
+          }
+        },
+        "order": ["isb-footer"]
+      }
+    }
+  }
+}

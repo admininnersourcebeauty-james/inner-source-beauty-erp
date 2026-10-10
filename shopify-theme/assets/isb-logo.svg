@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 72" role="img" aria-label="Inner Source Beauty">
+  <defs>
+    <linearGradient id="gold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#C9A04E"/>
+      <stop offset="100%" stop-color="#B68A35"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#gold)">
+    <path d="M18 8c8 0 14 6 14 14v28c0 8-6 14-14 14S4 58 4 50V22C4 14 10 8 18 8zm0 8c-3.3 0-6 2.7-6 6v28c0 3.3 2.7 6 6 6s6-2.7 6-6V22c0-3.3-2.7-6-6-6z"/>
+    <path d="M44 8h12l20 42h-10l-3.5-8H47.5L44 50H34L44 8zm8 26l-4-10-4 10h8z"/>
+    <text x="78" y="30" font-family="Georgia, 'Times New Roman', serif" font-size="15" letter-spacing="3">INNER SOURCE</text>
+    <text x="78" y="52" font-family="Georgia, 'Times New Roman', serif" font-size="13" letter-spacing="5">BEAUTY</text>
+  </g>
+</svg>

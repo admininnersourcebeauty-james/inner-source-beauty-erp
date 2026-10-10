@@ -1,0 +1,35 @@
+[
+  {
+    "name": "theme_info",
+    "theme_name": "Inner Source Beauty",
+    "theme_version": "1.0.0",
+    "theme_author": "Inner Source Beauty",
+    "theme_documentation_url": "https://innersourcebeauty.com",
+    "theme_support_url": "https://innersourcebeauty.com"
+  },
+  {
+    "name": "Brand",
+    "settings": [
+      {
+        "type": "image_picker",
+        "id": "logo",
+        "label": "Logo"
+      },
+      {
+        "type": "range",
+        "id": "logo_width",
+        "min": 80,
+        "max": 280,
+        "step": 4,
+        "unit": "px",
+        "label": "Logo width",
+        "default": 180
+      },
+      {
+        "type": "image_picker",
+        "id": "favicon",
+        "label": "Favicon"
+      }
+    ]
+  }
+]

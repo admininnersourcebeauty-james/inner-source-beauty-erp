@@ -8,10 +8,11 @@ import {
 import {
   ORDER_STATUSES, FULFILLMENT_METHODS, calcAllocation, deriveCreateStatus, normalizeFulfillment, unshippedAllocated,
   backOrderedQtyForProduct, activeBackorderOrders, backOrderDashboardStats, activeBackorderAlerts,
-  backOrderReports, validateFulfillmentStatus, resolveFulfilledQty, buildAllocationPlan,
+  backOrderReports,
   isValidDbDate, inventoryStockView, normalizeOrderStatus, statusMatchesFilter, countOrdersByStatus,
-  fulfillmentHandledBy, readyToFulfillAlerts, readyToFulfillOrders, awaitingPickupCount, companyDeliveryCount,
-  validateCompleteFulfillment, isCarrierMethod, isCompanyDelivery, isCustomerPickup, formatFulfillmentDate,
+  fulfillmentHandledBy, partiallyAllocatedAlerts, partiallyAllocatedOrders,
+  awaitingPickupCount, companyDeliveryCount,
+  isCarrierMethod, isCompanyDelivery, isCustomerPickup, formatFulfillmentDate,
 } from './backorder.js'
 import {
   buildLowStockAlerts, inventoryReorderView, itemMinimumStockOrDefault,
@@ -22,24 +23,86 @@ import {
   isVoidOrder, orderPaidTotal, ordersForSalesMetrics, paymentCountsTowardBalance,
   statusMatchesFilterWithVoid, voidRestoreQty, ORDER_FILTER_STATUSES,
 } from './invoiceVoid.js'
+import { formatDisplayDate, isDisplayDateField } from './dateFormat.js'
+import { COMPANY_LOGO_SRC } from './companyLogo.js'
 import {
   nextPoNumber, calcPoTotals, derivePoStatus, newPoId, buildPoFromReorderItems,
   poSummaryStats, incomingInventoryAlerts, allocateReceiveCosts, calcLineItem,
   deriveCommissionPaymentStatus, normalizePoSavePayload, validatePoSave, validateReceive,
   poCommissionPaymentsForOrder, commissionPaymentSummary, validateCommissionPaymentEntry,
-  resolvePurchaseType, isMiddlemanPo, isMiddlemanPurchaseType, purchaseTypeLabel, calcWeightedBuyingPrice, nextReceiveNumber,
+  resolvePurchaseType, isMiddlemanPo, isMiddlemanPurchaseType, purchaseTypeLabel, calcWeightedBuyingPrice, calcWeightedAverage, nextReceiveNumber,
+  resolveExchangeRate,
   calcPoUsdTotalsFromItems,
+  resolvePoLineInventoryId, findInventoryBySku, normalizePoSku, buildInventoryRowFromPoLine,
+  defaultReceiveSellingPrice, parseReceiveSellingPrice, applyReceiveSellingPriceToInventory,
+  collectMiddlemanOptions, COMMISSION_TYPES, validateInventoryCommissionDefaults,
+  collectSupplierOptions,
 } from './purchaseOrders.js'
 import { PurchaseOrdersPage, PurchaseOrderReports } from './PurchaseOrdersUI.jsx'
+import {
+  blankOrderLine, itemsForOrder, orderDisplayProduct, itemSelling as orderItemSelling,
+  calcOrderTotals, mergeDuplicateInventoryLines, validateOrderLines, buildOrderHeaderFromLines,
+  buildOrderItemInsertRows, buildOrderItemLocalRows, previewLineAllocation, orderRestorePlan, activeBackorderEntries,
+  buildLineAllocationPlan, reaggregateOrderHeader, orderItemsForOrder, deriveOrderStatusFromLines,
+  isPersistedOrderItemId, logOrderItemInsertPayload, newClientOrderLineKey,
+  orderInternalNote, orderCustomerNote, orderHasMemo,
+} from './orderItems.js'
+import {
+  PROFILE_NAME_FIELDS, staffSalesPersonLabel, salesStaffOptions,
+  resolveSalesPersonFields, orderSalesPersonDisplay, staffProfileFromSession,
+  PAGE_ACCESS, profileStatus, canAccessPage,
+} from './staffProfiles.js'
+import {
+  blankTrackingRow,
+  buildTrackingInsertRows,
+  formatTrackingPrintLine,
+  formatTrackingScreenLine,
+  primaryTrackingValue,
+  sanitizeTrackingEntries,
+  shipmentStatusLabel,
+  trackingEntriesForOrder,
+  trackingEntriesToFormValues,
+  TRACKING_CARRIERS,
+} from './orderTrackingNumbers.js'
+import {
+  allocationDeductionError,
+  buildInventoryDeltaPlan,
+  enrichDeductionPlan,
+  INVENTORY_ADJUST_RPC,
+  INVENTORY_STOCK_COLUMN,
+  parseInventoryIdForRpc,
+  validateOrderInventoryAllocation,
+} from './orderInventory.js'
+import { VoiceOrderPanel } from './VoiceOrderUI.jsx'
+import { exportInventoryCsv } from './inventoryExport.js'
+import { buildInventorySalesHistory } from './inventorySalesHistory.js'
+import { ExpensesPage } from './ExpensesUI.jsx'
+import { expenseDateKey, currentMonthKey } from './expenses.js'
+import {
+  calcDashboardExpectedProfit,
+  calcDashboardInventoryValue,
+  calcMonthFinancialSummary,
+  calcMonthPurchaseSpending,
+  calcMonthlyProfitSummary,
+  calcRealizedProfitForOrders,
+  filterOrdersForMonth,
+  formatGrossMarginPercent,
+  formatMonthKeyLabel,
+  formatNetMarginPercent,
+  ordersForDashboardSales,
+  shiftMonthKey,
+} from './dashboardMetrics.js'
+import { StaffManagement } from './StaffManagement.jsx'
 import './style.css'
 
-const CORE_TABLES = ['customers', 'inventory', 'orders', 'payments']
+const CORE_TABLES = ['customers', 'inventory', 'orders', 'order_items', 'order_tracking_numbers', 'payments']
 const PO_TABLES = ['purchase_orders', 'purchase_order_items', 'purchase_order_receipts', 'purchase_order_receives', 'purchase_order_commission_payments']
-const TABLES = [...CORE_TABLES, ...PO_TABLES]
+const EXPENSE_TABLES = ['expenses']
+const TABLES = [...CORE_TABLES, ...PO_TABLES, ...EXPENSE_TABLES]
 const EMPTY = {
-  customers: [], inventory: [], orders: [], payments: [],
+  customers: [], inventory: [], orders: [], order_items: [], order_tracking_numbers: [], payments: [],
   purchase_orders: [], purchase_order_items: [], purchase_order_receipts: [], purchase_order_receives: [],
-  purchase_order_commission_payments: [],
+  purchase_order_commission_payments: [], expenses: [],
 }
 const PAYMENT_METHODS = ['Zelle', 'Venmo', 'Cash', 'Credit Card', 'Check', 'ACH/Wire']
 const TERMS = ['COD', 'NET 15', 'NET 30', 'NET 45', 'NET 60']
@@ -59,7 +122,21 @@ const calcMargin = (buying, selling, shipping = 0) => {
 const calcProfit = (buying, selling, shipping = 0) => Number(selling) - Number(buying) - Number(shipping)
 const formatMargin = (buying, selling, shipping = 0) => {
   const m = calcMargin(buying, selling, shipping)
-  return m === null ? '—' : `${m.toFixed(1)}%`
+  return m === null ? 'Not Set' : `${m.toFixed(1)}%`
+}
+const formatInventoryProfit = (buying, selling, shipping = 0) => {
+  const s = Number(selling) || 0
+  if (s <= 0) return 'Not Set'
+  return money(calcProfit(buying, selling, shipping))
+}
+const formatInventoryMargin = (buying, selling, shipping = 0) => {
+  const s = Number(selling) || 0
+  if (s <= 0) return 'Not Set'
+  return formatMargin(buying, selling, shipping)
+}
+const formatSellingDisplay = selling => {
+  const s = Number(selling) || 0
+  return s > 0 ? money(s) : '—'
 }
 const localDateKey = d => {
   if (!d) return ''
@@ -142,17 +219,11 @@ const stockLevel = qty => {
   return { cls: 'stock-red', label: `${q} LOW STOCK` }
 }
 
-const PAGE_ACCESS = {
-  Admin: ['Dashboard', 'Customers', 'Inventory', 'Purchase Orders', 'Orders', 'Invoice', 'Payments', 'Reports', 'Settings'],
-  Staff: ['Dashboard', 'Customers', 'Purchase Orders', 'Orders', 'Invoice', 'Payments'],
-  Warehouse: ['Inventory'],
-}
-
 function useLocalData() {
   const [data, setData] = useState(() => {
     try {
       const raw = JSON.parse(localStorage.getItem('isb_data_v2')) || {}
-      return { ...EMPTY, ...raw, purchase_orders: raw.purchase_orders || [], purchase_order_items: raw.purchase_order_items || [], purchase_order_receipts: raw.purchase_order_receipts || [], purchase_order_receives: raw.purchase_order_receives || [], purchase_order_commission_payments: raw.purchase_order_commission_payments || [] }
+      return { ...EMPTY, ...raw, order_items: raw.order_items || [], order_tracking_numbers: raw.order_tracking_numbers || [], purchase_orders: raw.purchase_orders || [], purchase_order_items: raw.purchase_order_items || [], purchase_order_receipts: raw.purchase_order_receipts || [], purchase_order_receives: raw.purchase_order_receives || [], purchase_order_commission_payments: raw.purchase_order_commission_payments || [], expenses: raw.expenses || [] }
     } catch { return EMPTY }
   })
   useEffect(() => localStorage.setItem('isb_data_v2', JSON.stringify(data)), [data])
@@ -171,12 +242,14 @@ function App() {
   const [localData, setLocalData] = useLocalData()
   const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(false)
+  const [dataLoadErrors, setDataLoadErrors] = useState({})
   const [globalSearch, setGlobalSearch] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const [selectedRecord, setSelectedRecord] = useState({ page: '', id: '', focusFulfillment: false })
   const voidingRef = useRef(false)
   const receivingRef = useRef(false)
   const [draftPoSeed, setDraftPoSeed] = useState(null)
+  const [staffUsers, setStaffUsers] = useState([])
 
   const data = hasSupabaseConfig && session ? cloudData : localData
   const role = profile.role || 'Admin'
@@ -200,25 +273,136 @@ function App() {
     if (!allowedPages.includes(page)) setPage(allowedPages[0])
   }, [role, page, allowedPages])
 
+  useEffect(() => {
+    if (!menuOpen) return undefined
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setMenuOpen(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [menuOpen])
+
+  useEffect(() => {
+    reloadStaffUsers()
+  }, [session, profile.email, profile.role, profile.id, profile.full_name])
+
+  async function reloadStaffUsers() {
+    if (!session) {
+      setStaffUsers([])
+      return
+    }
+    try {
+      let rows = []
+      if (hasSupabaseConfig && session) {
+        const { data: profileRows, error } = await supabase.from('profiles').select(PROFILE_NAME_FIELDS)
+        if (error) throw error
+        rows = profileRows || []
+      } else {
+        rows = [staffProfileFromSession(profile, session)]
+      }
+      setStaffUsers(rows || [])
+    } catch {
+      setStaffUsers([staffProfileFromSession(profile, session)])
+    }
+  }
+
+  async function saveProfileFullName(userId, fullName) {
+    return saveStaffProfile(userId, { full_name: fullName })
+  }
+
+  async function touchLastLogin(userId) {
+    if (!hasSupabaseConfig || !userId) return
+    if (String(userId) === String(session?.user?.id)) {
+      await supabase.rpc('touch_my_last_login')
+    }
+  }
+
+  async function ensureActiveProfile(userId) {
+    if (!hasSupabaseConfig || !userId) return false
+    const { data: row } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle()
+    if (row && profileStatus(row) === 'inactive') {
+      await supabase.auth.signOut()
+      setSession(null)
+      setProfile({ role: 'Admin' })
+      setAuthMsg('This account is inactive. Contact an administrator.')
+      return true
+    }
+    if (row) setProfile(row)
+    return false
+  }
+
+  async function saveStaffProfile(userId, { full_name, role, status, active }) {
+    if (!userId) return { error: 'Missing user id.' }
+    const patch = {}
+    if (full_name !== undefined) patch.full_name = String(full_name || '').trim()
+    if (role !== undefined) patch.role = role
+    if (status !== undefined) {
+      patch.status = status === 'inactive' ? 'inactive' : 'active'
+      patch.active = patch.status === 'active'
+    } else if (active !== undefined) {
+      patch.active = !!active
+      patch.status = active ? 'active' : 'inactive'
+    }
+    const isSelf = String(userId) === String(profile.id || session?.user?.id)
+    const isAdmin = (profile.role || 'Admin') === 'Admin'
+    const onlyFullName = full_name !== undefined
+      && role === undefined && status === undefined && active === undefined
+
+    if (hasSupabaseConfig && session) {
+      if (isSelf && onlyFullName) {
+        const { error } = await supabase.rpc('update_my_full_name', { p_full_name: patch.full_name })
+        if (error) return { error: error.message }
+      } else if (isAdmin) {
+        const { error } = await supabase.from('profiles').update(patch).eq('id', userId)
+        if (error) return { error: error.message }
+      } else {
+        return { error: 'Permission denied.' }
+      }
+    }
+    if (String(userId) === String(profile.id || session?.user?.id)) {
+      setProfile(prev => ({ ...prev, ...patch }))
+    }
+    await reloadStaffUsers()
+    return { error: '' }
+  }
+
   async function loadProfile() {
     if (!session?.user?.id) return
     const { data: row } = await supabase.from('profiles').select('*').eq('id', session.user.id).maybeSingle()
+    if (row && profileStatus(row) === 'inactive') {
+      await supabase.auth.signOut()
+      setSession(null)
+      setProfile({ role: 'Admin' })
+      setAuthMsg('This account is inactive. Contact an administrator.')
+      return
+    }
     if (row) setProfile(row)
-    else setProfile({ role: 'Admin', email: session.user.email })
+    else setProfile({ role: 'Admin', email: session.user.email, status: 'active', active: true })
   }
 
   async function loadCloudData() {
     setLoading(true); setNotice('')
     const next = { ...EMPTY }
+    const errors = {}
     for (const t of TABLES) {
       const { data: rows, error } = await supabase.from(t).select('*').order('created_at', { ascending: false })
       if (error) {
-        if (PO_TABLES.includes(t)) next[t] = []
-        else setNotice(error.message)
+        console.error(`[loadCloudData] ${t} query failed:`, error)
+        if (PO_TABLES.includes(t) || EXPENSE_TABLES.includes(t) || t === 'order_items' || t === 'order_tracking_numbers') next[t] = []
+        else {
+          errors[t] = error.message || `Failed to load ${t}.`
+          setNotice(error.message)
+        }
       } else {
         next[t] = rows || []
       }
     }
+    setDataLoadErrors(errors)
     setCloudData(next); setLoading(false)
   }
 
@@ -226,11 +410,22 @@ function App() {
     e.preventDefault(); setAuthMsg('')
     if (!email || !password) return setAuthMsg('Email and password required')
     if (!hasSupabaseConfig) { setSession({ user: { email } }); setProfile({ role: 'Admin', email }); return }
-    const res = authMode === 'signup'
-      ? await supabase.auth.signUp({ email, password })
-      : await supabase.auth.signInWithPassword({ email, password })
-    if (res.error) setAuthMsg(res.error.message)
-    else setAuthMsg(authMode === 'signup' ? 'Account created. Check email if confirmation is enabled.' : '')
+    if (authMode === 'signup') {
+      const res = await supabase.auth.signUp({ email, password })
+      if (res.error) setAuthMsg(res.error.message)
+      else setAuthMsg('Account created. Check email if confirmation is enabled.')
+      return
+    }
+    const res = await supabase.auth.signInWithPassword({ email, password })
+    if (res.error) return setAuthMsg(res.error.message)
+    const userId = res.data.user?.id
+    if (userId) {
+      const blocked = await ensureActiveProfile(userId)
+      if (blocked) return
+      await touchLastLogin(userId)
+      await loadProfile()
+    }
+    setAuthMsg('')
   }
 
   async function logout() {
@@ -247,6 +442,35 @@ function App() {
     } else {
       setLocalData(p => ({ ...p, [table]: [{ id: uid(), created_at: new Date().toISOString(), ...row }, ...p[table]] }))
     }
+  }
+
+  async function saveOrderTrackingNumbers(orderId, values) {
+    const rows = buildTrackingInsertRows(orderId, values)
+    const primary = primaryTrackingValue(values)
+    if (hasSupabaseConfig && session) {
+      const { error: delErr } = await supabase.from('order_tracking_numbers').delete().eq('order_id', orderId)
+      if (delErr) return { error: delErr.message }
+      if (rows.length) {
+        const { error: insErr } = await supabase.from('order_tracking_numbers').insert(rows)
+        if (insErr) return { error: insErr.message }
+      }
+      const { error: syncErr } = await supabase.from('orders').update({ tracking: primary }).eq('id', orderId)
+      if (syncErr) return { error: syncErr.message }
+    } else {
+      setLocalData(p => ({
+        ...p,
+        order_tracking_numbers: [
+          ...(p.order_tracking_numbers || []).filter(r => String(r.order_id) !== String(orderId)),
+          ...rows.map(r => ({
+            id: uid(),
+            ...r,
+            created_at: new Date().toISOString(),
+          })),
+        ],
+        orders: p.orders.map(o => String(o.id) === String(orderId) ? { ...o, tracking: primary } : o),
+      }))
+    }
+    return { error: '' }
   }
 
   async function updateRow(table, id, row) {
@@ -285,6 +509,12 @@ function App() {
     return { ok: true, id }
   }
 
+  async function insertOrderItemsCloud(rows) {
+    const payloads = logOrderItemInsertPayload('order_items insert', rows)
+    const { error } = await supabase.from('order_items').insert(payloads)
+    return error
+  }
+
   async function deleteOrderRowSilent(id) {
     if (!id) return { ok: false, error: 'Missing order id.' }
     if (hasSupabaseConfig && session) {
@@ -311,20 +541,92 @@ function App() {
   }
 
   async function adjustInventoryQty(inventoryId, delta) {
-    if (!inventoryId || !delta) return
+    const change = Number(delta)
+    const parsed = parseInventoryIdForRpc(inventoryId)
+
+    if (!parsed.ok) {
+      return { ok: false, error: parsed.error }
+    }
+    if (change === 0 || !Number.isFinite(change)) {
+      return { ok: true }
+    }
+
     if (hasSupabaseConfig && session) {
-      const inv = data.inventory.find(i => String(i.id) === String(inventoryId))
-      if (!inv) return
-      const next = Math.max(Number(inv.qty || 0) + delta, 0)
-      await updateRow('inventory', inv.id, { qty: next })
+      const rpcArgs = { p_inventory_id: parsed.id, p_delta: change }
+      const { data: beforeRow, error: beforeErr } = await supabase
+        .from('inventory')
+        .select(`id, ${INVENTORY_STOCK_COLUMN}`)
+        .eq('id', parsed.id)
+        .maybeSingle()
+      if (beforeErr) return { ok: false, error: `Inventory read failed before RPC: ${beforeErr.message}` }
+      if (!beforeRow) return { ok: false, error: `Inventory item ${parsed.id} not found before RPC.` }
+
+      const { data: rpcData, error: rpcErr } = await supabase.rpc(INVENTORY_ADJUST_RPC, rpcArgs)
+
+      if (rpcErr) {
+        const msg = rpcErr.message || 'Unknown Supabase RPC error'
+        return { ok: false, error: `Inventory deduction failed (${INVENTORY_ADJUST_RPC}): ${msg}` }
+      }
+
+      const { data: afterRow, error: afterErr } = await supabase
+        .from('inventory')
+        .select(`id, ${INVENTORY_STOCK_COLUMN}`)
+        .eq('id', parsed.id)
+        .maybeSingle()
+      const qtyAfter = Number(afterRow?.[INVENTORY_STOCK_COLUMN] ?? NaN)
+
+      if (afterErr) {
+        return { ok: false, error: `Inventory verification failed after RPC: ${afterErr.message}` }
+      }
+      if (!afterRow) {
+        return { ok: false, error: `Inventory item ${parsed.id} not found after RPC.` }
+      }
+
+      const qtyBefore = Number(beforeRow[INVENTORY_STOCK_COLUMN] ?? rpcData?.qty_before ?? 0)
+      const expectedAfter = Math.max(qtyBefore + change, 0)
+      if (!Number.isFinite(qtyAfter) || Math.abs(qtyAfter - expectedAfter) > 0.0001) {
+        return { ok: false, error: `Inventory ${INVENTORY_STOCK_COLUMN} mismatch after RPC: expected ${expectedAfter}, got ${qtyAfter}.` }
+      }
+
+      return { ok: true, data: { qty_before: qtyBefore, qty_after: qtyAfter, delta: change, rpc: rpcData } }
+    }
+
+    setLocalData(p => {
+      const inv = p.inventory.find(i => String(i.id) === String(parsed.id))
+      const oldQty = Number(inv?.[INVENTORY_STOCK_COLUMN] || 0)
+      const next = Math.max(oldQty + change, 0)
+      return {
+        ...p,
+        inventory: p.inventory.map(i => String(i.id) === String(parsed.id)
+          ? { ...i, [INVENTORY_STOCK_COLUMN]: next }
+          : i),
+      }
+    })
+    return { ok: true }
+  }
+
+  async function applyInventoryStockDeltaPlan(plan) {
+    for (const step of plan || []) {
+      const requestedDelta = -Number(step.delta || 0)
+      const result = await adjustInventoryQty(step.inventory_id, requestedDelta)
+      if (result?.ok === false) return { error: result.error || 'Inventory update failed.' }
+    }
+    return { error: '' }
+  }
+
+  async function rollbackCreatedOrder(orderId) {
+    if (hasSupabaseConfig && session) {
+      await supabase.from('order_items').delete().eq('order_id', orderId)
     } else {
       setLocalData(p => ({
         ...p,
-        inventory: p.inventory.map(i => String(i.id) === String(inventoryId)
-          ? { ...i, qty: Math.max(Number(i.qty || 0) + delta, 0) }
-          : i),
+        order_items: p.order_items.filter(i => String(i.order_id) !== String(orderId)),
+        order_tracking_numbers: (p.order_tracking_numbers || []).filter(i => String(i.order_id) !== String(orderId)),
       }))
     }
+    const rollback = await deleteOrderRowSilent(orderId)
+    if (hasSupabaseConfig && session) await loadCloudData()
+    return rollback
   }
 
   async function deleteOrder(id) {
@@ -346,30 +648,38 @@ function App() {
     }
 
     setNotice('')
-    const restoreQty = unshippedAllocated(order)
-    const inventoryId = order.inventory_id
+    const restorePlan = orderRestorePlan(order, data.order_items)
 
     if (hasSupabaseConfig && session) {
-      if (inventoryId && restoreQty > 0) await adjustInventoryQty(inventoryId, restoreQty)
+      for (const step of restorePlan) {
+        await adjustInventoryQty(step.inventory_id, step.qty)
+      }
       for (const p of relatedPayments) {
         const { error } = await supabase.from('payments').delete().eq('id', p.id)
         if (error) return setNotice(error.message), false
       }
+      await supabase.from('order_items').delete().eq('order_id', id)
       const { error } = await supabase.from('orders').delete().eq('id', id)
       if (error) return setNotice(error.message), false
       await loadCloudData()
     } else {
       const paymentIds = new Set(relatedPayments.map(p => String(p.id)))
-      setLocalData(p => ({
-        ...p,
-        inventory: inventoryId && restoreQty > 0
-          ? p.inventory.map(i => String(i.id) === String(inventoryId)
-            ? { ...i, qty: Math.max(Number(i.qty || 0) + restoreQty, 0) }
+      setLocalData(p => {
+        let inventory = [...p.inventory]
+        for (const step of restorePlan) {
+          inventory = inventory.map(i => String(i.id) === String(step.inventory_id)
+            ? { ...i, qty: Math.max(Number(i.qty || 0) + step.qty, 0) }
             : i)
-          : p.inventory,
-        payments: p.payments.filter(x => !paymentIds.has(String(x.id))),
-        orders: p.orders.filter(x => String(x.id) !== String(id)),
-      }))
+        }
+        return {
+          ...p,
+          inventory,
+          payments: p.payments.filter(x => !paymentIds.has(String(x.id))),
+          order_items: p.order_items.filter(x => String(x.order_id) !== String(id)),
+          order_tracking_numbers: (p.order_tracking_numbers || []).filter(x => String(x.order_id) !== String(id)),
+          orders: p.orders.filter(x => String(x.id) !== String(id)),
+        }
+      })
     }
 
     return true
@@ -384,28 +694,43 @@ function App() {
     if (isVoidOrder(order)) return { error: 'This invoice is already voided.' }
     if (!reason) return { error: 'Void reason is required.' }
 
-    const restoreQty = voidRestoreQty(order)
-    const invId = order.inventory_id
+    const restorePlan = orderRestorePlan(order, data.order_items)
     const voidedBy = session?.user?.email || profile.email || role || 'Admin'
     const payload = buildVoidPayload(order, data.payments, { reason, note, voidedBy })
+    const orderLines = itemsForOrder(order, data.order_items)
+    const voidedItems = orderLines.map(line => ({
+      ...line,
+      allocated_qty: 0,
+      backorder_qty: 0,
+    }))
 
     voidingRef.current = true
     setNotice('')
     try {
       if (hasSupabaseConfig && session) {
-        const inv = data.inventory.find(i => String(i.id) === String(invId))
-        const prevQty = Number(inv?.qty || 0)
-        if (invId && restoreQty > 0) {
-          const { error: invErr } = await supabase.from('inventory').update({ qty: prevQty + restoreQty }).eq('id', invId)
-          if (invErr) {
-            setNotice(invErr.message)
-            return { error: invErr.message }
+        const rollback = []
+        for (const step of restorePlan) {
+          const result = await adjustInventoryQty(step.inventory_id, step.qty)
+          if (result?.ok === false) {
+            for (const rb of rollback.reverse()) {
+              await adjustInventoryQty(rb.inventory_id, -rb.qty)
+            }
+            setNotice(result.error)
+            return { error: result.error }
           }
+          rollback.push({ inventory_id: step.inventory_id, qty: step.qty })
+        }
+        for (const line of voidedItems) {
+          if (String(line.id || '').startsWith('legacy-')) continue
+          await supabase.from('order_items').update({
+            allocated_qty: 0,
+            backorder_qty: 0,
+          }).eq('id', line.id)
         }
         const { error: orderErr } = await supabase.from('orders').update(payload).eq('id', orderId)
         if (orderErr) {
-          if (invId && restoreQty > 0) {
-            await supabase.from('inventory').update({ qty: prevQty }).eq('id', invId)
+          for (const rb of rollback.reverse()) {
+            await adjustInventoryQty(rb.inventory_id, -rb.qty)
           }
           setNotice(orderErr.message)
           return { error: orderErr.message }
@@ -415,13 +740,18 @@ function App() {
         setLocalData(p => {
           const existing = p.orders.find(o => String(o.id) === String(orderId))
           if (existing && isVoidOrder(existing)) return p
+          let inventory = [...p.inventory]
+          for (const step of restorePlan) {
+            inventory = inventory.map(i => String(i.id) === String(step.inventory_id)
+              ? { ...i, qty: Math.max(Number(i.qty || 0) + step.qty, 0) }
+              : i)
+          }
           return {
             ...p,
-            inventory: invId && restoreQty > 0
-              ? p.inventory.map(i => String(i.id) === String(invId)
-                ? { ...i, qty: Math.max(Number(i.qty || 0) + restoreQty, 0) }
-                : i)
-              : p.inventory,
+            inventory,
+            order_items: p.order_items.map(item => String(item.order_id) === String(orderId)
+              ? { ...item, allocated_qty: 0, backorder_qty: 0 }
+              : item),
             orders: p.orders.map(o => String(o.id) === String(orderId) ? { ...o, ...payload } : o),
           }
         })
@@ -467,11 +797,11 @@ function App() {
     }
   }
 
-  function buildPoItemRows(poId, lines, purchaseType) {
+  function buildPoItemRows(poId, lines, purchaseType, inventoryList = []) {
     return lines.map(line => ({
       id: line.id || newPoId(),
       purchase_order_id: poId,
-      inventory_id: line.inventory_id || null,
+      inventory_id: resolvePoLineInventoryId(line, inventoryList),
       product_sku: line.product_sku || line.product_name || '',
       product_name: line.product_name || line.product_sku || '',
       brand: line.brand || '',
@@ -484,6 +814,9 @@ function App() {
       middleman_commission_unit_usd: line.middleman_commission_unit_usd,
       middleman_commission_total_krw: line.middleman_commission_total_krw,
       middleman_commission_total_usd: line.middleman_commission_total_usd,
+      middleman_name: line.middleman_name || '',
+      commission_type: line.commission_type || '',
+      commission_value: line.commission_value ?? 0,
       total_unit_cost_krw: line.total_unit_cost_krw,
       total_unit_cost_usd: line.total_unit_cost_usd,
       commission_percent: 0,
@@ -511,7 +844,7 @@ function App() {
     const poId = id || newPoId()
     const poRow = buildPoRow(poId, { ...normalized.header, po_number: header.po_number || nextPoNumber(data.purchase_orders) }, totals, !id)
     poRow.status = derivePoStatus(normalized.lines, header.status || existing?.status || 'Draft')
-    const itemRows = buildPoItemRows(poId, normalized.lines, totals.purchaseType)
+    const itemRows = buildPoItemRows(poId, normalized.lines, totals.purchaseType, data.inventory)
     setNotice('')
     if (hasSupabaseConfig && session) {
       if (id) {
@@ -556,8 +889,13 @@ function App() {
     const lines = receiveHeader.lines || []
     const shippingCost = Math.max(Number(receiveHeader.shipping_cost) || 0, 0)
     const otherCost = Math.max(Number(receiveHeader.other_cost) || 0, 0)
+    const poHeaderShipping = Math.max(Number(po.shipping_cost) || 0, 0)
+    const poHeaderOther = Math.max(Number(po.other_cost) || 0, 0)
+    const usesPoLevelCosts = poHeaderShipping > 0 || poHeaderOther > 0
+    const rpcShippingCost = usesPoLevelCosts ? 0 : shippingCost
+    const rpcOtherCost = usesPoLevelCosts ? 0 : otherCost
     const validationError = validateReceive(
-      { shipping_cost: shippingCost, other_cost: otherCost },
+      { shipping_cost: rpcShippingCost, other_cost: rpcOtherCost },
       lines,
       poItems,
       po,
@@ -573,9 +911,11 @@ function App() {
         const item = poItems.find(i => String(i.id) === String(row.purchase_order_item_id))
         return { ...item, receive_now: Number(row.receive_now) }
       }),
-      shippingCost,
-      otherCost,
+      rpcShippingCost,
+      rpcOtherCost,
       purchaseType,
+      po,
+      poItems,
     )
     const receivedBy = session?.user?.email || profile.email || 'Admin'
     const receivedDate = receiveHeader.received_date
@@ -589,6 +929,7 @@ function App() {
         const rpcLines = payload.map(l => ({
           purchase_order_item_id: l.purchase_order_item_id,
           receive_now: Number(l.receive_now),
+          selling_price: parseReceiveSellingPrice(l.selling_price),
           note: l.note || '',
         }))
         const { error } = await supabase.rpc('receive_purchase_order_items', {
@@ -597,8 +938,8 @@ function App() {
           p_received_by: receivedBy,
           p_received_date: receivedDate,
           p_shipment_number: receiveHeader.shipment_number || '',
-          p_shipping_cost: shippingCost,
-          p_other_cost: otherCost,
+          p_shipping_cost: rpcShippingCost,
+          p_other_cost: rpcOtherCost,
           p_other_cost_description: receiveHeader.other_cost_description || '',
           p_notes: receiveHeader.notes || '',
         })
@@ -619,8 +960,8 @@ function App() {
         receive_number: receiveNumber,
         received_date: receivedDate,
         shipment_number: receiveHeader.shipment_number || '',
-        shipping_cost: shippingCost,
-        other_cost: otherCost,
+        shipping_cost: rpcShippingCost,
+        other_cost: rpcOtherCost,
         other_cost_description: receiveHeader.other_cost_description || '',
         notes: receiveHeader.notes || '',
         received_by: receivedBy,
@@ -628,50 +969,130 @@ function App() {
       }
       const receiptRows = []
       const itemUpdates = new Map()
+      const lineInventoryLinks = new Map()
+      const newInventoryRows = []
+      const inventoryState = new Map(data.inventory.map(inv => [String(inv.id), { ...inv }]))
+      const pendingInventoryBySku = new Map()
+
+      function resolveInventoryForLine(item, alloc, sellingPriceInput) {
+        const sku = normalizePoSku(item.product_sku || item.product_name)
+        if (!sku) return { error: 'Product SKU is required to receive inventory.' }
+
+        let invId = item.inventory_id ? String(item.inventory_id) : ''
+        let inv = invId ? inventoryState.get(invId) : null
+
+        if (!inv) {
+          inv = findInventoryBySku([...inventoryState.values(), ...newInventoryRows], sku)
+          if (inv) invId = String(inv.id)
+        }
+
+        if (!inv) {
+          invId = pendingInventoryBySku.get(sku)
+          if (invId) inv = inventoryState.get(invId) || newInventoryRows.find(r => String(r.id) === invId)
+        }
+
+        if (!inv) {
+          invId = uid()
+          pendingInventoryBySku.set(sku, invId)
+          const parsedSelling = parseReceiveSellingPrice(sellingPriceInput)
+          inv = {
+            id: invId,
+            created_at: new Date().toISOString(),
+            ...buildInventoryRowFromPoLine(item, po, {
+              landedUnitCost: alloc.landed_unit_cost,
+              inventoryBuyingPerUnit: alloc.inventory_buying_per_unit,
+              shippingPerUnit: alloc.shipping_per_unit,
+              qty: 0,
+              sellingPrice: parsedSelling > 0 ? parsedSelling : 0,
+            }),
+          }
+          newInventoryRows.push(inv)
+          inventoryState.set(invId, inv)
+        }
+
+        return { inv, invId, sku }
+      }
 
       for (const alloc of allocated) {
         const item = poItems.find(i => String(i.id) === String(alloc.id))
+        if (!item) return 'PO line item not found.'
+        const payloadRow = payload.find(p => String(p.purchase_order_item_id) === String(item.id))
+        const resolved = resolveInventoryForLine(item, alloc, payloadRow?.selling_price)
+        if (resolved.error) return resolved.error
+
+        const { inv, invId } = resolved
         const receiveNow = Number(alloc.receive_now)
+        const before = Number(inv.qty || 0)
+        const after = before + receiveNow
+        const oldBuying = itemBuying(inv)
+        const oldShipping = itemShipping(inv)
+        const newBuying = calcWeightedAverage(
+          before,
+          oldBuying,
+          receiveNow,
+          alloc.inventory_buying_per_unit ?? alloc.landed_unit_cost,
+        )
+        const newShipping = calcWeightedAverage(
+          before,
+          oldShipping,
+          receiveNow,
+          alloc.shipping_per_unit ?? 0,
+        )
+
+        let nextInv = {
+          ...inv,
+          qty: after,
+          buying_price: newBuying,
+          shipping_cost: newShipping,
+          cost: newBuying,
+        }
+        nextInv = applyReceiveSellingPriceToInventory(nextInv, payloadRow?.selling_price)
+        inventoryState.set(String(invId), nextInv)
+
         const newReceived = item.received_qty + receiveNow
         itemUpdates.set(String(item.id), newReceived)
+        lineInventoryLinks.set(String(item.id), invId)
 
-        if (item.inventory_id) {
-          const inv = data.inventory.find(i => String(i.id) === String(item.inventory_id))
-          const before = Number(inv?.qty || 0)
-          const after = before + receiveNow
-          const oldBuying = itemBuying(inv)
-          const newBuying = calcWeightedBuyingPrice(before, oldBuying, receiveNow, alloc.landed_unit_cost)
-          receiptRows.push({
-            id: newPoId(),
-            purchase_order_id: poId,
-            purchase_order_item_id: item.id,
-            inventory_id: item.inventory_id,
-            receive_id: receiveId,
-            received_qty: receiveNow,
-            received_date: receivedDate,
-            received_by: receivedBy,
-            note: alloc.note || '',
-            inventory_before: before,
-            inventory_after: after,
-            factory_unit_cost: alloc.factory_unit_cost,
-            commission_per_unit: alloc.commission_per_unit,
-            shipping_allocation: alloc.shipping_allocation,
-            other_cost_allocation: alloc.other_cost_allocation,
-            landed_unit_cost: alloc.landed_unit_cost,
-            buying_price_before: oldBuying,
-            buying_price_after: newBuying,
-            created_at: new Date().toISOString(),
-          })
-        }
+        receiptRows.push({
+          id: newPoId(),
+          purchase_order_id: poId,
+          purchase_order_item_id: item.id,
+          inventory_id: invId,
+          receive_id: receiveId,
+          received_qty: receiveNow,
+          received_date: receivedDate,
+          received_by: receivedBy,
+          note: alloc.note || '',
+          inventory_before: before,
+          inventory_after: after,
+          factory_unit_cost: alloc.factory_unit_cost,
+          commission_per_unit: alloc.commission_per_unit,
+          shipping_allocation: alloc.shipping_allocation,
+          other_cost_allocation: alloc.other_cost_allocation,
+          landed_unit_cost: alloc.landed_unit_cost,
+          buying_price_before: oldBuying,
+          buying_price_after: newBuying,
+          created_at: new Date().toISOString(),
+        })
+      }
+
+      if (receiptRows.length !== allocated.length) {
+        return 'Receive failed: inventory receipts were not created for all received lines.'
       }
 
       const updatedItems = poItems.map(item => {
         const nr = itemUpdates.get(String(item.id))
-        return nr != null ? { ...item, received_qty: nr } : item
+        const linkedInventoryId = lineInventoryLinks.get(String(item.id))
+        if (nr == null && !linkedInventoryId) return item
+        return {
+          ...item,
+          ...(nr != null ? { received_qty: nr } : {}),
+          ...(linkedInventoryId ? { inventory_id: linkedInventoryId } : {}),
+        }
       })
       const newStatus = derivePoStatus(updatedItems, po.status)
-      const newShipping = (Number(po.shipping_cost) || 0) + shippingCost
-      const newOther = (Number(po.other_cost) || 0) + otherCost
+      const newShipping = usesPoLevelCosts ? poHeaderShipping : poHeaderShipping + rpcShippingCost
+      const newOther = usesPoLevelCosts ? poHeaderOther : poHeaderOther + rpcOtherCost
       const allPoItems = data.purchase_order_items.filter(i => String(i.purchase_order_id) === String(poId))
       const { productCostUsd, commissionUsd } = calcPoUsdTotalsFromItems(allPoItems, po)
       const newGrand = productCostUsd + commissionUsd + newShipping + newOther
@@ -690,20 +1111,20 @@ function App() {
         } : x),
         purchase_order_items: p.purchase_order_items.map(i => {
           const nr = itemUpdates.get(String(i.id))
-          return nr != null ? { ...i, received_qty: nr } : i
+          const linkedInventoryId = lineInventoryLinks.get(String(i.id))
+          if (nr == null && !linkedInventoryId) return i
+          return {
+            ...i,
+            ...(nr != null ? { received_qty: nr } : {}),
+            ...(linkedInventoryId ? { inventory_id: linkedInventoryId } : {}),
+          }
         }),
         purchase_order_receives: [receiveRow, ...p.purchase_order_receives],
         purchase_order_receipts: [...receiptRows, ...p.purchase_order_receipts],
-        inventory: p.inventory.map(inv => {
-          const receipt = receiptRows.find(r => String(r.inventory_id) === String(inv.id))
-          if (!receipt) return inv
-          return {
-            ...inv,
-            qty: receipt.inventory_after,
-            buying_price: receipt.buying_price_after,
-            cost: receipt.buying_price_after,
-          }
-        }),
+        inventory: [
+          ...newInventoryRows,
+          ...p.inventory.map(inv => inventoryState.get(String(inv.id)) || inv),
+        ],
       }))
       return ''
     } finally {
@@ -737,7 +1158,7 @@ function App() {
     const payments = poCommissionPaymentsForOrder(data.purchase_order_commission_payments, poId)
     const summary = commissionPaymentSummary(po, items, payments)
     const row = {
-      commission_amount_paid: summary.paid,
+      commission_amount_paid: summary.paidKrw,
       commission_payment_status: summary.status,
       updated_at: new Date().toISOString(),
     }
@@ -762,10 +1183,13 @@ function App() {
     const validationError = validateCommissionPaymentEntry(entry)
     if (validationError) { setNotice(validationError); return validationError }
 
+    const rate = resolveExchangeRate(po.currency || 'KRW', po.exchange_rate)
+    const amountKrw = Number(entry.amount_krw) || 0
     const paymentRow = {
       id: newPoId(),
       purchase_order_id: poId,
-      amount: Number(entry.amount) || 0,
+      amount_krw: amountKrw,
+      amount: rate > 0 ? amountKrw / rate : 0,
       payment_date: toDbDate(entry.payment_date),
       payment_method: entry.payment_method || '',
       reference_number: entry.reference_number || '',
@@ -790,7 +1214,7 @@ function App() {
         purchase_order_commission_payments: nextPayments,
         purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? {
           ...x,
-          commission_amount_paid: summary.paid,
+          commission_amount_paid: summary.paidKrw,
           commission_payment_status: summary.status,
           updated_at: new Date().toISOString(),
         } : x),
@@ -822,7 +1246,7 @@ function App() {
         purchase_order_commission_payments: nextPayments,
         purchase_orders: p.purchase_orders.map(x => String(x.id) === String(poId) ? {
           ...x,
-          commission_amount_paid: summary.paid,
+          commission_amount_paid: summary.paidKrw,
           commission_payment_status: summary.status,
           updated_at: new Date().toISOString(),
         } : x),
@@ -840,54 +1264,40 @@ function App() {
 
   async function createOrder(f) {
     if (!f.customer_id) return { error: 'Select a customer.' }
-    if (!f.inventory_id) return { error: 'Select a product.' }
 
-    const qty = Number(f.qty || 0)
-    if (!Number.isFinite(qty) || qty <= 0) return { error: 'Enter a valid order quantity.' }
-
-    const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
-    if (!item) return { error: 'Product not found.' }
+    const { lines: mergedLines, mergedCount } = mergeDuplicateInventoryLines(f.lines || [])
+    const lineError = validateOrderLines(mergedLines)
+    if (lineError) return { error: lineError }
 
     const customer = data.customers.find(c => String(c.id) === String(f.customer_id))
-    const price = Number(f.price || 0)
-    const shipping = Number(f.shipping || 0)
-    const discount = Number(f.discount || 0)
-    if (!Number.isFinite(price) || price < 0) return { error: 'Enter a valid selling price.' }
-    if (!Number.isFinite(shipping) || shipping < 0) return { error: 'Enter a valid shipping charge.' }
-    if (!Number.isFinite(discount) || discount < 0) return { error: 'Enter a valid discount.' }
-
     const orderDate = toDbDate(f.order_date || today())
     const dueDate = toDbDate(f.due_date || calcDueDate(customer?.payment_terms, orderDate))
     if (!isValidDbDate(orderDate)) return { error: 'Invalid order date. Use the date picker.' }
     if (!isValidDbDate(dueDate)) return { error: 'Invalid due date. Use the date picker.' }
 
-    const buying = itemBuying(item)
-    const inboundShipping = itemShipping(item)
-    const total = qty * price + shipping - discount
-    const profit = total - (qty * (buying + inboundShipping))
-    const available_stock = Math.max(Number(item.qty) || 0, 0)
-    const allocated_qty = Math.min(qty, available_stock)
-    const backorder_qty = Math.max(qty - available_stock, 0)
-    const status = deriveCreateStatus(allocated_qty, backorder_qty)
-    const newInventoryQty = Math.max(available_stock - allocated_qty, 0)
+    const shipping = Number(f.shipping || 0)
+    const discount = Number(f.discount || 0)
+    const tax = Number(f.tax || 0)
+    if (!Number.isFinite(shipping) || shipping < 0) return { error: 'Enter a valid shipping charge.' }
+    if (!Number.isFinite(discount) || discount < 0) return { error: 'Enter a valid invoice discount.' }
+    if (!Number.isFinite(tax) || tax < 0) return { error: 'Enter a valid tax amount.' }
 
-    const payload = {
-      customer_id: f.customer_id || null,
-      inventory_id: f.inventory_id || null,
+    const totals = calcOrderTotals(mergedLines, f, data.inventory)
+    const allocErr = validateOrderInventoryAllocation(totals.lines)
+    if (allocErr) return { error: allocErr }
+    const deductBlock = allocationDeductionError(totals.lines)
+    if (deductBlock) return { error: deductBlock }
+    const salesPerson = resolveSalesPersonFields(f.sales_person_id, staffUsers)
+    const headerInput = {
+      ...f,
+      ...salesPerson,
       customer_name: customer?.company || customer?.name || f.customer_name || '',
-      style: item?.style || f.style,
-      qty, price, buying_price: buying, shipping_cost: inboundShipping, profit,
-      shipping, discount, total,
-      shipping_method: f.shipping_method || '',
-      allocated_qty, backorder_qty, shipped_qty: 0,
-      invoice_no: nextInvoiceNo(data.orders, f.invoice_no),
-      status,
-      payment_status: 'Unpaid',
-      note: f.note || '',
-      due_date: dueDate,
-      tracking: f.tracking || '',
       order_date: orderDate,
+      due_date: dueDate,
+      invoice_no: nextInvoiceNo(data.orders, f.invoice_no),
+      payment_status: 'Unpaid',
     }
+    const payload = buildOrderHeaderFromLines(headerInput, totals, totals.lines, data.inventory)
 
     setNotice('')
     const inserted = await insertOrderRow(payload)
@@ -896,21 +1306,52 @@ function App() {
       return { error: inserted.error }
     }
 
-    if (allocated_qty > 0) {
-      const invResult = await setInventoryQtyAbsolute(item.id, newInventoryQty)
-      if (!invResult.ok) {
-        const rollback = await deleteOrderRowSilent(inserted.id)
-        if (hasSupabaseConfig && session) await loadCloudData()
-        const msg = rollback.ok
-          ? `Inventory update failed: ${invResult.error}. The order was rolled back.`
-          : `Inventory update failed and rollback may be incomplete: ${invResult.error}. Check orders and inventory.`
-        setNotice(msg)
-        return { error: msg }
+    const orderId = inserted.id
+    let itemRows = []
+
+    if (hasSupabaseConfig && session) {
+      itemRows = buildOrderItemInsertRows(orderId, totals.lines)
+      const itemsErr = await insertOrderItemsCloud(itemRows)
+      if (itemsErr) {
+        await deleteOrderRowSilent(orderId)
+        await loadCloudData()
+        setNotice(itemsErr.message)
+        return { error: itemsErr.message }
       }
+    } else {
+      itemRows = buildOrderItemLocalRows(orderId, totals.lines, uid)
+      setLocalData(p => ({
+        ...p,
+        order_items: [...itemRows, ...p.order_items],
+      }))
+    }
+
+    const deductionPlan = enrichDeductionPlan(totals.lines)
+    const stockResult = await applyInventoryStockDeltaPlan(deductionPlan)
+    if (stockResult.error) {
+      const rollback = await rollbackCreatedOrder(orderId)
+      const msg = rollback.ok
+        ? `Inventory update failed: ${stockResult.error}. The order was rolled back.`
+        : `Inventory update failed and rollback may be incomplete: ${stockResult.error}. Check orders and inventory.`
+      setNotice(msg)
+      return { error: msg }
+    }
+
+    const trackResult = await saveOrderTrackingNumbers(orderId, f.tracking_entries)
+    if (trackResult.error) {
+      for (const step of deductionPlan) {
+        await adjustInventoryQty(step.inventory_id, Number(step.delta || 0))
+      }
+      const rollback = await rollbackCreatedOrder(orderId)
+      const msg = rollback.ok
+        ? `Tracking save failed: ${trackResult.error}. The order was rolled back.`
+        : `Tracking save failed and rollback may be incomplete: ${trackResult.error}. Check orders and tracking.`
+      setNotice(msg)
+      return { error: msg }
     }
 
     if (hasSupabaseConfig && session) await loadCloudData()
-    return { error: '' }
+    return { error: '', mergedCount }
   }
 
   async function repairNegativeInventory() {
@@ -953,151 +1394,164 @@ function App() {
     if (!existing) return { error: 'Order not found.' }
     if (isVoidOrder(existing)) return { error: 'Voided invoices cannot be edited.' }
 
-    const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
-    const customer = data.customers.find(c => String(c.id) === String(f.customer_id))
-    const qty = Number(f.qty || 0), price = Number(f.price || 0)
-    const shipping = Number(f.shipping || 0), discount = Number(f.discount || 0)
-    const buying = item ? itemBuying(item) : 0
-    const inboundShipping = item ? itemShipping(item) : 0
-    const total = qty * price + shipping - discount
-    const profit = total - (qty * (buying + inboundShipping))
-    const paid = orderPaidTotal(existing)
+    const { lines: mergedLines, mergedCount } = mergeDuplicateInventoryLines(f.lines || [])
+    const lineError = validateOrderLines(mergedLines)
+    if (lineError) return { error: lineError }
 
-    if (total < paid - 0.001) {
+    const customer = data.customers.find(c => String(c.id) === String(f.customer_id))
+    const priorLines = itemsForOrder(existing, data.order_items)
+    const editSnapshots = original?.lines || priorLines.map(line => ({
+      id: line.id,
+      inventory_id: line.inventory_id,
+      allocated_qty: line.allocated_qty,
+    }))
+
+    const linesWithContext = mergedLines.map(line => {
+      const snap = editSnapshots.find(s =>
+        (line.id && String(s.id) === String(line.id))
+        || String(s.inventory_id || '') === String(line.inventory_id || ''),
+      )
+      return { ...line, _editContext: snap }
+    })
+
+    const totals = calcOrderTotals(linesWithContext, f, data.inventory)
+    const allocErr = validateOrderInventoryAllocation(totals.lines)
+    if (allocErr) return { error: allocErr }
+    const paid = orderPaidTotal(existing)
+    if (totals.grandTotal < paid - 0.001) {
       return { error: 'Invoice total cannot be less than the amount already paid.' }
     }
 
-    const prevAllocated = Number(original?.allocated_qty ?? existing.allocated_qty ?? existing.qty ?? 0)
-    const prevShipped = Number(original?.shipped_qty ?? existing.shipped_qty ?? 0)
-    const restoreQty = Math.max(prevAllocated - prevShipped, 0)
-    const oldInventoryId = original?.inventory_id ?? existing.inventory_id
-    const newInventoryId = f.inventory_id
-
-    let allocated_qty = 0
-    let backorder_qty = 0
-    let status = normalizeOrderStatus(f.status || existing.status || 'Open')
-    let shipped_qty = Number(existing.shipped_qty ?? 0)
+    let status = normalizeOrderStatus(f.status || existing.status || 'Completed')
 
     if (status === 'Cancelled') {
-      allocated_qty = 0
-      backorder_qty = 0
-      shipped_qty = prevShipped
+      totals.lines = totals.lines.map(line => ({
+        ...line,
+        allocated_qty: 0,
+        backorder_qty: 0,
+        shipped_qty: 0,
+      }))
+      totals.totalAllocated = 0
+      totals.totalBackorder = 0
     } else {
-      const invItem = data.inventory.find(i => String(i.id) === String(newInventoryId))
-      const sameProduct = String(oldInventoryId || '') === String(newInventoryId || '')
-      const availableStock = Math.max(
-        Number(invItem?.qty || 0) + (sameProduct ? restoreQty : 0),
-        0,
-      )
-      ;({ allocated_qty, backorder_qty } = calcAllocation(qty, availableStock))
-
-      const shipError = validateFulfillmentStatus(status, backorder_qty)
-      if (shipError) return { error: shipError }
-
-      shipped_qty = resolveFulfilledQty(status, allocated_qty, shipped_qty, backorder_qty)
-      status = normalizeOrderStatus(status)
-
-      if (status !== 'Completed' && status !== 'Partially Fulfilled' && status !== 'Ready to Fulfill') {
-        if (backorder_qty > 0) status = 'Back Order'
-        else if (backorder_qty === 0 && allocated_qty > 0 && status === 'Back Order') status = 'Open'
-      }
+      status = deriveOrderStatusFromLines(totals.lines, status)
     }
 
-    const payment_status = paid <= 0 ? 'Unpaid' : paid >= total ? 'Paid' : 'Partial'
-    const payload = {
-      customer_id: f.customer_id || null,
-      inventory_id: f.inventory_id || null,
+    const payment_status = paid <= 0 ? 'Unpaid' : paid >= totals.grandTotal ? 'Paid' : 'Partial'
+    const salesPerson = resolveSalesPersonFields(f.sales_person_id, staffUsers)
+    const headerInput = {
+      ...f,
+      ...salesPerson,
       customer_name: customer?.company || customer?.name || f.customer_name || existing.customer_name || '',
-      style: item?.style || f.style || existing.style,
-      qty, price, buying_price: buying, shipping_cost: inboundShipping, profit,
-      shipping, discount, total,
-      shipping_method: f.shipping_method || '',
-      allocated_qty, backorder_qty, shipped_qty,
       invoice_no: existing.invoice_no,
-      status,
       payment_status,
-      note: f.note || '',
-      due_date: toDbDate(f.due_date || existing.due_date),
-      tracking: f.tracking || '',
-      order_date: toDbDate(f.order_date || existing.order_date || existing.created_at),
-      fulfillment_date: f.fulfillment_date ? toDbDate(f.fulfillment_date) : (existing.fulfillment_date || null),
-      delivered_by: f.delivered_by || '',
-      picked_up_by: f.picked_up_by || '',
-      fulfillment_note: f.fulfillment_note || '',
-      signature_name: f.signature_name || '',
+      status,
     }
+    const payload = buildOrderHeaderFromLines(headerInput, totals, totals.lines, data.inventory)
+    payload.due_date = toDbDate(f.due_date || existing.due_date)
+    payload.order_date = toDbDate(f.order_date || existing.order_date || existing.created_at)
+    payload.fulfillment_date = f.fulfillment_date ? toDbDate(f.fulfillment_date) : (existing.fulfillment_date || null)
+    payload.delivered_by = f.delivered_by || ''
+    payload.picked_up_by = f.picked_up_by || ''
+    payload.fulfillment_note = f.fulfillment_note || ''
+    payload.signature_name = f.signature_name || ''
+
     await updateRow('orders', orderId, payload)
 
-    if (String(oldInventoryId || '') === String(newInventoryId || '')) {
-      if (oldInventoryId) {
-        if (status === 'Cancelled') {
-          if (restoreQty > 0) await adjustInventoryQty(oldInventoryId, restoreQty)
+    if (hasSupabaseConfig && session) {
+      const existingItems = orderItemsForOrder(data.order_items, orderId)
+      const keptIds = new Set()
+
+      for (let idx = 0; idx < totals.lines.length; idx += 1) {
+        const line = totals.lines[idx]
+        const row = buildOrderItemInsertRows(orderId, [line])[0]
+        if (isPersistedOrderItemId(line.id)) {
+          keptIds.add(String(line.id))
+          const { error: lineErr } = await supabase.from('order_items').update(row).eq('id', line.id)
+          if (lineErr) {
+            setNotice(lineErr.message)
+            return { error: lineErr.message }
+          }
         } else {
-          const netDelta = restoreQty - allocated_qty
-          if (netDelta !== 0) await adjustInventoryQty(oldInventoryId, netDelta)
+          const insertErr = await insertOrderItemsCloud([row])
+          if (insertErr) {
+            setNotice(insertErr.message)
+            return { error: insertErr.message }
+          }
+        }
+      }
+
+      for (const item of existingItems) {
+        if (isPersistedOrderItemId(item.id) && !keptIds.has(String(item.id))) {
+          const { error: delErr } = await supabase.from('order_items').delete().eq('id', item.id)
+          if (delErr) {
+            setNotice(delErr.message)
+            return { error: delErr.message }
+          }
         }
       }
     } else {
-      if (oldInventoryId && restoreQty > 0) await adjustInventoryQty(oldInventoryId, restoreQty)
-      if (newInventoryId && status !== 'Cancelled' && allocated_qty > 0) {
-        await adjustInventoryQty(newInventoryId, -allocated_qty)
-      }
+      const itemRows = buildOrderItemLocalRows(orderId, totals.lines, uid)
+      setLocalData(p => ({
+        ...p,
+        order_items: [...itemRows, ...p.order_items.filter(i => String(i.order_id) !== String(orderId))],
+      }))
     }
 
-    return { error: '' }
+    const deltaPlan = buildInventoryDeltaPlan(priorLines, totals.lines)
+    const stockResult = await applyInventoryStockDeltaPlan(deltaPlan)
+    if (stockResult.error) {
+      setNotice(stockResult.error)
+      return { error: stockResult.error }
+    }
+
+    const trackResult = await saveOrderTrackingNumbers(orderId, f.tracking_entries)
+    if (trackResult.error) {
+      await applyInventoryStockDeltaPlan(deltaPlan.map(step => ({
+        inventory_id: step.inventory_id,
+        delta: -Number(step.delta || 0),
+      })))
+      setNotice(trackResult.error)
+      return { error: trackResult.error }
+    }
+
+    if (hasSupabaseConfig && session) await loadCloudData()
+    return { error: '', mergedCount }
   }
 
   async function allocateBackOrdersForProduct(inventoryId, stockIncrease, savedQty) {
-    const orders = activeBackorderOrders(data.orders, inventoryId)
-    const { plan, stockUsed } = buildAllocationPlan(orders, stockIncrease)
+    const entries = activeBackorderEntries(data.orders, data.order_items, inventoryId)
+    const { plan, stockUsed } = buildLineAllocationPlan(entries, stockIncrease)
     if (!plan.length) return []
 
     for (const step of plan) {
-      await updateRow('orders', step.orderId, {
+      if (String(step.orderItemId || '').startsWith('legacy-')) {
+        await updateRow('orders', step.order.id, {
+          allocated_qty: step.newAllocated,
+          backorder_qty: step.remainingBackOrder,
+          status: step.newStatus,
+        })
+        continue
+      }
+
+      await updateRow('order_items', step.orderItemId, {
         allocated_qty: step.newAllocated,
         backorder_qty: step.remainingBackOrder,
-        status: step.newStatus,
       })
+
+      const orderItems = orderItemsForOrder(data.order_items, step.order.id).map(item =>
+        String(item.id) === String(step.orderItemId)
+          ? { ...item, allocated_qty: step.newAllocated, backorder_qty: step.remainingBackOrder }
+          : item,
+      )
+      const headerPatch = reaggregateOrderHeader(step.order, orderItems)
+      headerPatch.status = deriveOrderStatusFromLines(orderItems, step.order.status)
+      await updateRow('orders', step.order.id, headerPatch)
     }
 
     const finalQty = Math.max(Number(savedQty) - stockUsed, 0)
     await updateRow('inventory', inventoryId, { qty: finalQty })
     return plan
-  }
-
-  async function completeFulfillment(orderId, form) {
-    const order = data.orders.find(o => String(o.id) === String(orderId))
-    if (!order) return { error: 'Order not found.' }
-    if (isVoidOrder(order)) return { error: 'Voided invoices cannot be fulfilled.' }
-
-    const validation = validateCompleteFulfillment(order, form)
-    if (validation.error) return validation
-
-    const { allocated_qty } = normalizeFulfillment(order)
-    const payload = {
-      status: 'Completed',
-      shipped_qty: allocated_qty,
-      shipping_method: form.shipping_method || order.shipping_method || '',
-      tracking: form.tracking || '',
-      fulfillment_date: form.fulfillment_date ? toDbDate(form.fulfillment_date) : null,
-      delivered_by: form.delivered_by || '',
-      picked_up_by: form.picked_up_by || '',
-      fulfillment_note: form.fulfillment_note || '',
-      signature_name: form.signature_name || '',
-    }
-
-    setNotice('')
-    if (hasSupabaseConfig && session) {
-      const { error } = await supabase.from('orders').update(payload).eq('id', orderId)
-      if (error) {
-        setNotice(error.message)
-        return { error: error.message }
-      }
-      await loadCloudData()
-    } else {
-      await updateRow('orders', orderId, payload)
-    }
-    return { error: '' }
   }
 
   async function recordPayment(f) {
@@ -1184,15 +1638,11 @@ function App() {
 
   async function fetchProfilesForBackup() {
     if (hasSupabaseConfig && session) {
-      const { data: rows, error } = await supabase.from('profiles').select('id, email, role, created_at')
+      const { data: rows, error } = await supabase.from('profiles').select(PROFILE_NAME_FIELDS)
       if (error) throw new Error(error.message)
       return rows || []
     }
-    return [{
-      id: profile.id || session?.user?.id || '',
-      email: profile.email || session?.user?.email || '',
-      role: profile.role || 'Admin',
-    }]
+    return [staffProfileFromSession(profile, session)]
   }
 
   async function restoreBackupData(parsed, mode, onProgress) {
@@ -1215,6 +1665,7 @@ function App() {
             customers: [...(data.customers || [])],
             inventory: [...(data.inventory || [])],
             orders: [...(data.orders || [])],
+            order_items: [...(data.order_items || [])],
             payments: [...(data.payments || [])],
             purchase_orders: [...(data.purchase_orders || [])],
             purchase_order_items: [...(data.purchase_order_items || [])],
@@ -1253,13 +1704,14 @@ function App() {
 
   function navigateTo(result) {
     setGlobalSearch('')
-    if (result.type === 'customer') { setPage('Customers') }
-    else if (result.type === 'product') { setPage('Inventory') }
-    else if (result.type === 'invoice') { openRecord('Invoice', result.id) }
+    if (result.type === 'customer' && canAccessPage(role, 'Customers')) { setPage('Customers') }
+    else if (result.type === 'product' && canAccessPage(role, 'Inventory')) { setPage('Inventory') }
+    else if (result.type === 'invoice' && canAccessPage(role, 'Invoice')) { openRecord('Invoice', result.id) }
     setMenuOpen(false)
   }
 
   function openRecord(targetPage, id, options = {}) {
+    if (!canAccessPage(role, targetPage)) return
     setSelectedRecord({
       page: targetPage,
       id: String(id),
@@ -1279,18 +1731,36 @@ function App() {
   )
 
   return (
-    <div className="app">
-      <button className="menu-toggle" onClick={() => setMenuOpen(!menuOpen)}>☰</button>
+    <div className={`app${menuOpen ? ' nav-open' : ''}`}>
+      <button
+        type="button"
+        className="menu-toggle no-print"
+        aria-label={menuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+        aria-expanded={menuOpen}
+        onClick={() => setMenuOpen(!menuOpen)}
+      >
+        ☰
+      </button>
+      {menuOpen && (
+        <button
+          type="button"
+          className="nav-overlay no-print"
+          aria-label="Close navigation menu"
+          onClick={() => setMenuOpen(false)}
+        />
+      )}
       <aside className={menuOpen ? 'open' : ''}>
-        <div className="brand"><span>ISB</span><b>INNER SOURCE<br />BEAUTY</b></div>
+        <div className="brand">
+          <img src="/images/isb-logo.png" alt="Inner Source Beauty" className="brand-logo" />
+        </div>
         <div className="role-badge">{role}</div>
         {allowedPages.map(x => (
           <button key={x} className={page === x ? 'active' : ''} onClick={() => { setPage(x); setMenuOpen(false) }}>{x}</button>
         ))}
-        <button className="logout" onClick={logout}>Logout</button>
+        <button className="logout" onClick={() => { setMenuOpen(false); logout() }}>Logout</button>
       </aside>
-      <main>
-        <header className={page === 'Dashboard' ? 'header-dashboard' : ''}>
+      <main className={page === 'Customers' ? 'main-customers' : page === 'Inventory' ? 'main-inventory' : page === 'Payments' ? 'main-payments' : page === 'Reports' ? 'main-reports' : page === 'Dashboard' ? 'main-dashboard' : ''}>
+        <header className={[page === 'Dashboard' && 'header-dashboard', page === 'Customers' && 'header-customers', page === 'Inventory' && 'header-inventory', page === 'Payments' && 'header-payments', page === 'Reports' && 'header-reports'].filter(Boolean).join(' ') || undefined}>
           {page === 'Dashboard' ? (
             <div className="dashboard-page-header">
               <h1 className="dashboard-page-title">Dashboard</h1>
@@ -1323,7 +1793,8 @@ function App() {
         {page === 'Customers' && <Customers data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} onNavigate={openRecord}
           selectedCustomerId={selectedRecord.page === 'Customers' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Inventory' && <Inventory data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow}
-          allocateBackOrders={allocateBackOrdersForProduct} />}
+          allocateBackOrders={allocateBackOrdersForProduct}
+          inventoryLoadError={dataLoadErrors.inventory || ''} dataLoading={loading} onNavigate={openRecord} />}
         {page === 'Purchase Orders' && (
           <PurchaseOrdersPage
             data={data}
@@ -1339,21 +1810,27 @@ function App() {
             onCancelPo={cancelPurchaseOrder}
             onAddCommissionPayment={addPoCommissionPayment}
             onDeleteCommissionPayment={deletePoCommissionPayment}
+            inventoryLoadError={dataLoadErrors.inventory || ''}
+            dataLoading={loading}
           />
         )}
-        {page === 'Orders' && <Orders data={data} createOrder={createOrder} updateOrder={updateOrder} deleteOrder={deleteOrder}
-          completeFulfillment={completeFulfillment}
+        {page === 'Orders' && <Orders data={data} staffUsers={staffUsers} createOrder={createOrder} updateOrder={updateOrder}           deleteOrder={deleteOrder}
+          readOnly={role === 'Warehouse'}
           selectedOrderId={selectedRecord.page === 'Orders' ? selectedRecord.id : ''}
           focusFulfillment={selectedRecord.page === 'Orders' && selectedRecord.focusFulfillment}
-          clearSelection={clearSelectedRecord} />}
-        {page === 'Invoice' && <Invoice data={data} updateRow={updateRow} voidInvoice={voidInvoice} role={role} profile={profile}
+          clearSelection={clearSelectedRecord}
+          currentUserId={profile.id || session?.user?.id}
+          onNavigate={openRecord} />}
+        {page === 'Invoice' && <Invoice data={data} staffUsers={staffUsers} updateRow={updateRow} saveOrderTrackingNumbers={saveOrderTrackingNumbers} reloadData={loadCloudData} voidInvoice={voidInvoice} role={role} profile={profile}
           selectedOrderId={selectedRecord.page === 'Invoice' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
         {page === 'Payments' && <Payments data={data} recordMultiPayment={recordMultiPayment} deleteRow={deleteRow} onNavigate={openRecord}
           selectedPaymentId={selectedRecord.page === 'Payments' ? selectedRecord.id : ''} clearSelection={clearSelectedRecord} />}
-        {page === 'Reports' && <Reports data={data} stats={stats} poStats={poSummaryStats(data.purchase_orders, data.purchase_order_items)} />}
+        {page === 'Expenses' && <ExpensesPage data={data} addRow={addRow} updateRow={updateRow} deleteRow={deleteRow} />}
+        {page === 'Reports' && <Reports data={data} staffUsers={staffUsers} stats={stats} poStats={poSummaryStats(data.purchase_orders, data.purchase_order_items)} />}
         {page === 'Settings' && <Settings data={data} reload={loadCloudData} profile={profile} setProfile={setProfile} session={session}
           fetchProfilesForBackup={fetchProfilesForBackup} restoreBackupData={restoreBackupData} setLocalData={setLocalData}
-          repairNegativeInventory={repairNegativeInventory} />}
+          repairNegativeInventory={repairNegativeInventory} saveStaffProfile={saveStaffProfile}
+          reloadStaffUsers={reloadStaffUsers} currentUserId={profile.id || session?.user?.id} />}
       </main>
     </div>
   )
@@ -1386,15 +1863,15 @@ function calcStats(data) {
     .reduce((s, p) => s + Number(p.amount || 0), 0)
   const todaySales = activeOrders.filter(o => isToday(o.created_at)).reduce((s, o) => s + Number(o.total || 0), 0)
   const monthlySales = activeOrders.filter(o => isThisMonth(o.created_at)).reduce((s, o) => s + Number(o.total || 0), 0)
-  const inventoryValue = data.inventory.reduce((s, i) => s + Number(i.qty || 0) * itemUnitCost(i), 0)
-  const expectedProfit = activeOrders.reduce((s, o) => s + orderProfit(o), 0)
+  const inventoryValue = calcDashboardInventoryValue(data.inventory)
+  const inventoryExpectedProfit = calcDashboardExpectedProfit(data.inventory)
   const ordersToday = activeOrders.filter(o => isToday(o.created_at)).length
   const lowStock = data.inventory.filter(i => Number(i.qty || 0) < 5).length
   const salesByDay = buildSalesGraph(data.orders)
   const balance = calcOutstandingBalance(data.orders, data.payments)
   return { sales, paid, balance, stock: data.inventory.reduce((s, i) => s + Number(i.qty || 0), 0),
     orders: data.orders.length, customers: data.customers.length, todaySales, monthlySales,
-    inventoryValue, expectedProfit, ordersToday, lowStock, salesByDay }
+    inventoryValue, expectedProfit: inventoryExpectedProfit, ordersToday, lowStock, salesByDay }
 }
 
 function buildSalesGraph(orders) {
@@ -1439,7 +1916,9 @@ function customerStats(c, data) {
   const paid = payments
     .filter(p => paymentCountsTowardBalance(data.orders, data.payments, p))
     .reduce((s, p) => s + Number(p.amount || 0), 0)
-  const last = allOrders[0]?.created_at ? dateOnly(allOrders[0].created_at) : ''
+  const last = allOrders[0]
+    ? formatDisplayDate(allOrders[0].order_date || allOrders[0].created_at)
+    : ''
   const avgOrder = activeOrders.length ? sales / activeOrders.length : 0
   return { orders: allOrders, payments, sales, paid, balance: sales - paid, lastOrder: last, avgOrder }
 }
@@ -1455,7 +1934,10 @@ function runGlobalSearch(data, q) {
     if (hay.includes(s)) results.push({ type: 'product', label: `${i.style}${i.brand ? ` · ${i.brand}` : ''} · Stock ${i.qty}`, id: i.id })
   })
   data.orders.forEach(o => {
-    const hay = [o.invoice_no, o.customer_name, o.style].join(' ').toLowerCase()
+    const hay = [
+      o.invoice_no, o.customer_name, o.style,
+      orderInternalNote(o), orderCustomerNote(o),
+    ].join(' ').toLowerCase()
     if (hay.includes(s)) results.push({ type: 'invoice', label: `${o.invoice_no} · ${o.customer_name} · ${money(o.total)}`, id: o.id })
   })
   return results
@@ -1517,6 +1999,309 @@ function HeaderUserMenu({ role, email, onLogout }) {
           <button type="button" className="header-user-logout" onClick={() => { setOpen(false); onLogout() }}>Logout</button>
         </div>
       )}
+    </div>
+  )
+}
+
+function MonthlyProfitSummaryPanel({ data }) {
+  const [monthKey, setMonthKey] = useState(currentMonthKey())
+  const summary = calcMonthlyProfitSummary(
+    data.orders,
+    data.order_items,
+    data.inventory,
+    data.purchase_order_items || [],
+    monthKey,
+  )
+  const thisMonthKey = currentMonthKey()
+  const prevMonthKey = shiftMonthKey(thisMonthKey, -1)
+
+  return (
+    <div className="panel panel-compact dashboard-monthly-profit-summary">
+      <div className="dashboard-section-head dashboard-profit-head">
+        <div>
+          <p className="dashboard-row-label">Monthly Profit Summary</p>
+          <p className="dashboard-profit-subhead">{formatMonthKeyLabel(monthKey)}</p>
+        </div>
+        <div className="dashboard-month-toggle" role="group" aria-label="Select month">
+          <button
+            type="button"
+            className={monthKey === thisMonthKey ? 'active' : 'soft'}
+            onClick={() => setMonthKey(thisMonthKey)}
+          >
+            Current Month
+          </button>
+          <button
+            type="button"
+            className={monthKey === prevMonthKey ? 'active' : 'soft'}
+            onClick={() => setMonthKey(prevMonthKey)}
+          >
+            Previous Month
+          </button>
+        </div>
+      </div>
+
+      <dl className="dashboard-profit-lines dashboard-monthly-profit-lines">
+        <div className="dashboard-profit-line">
+          <dt>Sales Revenue</dt>
+          <dd>{money(summary.salesRevenue)}</dd>
+        </div>
+        <div className="dashboard-profit-line dashboard-profit-line-sub">
+          <dt>Product Cost (COGS)</dt>
+          <dd className="negative">-{money(summary.productCogs)}</dd>
+        </div>
+        <div className="dashboard-profit-line dashboard-profit-line-sub">
+          <dt>Shipping Cost (COGS)</dt>
+          <dd className="negative">-{money(summary.shippingCogs)}</dd>
+        </div>
+        <div className="dashboard-profit-line dashboard-profit-line-sub">
+          <dt>
+            Commission
+            {summary.commissionIncludedInProductCost && (
+              <span className="dashboard-profit-meta dashboard-profit-inline-note"> (included in Product Cost when unknown)</span>
+            )}
+          </dt>
+          <dd className="negative">-{money(summary.commissionCogs)}</dd>
+        </div>
+
+        <div className="dashboard-profit-section-divider dashboard-profit-section-divider-strong" aria-hidden="true" />
+
+        <div className="dashboard-profit-line dashboard-profit-line-total">
+          <dt>Gross Profit</dt>
+          <dd>{money(summary.grossProfit)}</dd>
+        </div>
+        <div className="dashboard-profit-line">
+          <dt>Gross Margin</dt>
+          <dd>{formatGrossMarginPercent(summary.grossMargin)}</dd>
+        </div>
+
+        <div className="dashboard-profit-section-divider" aria-hidden="true" />
+
+        <div className="dashboard-profit-line dashboard-profit-line-inventory">
+          <dt>Inventory Value Remaining</dt>
+          <dd>{money(summary.inventoryValueRemaining)}</dd>
+        </div>
+      </dl>
+
+      <p className="hint dashboard-profit-hint">
+        COGS applies only to units sold or allocated this month ({summary.orderCount} orders).
+        Product and inbound shipping costs come from each order line&apos;s stored unit cost — not from PO payments.
+        {summary.commissionIncludedInProductCost
+          ? ' Commission is embedded in Product Cost when PO commission data is unavailable for a product.'
+          : ' Inbound shipping is in Shipping Cost (COGS), separate from inventory buying price.'}
+        {' '}Inventory Value Remaining is unsold stock — not subtracted from profit.
+      </p>
+    </div>
+  )
+}
+
+function ThisMonthBusinessSummary({ summary, purchaseSpending, compact = false }) {
+  const recordedExpenses = summary.expenses ?? summary.operatingExpenses ?? 0
+  const purchaseShippingOther = (purchaseSpending?.purchaseShipping ?? 0) + (purchaseSpending?.otherPoCosts ?? 0)
+  const showProductRevenue = Math.abs((summary.sales ?? 0) - (summary.productRevenue ?? 0)) > 0.005
+
+  return (
+    <dl className="dashboard-profit-lines">
+      <div className="dashboard-profit-line">
+        <dt>Sales</dt>
+        <dd>{money(summary.sales)}</dd>
+      </div>
+      {showProductRevenue && (
+        <div className="dashboard-profit-line dashboard-profit-line-detail">
+          <dt>Product Revenue</dt>
+          <dd>{money(summary.productRevenue)}</dd>
+        </div>
+      )}
+      <div className="dashboard-profit-line dashboard-profit-line-sub">
+        <dt>COGS</dt>
+        <dd className="negative">-{money(summary.cogs)}</dd>
+      </div>
+      <div className="dashboard-profit-line dashboard-profit-line-total">
+        <dt>Gross Profit</dt>
+        <dd>{money(summary.grossProfit)}</dd>
+      </div>
+
+      <div className="dashboard-profit-section-divider" aria-hidden="true" />
+
+      <div className="dashboard-profit-line dashboard-profit-line-cash">
+        <dt>Inventory Purchases</dt>
+        <dd>{money(purchaseSpending?.inventoryPurchases ?? 0)}</dd>
+      </div>
+      <div className="dashboard-profit-line dashboard-profit-line-sub dashboard-profit-line-cash">
+        <dt>Purchase Shipping / Other Cost</dt>
+        <dd>{money(purchaseShippingOther)}</dd>
+      </div>
+
+      <div className="dashboard-profit-section-divider" aria-hidden="true" />
+
+      <div className="dashboard-profit-line">
+        <dt>Gross Margin</dt>
+        <dd>{formatGrossMarginPercent(summary.grossMargin)}</dd>
+      </div>
+
+      {!compact && (
+        <>
+          <div className="dashboard-profit-line dashboard-profit-line-sub">
+            <dt>Recorded Expenses</dt>
+            <dd className="negative">-{money(recordedExpenses)}</dd>
+          </div>
+          <div className="dashboard-profit-line dashboard-profit-line-net">
+            <dt>Gross Profit After Recorded Expenses</dt>
+            <dd>{money(summary.netProfit)}</dd>
+          </div>
+        </>
+      )}
+    </dl>
+  )
+}
+
+function PurchaseSpendingSummary({ spending }) {
+  return (
+    <dl className="dashboard-profit-lines dashboard-purchase-lines">
+      <div className="dashboard-profit-line">
+        <dt>Inventory Purchases</dt>
+        <dd>{money(spending.inventoryPurchases)}</dd>
+      </div>
+      <div className="dashboard-profit-line dashboard-profit-line-sub">
+        <dt>Purchase Shipping</dt>
+        <dd>{money(spending.purchaseShipping)}</dd>
+      </div>
+      {spending.otherPoCosts > 0 && (
+        <div className="dashboard-profit-line dashboard-profit-line-sub">
+          <dt>Other PO Costs</dt>
+          <dd>{money(spending.otherPoCosts)}</dd>
+        </div>
+      )}
+      <div className="dashboard-profit-line dashboard-profit-line-total">
+        <dt>Total Purchase Spending</dt>
+        <dd>{money(spending.totalPurchaseSpending)}</dd>
+      </div>
+    </dl>
+  )
+}
+
+function ProfitLossSummary({ summary, showNetMargin = true, grossOnly = false }) {
+  if (grossOnly) {
+    return (
+      <dl className="dashboard-profit-lines">
+        <div className="dashboard-profit-line">
+          <dt>Monthly Sales</dt>
+          <dd>{money(summary.sales)}</dd>
+        </div>
+        <div className="dashboard-profit-line dashboard-profit-line-sub">
+          <dt>Product Revenue</dt>
+          <dd>{money(summary.productRevenue)}</dd>
+        </div>
+        <div className="dashboard-profit-line dashboard-profit-line-sub">
+          <dt>COGS</dt>
+          <dd className="negative">-{money(summary.cogs)}</dd>
+        </div>
+        <div className="dashboard-profit-line dashboard-profit-line-total">
+          <dt>Gross Profit</dt>
+          <dd>{money(summary.grossProfit)}</dd>
+        </div>
+        <div className="dashboard-profit-line">
+          <dt>Gross Margin</dt>
+          <dd>{formatGrossMarginPercent(summary.grossMargin)}</dd>
+        </div>
+      </dl>
+    )
+  }
+
+  return (
+    <dl className="dashboard-profit-lines">
+      <div className="dashboard-profit-line">
+        <dt>Monthly Sales</dt>
+        <dd>{money(summary.sales)}</dd>
+      </div>
+      <div className="dashboard-profit-line dashboard-profit-line-sub">
+        <dt>Product Revenue</dt>
+        <dd>{money(summary.productRevenue)}</dd>
+      </div>
+      <div className="dashboard-profit-line dashboard-profit-line-sub">
+        <dt>COGS</dt>
+        <dd className="negative">-{money(summary.cogs)}</dd>
+      </div>
+      <div className="dashboard-profit-line dashboard-profit-line-total">
+        <dt>Gross Profit</dt>
+        <dd>
+          {money(summary.grossProfit)}
+          {' '}
+          <span className="dashboard-profit-meta">({formatGrossMarginPercent(summary.grossMargin)} gross margin)</span>
+        </dd>
+      </div>
+      <div className="dashboard-profit-line dashboard-profit-line-sub">
+        <dt>Expenses</dt>
+        <dd className="negative">-{money(summary.expenses ?? summary.operatingExpenses ?? 0)}</dd>
+      </div>
+      <div className="dashboard-profit-line dashboard-profit-line-net">
+        <dt>Net Profit</dt>
+        <dd>
+          {money(summary.netProfit)}
+          {showNetMargin && (
+            <>
+              {' '}
+              <span className="dashboard-profit-meta">({formatNetMarginPercent(summary.netMargin)} net margin)</span>
+            </>
+          )}
+        </dd>
+      </div>
+    </dl>
+  )
+}
+
+function ProfitDetailsDialog({ summary, onClose, onManageExpenses }) {
+  const { monthExpenses } = summary
+
+  return (
+    <div className="restore-dialog-overlay profit-details-overlay" onClick={onClose}>
+      <div className="restore-dialog profit-details-dialog" onClick={e => e.stopPropagation()}>
+        <h2>This Month — Business Summary</h2>
+        <p className="hint">
+          Gross Profit uses product revenue minus COGS on units sold or allocated — not invoice total minus PO payments.
+          Purchase shipping in COGS is the per-unit inbound cost already in inventory; PO header shipping below is cash out only.
+        </p>
+        <ThisMonthBusinessSummary
+          summary={summary}
+          purchaseSpending={summary.purchaseSpending}
+        />
+
+        <h3 className="profit-details-subtitle">Expenses Included</h3>
+        {monthExpenses.length === 0 ? (
+          <p className="hint">No expenses recorded this month.</p>
+        ) : (
+          <div className="table-wrap profit-details-expenses-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Category</th>
+                  <th>Description</th>
+                  <th>Amount</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {monthExpenses.map(expense => (
+                  <tr key={expense.id}>
+                    <td>{formatDisplayDate(expenseDateKey(expense))}</td>
+                    <td>{expense.category || '—'}</td>
+                    <td>{expense.description || '—'}</td>
+                    <td>{money(expense.amount)}</td>
+                    <td>{expense.note || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="restore-dialog-actions">
+          {onManageExpenses && (
+            <button type="button" onClick={() => { onManageExpenses(); onClose() }}>Manage Expenses</button>
+          )}
+          <button type="button" className="soft" onClick={onClose}>Close</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1605,18 +2390,57 @@ function ReorderListDialog({ items, onClose, onCreatePo, isAdmin }) {
   )
 }
 
+function DashboardLowStockMobileCards({ items }) {
+  return (
+    <div className="dashboard-lowstock-cards">
+      {items.map(item => (
+        <article key={item.id} className="dashboard-lowstock-card">
+          <p className="dashboard-lowstock-product">{item.label}</p>
+          <dl className="dashboard-card-meta">
+            <div className="dashboard-card-row"><dt>Stock On Hand</dt><dd>{item.stockOnHand}</dd></div>
+            <div className="dashboard-card-row"><dt>Minimum Stock</dt><dd>{item.minimumStockDisplay}</dd></div>
+            <div className="dashboard-card-row"><dt>Need to Order</dt><dd>{item.needToOrder}</dd></div>
+            <div className="dashboard-card-row"><dt>Status</dt><dd><span className={`stock-status-badge ${item.statusClass}`}>{item.status}</span></dd></div>
+          </dl>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function DashboardRecentOrdersMobileCards({ rows, onNavigate }) {
+  return (
+    <div className="dashboard-recent-orders-cards">
+      {rows.map(o => (
+        <article key={o.id} className="dashboard-recent-order-card">
+          <p className="dashboard-recent-order-date">{o.order_date}</p>
+          <dl className="dashboard-card-meta">
+            <div className="dashboard-card-row"><dt>Invoice No</dt><dd>
+              <button type="button" className="link-cell invoice-link dashboard-card-link" onClick={() => onNavigate?.('Invoice', o.id)}>{o.invoice_no}</button>
+            </dd></div>
+            <div className="dashboard-card-row"><dt>Customer</dt><dd>{o.customer_name}</dd></div>
+            <div className="dashboard-card-row"><dt>Total</dt><dd>{o.total}</dd></div>
+            <div className="dashboard-card-row"><dt>Payment Status</dt><dd>{o.payment_status}</dd></div>
+          </dl>
+        </article>
+      ))}
+    </div>
+  )
+}
+
 function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
   const [showReorderList, setShowReorderList] = useState(false)
-  const todayOrders = data.orders.filter(o => isOrderDateToday(o) && !isVoidOrder(o))
-  const monthOrders = data.orders.filter(o => isOrderDateThisMonth(o) && !isVoidOrder(o))
-  const boStats = backOrderDashboardStats(data.orders)
-  const backorderAlerts = activeBackorderAlerts(data.orders, 10)
-  const rtfCount = countOrdersByStatus(data.orders, 'Ready to Fulfill')
-  const pickupCount = awaitingPickupCount(data.orders)
-  const deliveryCount = companyDeliveryCount(data.orders)
-  const rtfAlerts = readyToFulfillAlerts(data.orders, 10)
-  const pickupAlerts = readyToFulfillOrders(data.orders).filter(o => isCustomerPickup(o.shipping_method)).slice(0, 10)
-  const deliveryAlerts = readyToFulfillOrders(data.orders).filter(o => isCompanyDelivery(o.shipping_method)).slice(0, 10)
+  const [showProfitDetails, setShowProfitDetails] = useState(false)
+  const todayOrders = ordersForDashboardSales(data.orders.filter(o => isOrderDateToday(o)))
+  const monthOrders = ordersForDashboardSales(data.orders.filter(o => isOrderDateThisMonth(o)))
+  const boStats = backOrderDashboardStats(data.orders, data.order_items)
+  const backorderAlerts = activeBackorderAlerts(data.orders, data.order_items, 10)
+  const partiallyAllocatedCount = partiallyAllocatedOrders(data.orders, data.order_items).length
+  const pickupCount = awaitingPickupCount(data.orders, data.order_items)
+  const deliveryCount = companyDeliveryCount(data.orders, data.order_items)
+  const partiallyAllocatedList = partiallyAllocatedAlerts(data.orders, data.order_items, 10)
+  const pickupAlerts = partiallyAllocatedOrders(data.orders, data.order_items).filter(o => isCustomerPickup(o.shipping_method)).slice(0, 10)
+  const deliveryAlerts = partiallyAllocatedOrders(data.orders, data.order_items).filter(o => isCompanyDelivery(o.shipping_method)).slice(0, 10)
 
   function openOrderForEdit(orderId, focusFulfillment = false) {
     onNavigate?.('Orders', orderId, { focusFulfillment })
@@ -1627,38 +2451,34 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
   }
 
   const todaySales = todayOrders.reduce((s, o) => s + Number(o.total || 0), 0)
-  const todayProfit = todayOrders.reduce((s, o) => s + orderProfit(o), 0)
+  const todayProfit = calcRealizedProfitForOrders(todayOrders, data.order_items, data.inventory)
   const ordersToday = todayOrders.length
-  const monthlySales = monthOrders.reduce((s, o) => s + Number(o.total || 0), 0)
-  const monthlyProfit = monthOrders.reduce((s, o) => s + orderProfit(o), 0)
+  const monthFinancials = calcMonthFinancialSummary(
+    monthOrders,
+    data.order_items,
+    data.inventory,
+    data.expenses,
+  )
+  const monthPurchaseSpending = calcMonthPurchaseSpending(data.purchase_orders || [])
   const openBalance = stats.balance
-  const expectedProfit = stats.expectedProfit
-  const inventoryValue = data.inventory.reduce((s, i) => {
-    const qty = Number(i.qty) || 0
-    if (qty <= 0) return s
-    return s + qty * inventoryUnitCost(i)
-  }, 0)
+  const inventoryExpectedProfit = calcDashboardExpectedProfit(data.inventory)
+  const inventoryValue = calcDashboardInventoryValue(data.inventory)
   const { itemCount: lowStockCount, unitsToReorder } = lowStockSummary(data.inventory)
   const lowStockAlerts = buildLowStockAlerts(data.inventory, 10)
   const reorderList = reorderListItems(data.inventory)
   const poStats = poSummaryStats(data.purchase_orders || [], data.purchase_order_items || [])
   const incomingAlerts = incomingInventoryAlerts(data.purchase_orders || [], data.purchase_order_items || [], 8)
 
-  function formatDashboardDate(raw) {
-    if (!raw) return '—'
-    const dt = new Date(raw)
-    if (Number.isNaN(dt.getTime())) return '—'
-    return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
-  }
+  const formatAlertOrderDate = raw => formatDisplayDate(raw)
 
   function formatAlertOrder(o) {
-    const f = normalizeFulfillment(o)
+    const f = normalizeFulfillment(o, data.order_items)
     return {
       id: o.id,
-      order_date: formatDashboardDate(o.order_date || o.created_at),
+      order_date: formatAlertOrderDate(o.order_date || o.created_at),
       invoice_no: o.invoice_no || '—',
       customer_name: o.customer_name || '—',
-      style: o.style || '—',
+      style: orderDisplayProduct(o, data.order_items),
       qty: f.qty,
       allocated_qty: f.allocated_qty,
       backorder_qty: f.backorder_qty,
@@ -1668,7 +2488,7 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
 
   const recentOrders = data.orders.filter(o => !isVoidOrder(o)).slice(0, 10).map(o => ({
     id: o.id,
-    order_date: formatDashboardDate(o.order_date || o.created_at),
+    order_date: formatAlertOrderDate(o.order_date || o.created_at),
     invoice_no: o.invoice_no || '—',
     customer_name: o.customer_name || '—',
     total: money(o.total),
@@ -1693,7 +2513,7 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
           </thead>
           <tbody>
             {rows.map(o => {
-              const ff = normalizeFulfillment(o)
+              const ff = normalizeFulfillment(o, data.order_items)
               return (
                 <tr key={o.id}>
                   <td>
@@ -1702,15 +2522,15 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
                     </button>
                   </td>
                   <td>{o.customer_name || '—'}</td>
-                  <td>{o.style || '—'}</td>
+                  <td>{orderDisplayProduct(o, data.order_items)}</td>
                   <td>{ff.qty}</td>
                   <td>{o.shipping_method || '—'}</td>
                   <td>{fulfillmentHandledBy(o)}</td>
                   <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
                   {showAction && (
                     <td>
-                      <button type="button" className="soft fulfill-open-btn" onClick={() => openOrderForEdit(o.id, true)}>
-                        Open Fulfillment
+                      <button type="button" className="soft" onClick={() => openOrderForEdit(o.id)}>
+                        View Order
                       </button>
                     </td>
                   )}
@@ -1724,7 +2544,7 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
   }
 
   return (
-    <>
+    <div className="dashboard-page">
       <div className="dashboard-rows dashboard-rows-compact">
         <div className="dashboard-row-group">
           <p className="dashboard-row-label">Daily Summary</p>
@@ -1736,12 +2556,31 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
           </div>
         </div>
         <div className="dashboard-row-group">
-          <p className="dashboard-row-label">Business Summary</p>
-          <div className="cards dashboard-row">
-            <Card t="Monthly Sales" v={money(monthlySales)} compact />
-            <Card t="Monthly Profit" v={money(monthlyProfit)} compact />
-            <Card t="Expected Profit" v={money(expectedProfit)} compact />
+          <div className="dashboard-section-head dashboard-profit-head">
+            <p className="dashboard-row-label">This Month</p>
+            <button type="button" className="soft" onClick={() => setShowProfitDetails(true)}>View Details</button>
+          </div>
+          <div className="panel panel-compact dashboard-profit-breakdown">
+            <ThisMonthBusinessSummary
+              summary={monthFinancials}
+              purchaseSpending={monthPurchaseSpending}
+              compact
+            />
+            <p className="hint dashboard-profit-hint">
+              Sales = invoice total. Gross Profit = product revenue − COGS (sold/allocated units only).
+              Inventory Purchases and shipping are cash out — not subtracted from Gross Profit.
+              Inbound shipping in COGS is per-unit landed cost, not double-counted.
+            </p>
+          </div>
+        </div>
+        <div className="dashboard-row-group">
+          <MonthlyProfitSummaryPanel data={data} />
+        </div>
+        <div className="dashboard-row-group">
+          <p className="dashboard-row-label">Current Inventory</p>
+          <div className="cards dashboard-row dashboard-row-2">
             <Card t="Inventory Value" v={money(inventoryValue)} compact />
+            <Card t="Expected Profit" v={money(inventoryExpectedProfit)} compact />
           </div>
         </div>
         <div className="dashboard-row-group">
@@ -1755,12 +2594,12 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
           <p className="dashboard-row-label">Action Required</p>
           <div className="cards dashboard-row dashboard-row-4">
             <Card
-              t="Ready to Fulfill"
-              v={rtfCount}
+              t="Partially Allocated"
+              v={partiallyAllocatedCount}
               compact
               actionCompact
               cls="card-action-rtf"
-              onClick={() => scrollToSection('dashboard-rtf-alerts')}
+              onClick={() => scrollToSection('dashboard-partial-alerts')}
             />
             <Card
               t="Back Orders"
@@ -1790,13 +2629,13 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
         </div>
       </div>
 
-      {rtfCount > 0 ? (
-        <div className="panel panel-compact dashboard-section" id="dashboard-rtf-alerts">
-          <h2 className="dashboard-section-title">Ready to Fulfill Alerts</h2>
-          <FulfillmentAlertTable rows={rtfAlerts} />
+      {partiallyAllocatedCount > 0 ? (
+        <div className="panel panel-compact dashboard-section" id="dashboard-partial-alerts">
+          <h2 className="dashboard-section-title">Partially Allocated Alerts</h2>
+          <FulfillmentAlertTable rows={partiallyAllocatedList} showAction={false} />
         </div>
       ) : (
-        <p className="dashboard-empty-note" id="dashboard-rtf-alerts">No orders ready to fulfill.</p>
+        <p className="dashboard-empty-note" id="dashboard-partial-alerts">No partially allocated orders.</p>
       )}
 
       {boStats.units > 0 ? (
@@ -1852,7 +2691,8 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
               Create Reorder List
             </button>
           </div>
-          <div className="table-wrap low-stock-table">
+          <DashboardLowStockMobileCards items={lowStockAlerts} />
+          <div className="table-wrap low-stock-table dashboard-lowstock-table">
             <table>
               <thead>
                 <tr>
@@ -1898,7 +2738,7 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
                   <tr key={a.id}>
                     <td><button type="button" className="link-cell" onClick={() => onNavigate?.('Purchase Orders', a.id)}>{a.po_number}</button></td>
                     <td>{a.supplier || '—'}</td>
-                    <td>{a.eta || '—'}</td>
+                    <td>{formatDisplayDate(a.eta)}</td>
                     <td>{a.remaining_units}</td>
                     <td>{a.status}</td>
                   </tr>
@@ -1915,6 +2755,14 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
           onClose={() => setShowReorderList(false)}
           onCreatePo={onCreatePoFromReorder}
           isAdmin={!!onCreatePoFromReorder}
+        />
+      )}
+
+      {showProfitDetails && (
+        <ProfitDetailsDialog
+          summary={{ ...monthFinancials, purchaseSpending: monthPurchaseSpending }}
+          onClose={() => setShowProfitDetails(false)}
+          onManageExpenses={() => onNavigate?.('Expenses')}
         />
       )}
 
@@ -1935,7 +2783,8 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
       {recentOrders.length > 0 && (
         <div className="panel panel-compact dashboard-section">
           <h2 className="dashboard-section-title">Recent Orders</h2>
-          <div className="table-wrap">
+          <DashboardRecentOrdersMobileCards rows={recentOrders} onNavigate={onNavigate} />
+          <div className="table-wrap dashboard-recent-orders-table">
             <table>
               <thead>
                 <tr>
@@ -1965,7 +2814,7 @@ function Dashboard({ data, stats, onNavigate, onCreatePoFromReorder }) {
           </div>
         </div>
       )}
-    </>
+    </div>
   )
 }
 
@@ -2004,6 +2853,7 @@ function Customers({ data, addRow, updateRow, deleteRow, onNavigate, selectedCus
     clearSelection?.()
     requestAnimationFrame(() => {
       document.getElementById(`customer-row-${selectedCustomerId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      document.getElementById(`customer-card-${selectedCustomerId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     })
   }, [selectedCustomerId, clearSelection, data.customers])
 
@@ -2049,63 +2899,103 @@ function Customers({ data, addRow, updateRow, deleteRow, onNavigate, selectedCus
 
   const selectedCustomer = data.customers.find(c => String(c.id) === String(selected))
 
+  function customerBillingCityState(c) {
+    const addr = c.billing_address || c.address || ''
+    const line = String(addr).split(/\n/).map(l => l.trim()).filter(Boolean).pop()
+    return line || '—'
+  }
+
   return (
-    <div className="split">
-      <div className="panel">
-        <h2>{editingId ? 'Edit Customer' : 'Add Customer'}</h2>
-        <div className="form-grid customer-form">
-          <input placeholder="Contact Name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} />
-          <input placeholder="Business Name" value={f.company} onChange={e => setF({ ...f, company: e.target.value })} />
-          <input placeholder="Phone" value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} />
-          <input placeholder="Email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} />
-          <textarea placeholder="Billing Address" value={f.billing_address}
-            onChange={e => setF({ ...f, billing_address: e.target.value, shipping_address: f.shipping_same_as_billing ? e.target.value : f.shipping_address })} />
-          <textarea placeholder="Shipping Address" value={f.shipping_address} disabled={f.shipping_same_as_billing}
-            onChange={e => setF({ ...f, shipping_address: e.target.value })} />
-          <label className="check">
-            <input type="checkbox" checked={f.shipping_same_as_billing} onChange={e => setSame(e.target.checked)} />
-            Same as Billing
-          </label>
-          <select value={f.preferred_payment} onChange={e => setF({ ...f, preferred_payment: e.target.value })}>
-            {PAYMENT_METHODS.map(x => <option key={x}>{x}</option>)}
-          </select>
-          <select value={f.payment_terms} onChange={e => setF({ ...f, payment_terms: e.target.value })}>
-            {TERMS.map(x => <option key={x}>{x}</option>)}
-          </select>
-          <input placeholder="Tax ID / Seller Permit" value={f.tax_id} onChange={e => setF({ ...f, tax_id: e.target.value })} />
-          <input placeholder="Customer Note" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
-          <select value={f.status} onChange={e => setF({ ...f, status: e.target.value })}>
-            {STATUSES.map(x => <option key={x}>{x}</option>)}
-          </select>
-          <div className="customer-form-actions">
-            <button onClick={save}>Save Customer</button>
-            {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel</button>}
+    <div className="customers-page">
+      <div className="customers-desktop-left">
+        <section className="panel customers-form-panel">
+          <h2>{editingId ? 'Edit Customer' : 'Add Customer'}</h2>
+          <div className="form-grid customer-form customer-form-fields">
+            <input placeholder="Contact Name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} />
+            <input placeholder="Business Name" value={f.company} onChange={e => setF({ ...f, company: e.target.value })} />
+            <input placeholder="Phone" value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} />
+            <input placeholder="Email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} />
+            <textarea className="customer-billing-field" placeholder="Billing Address" value={f.billing_address}
+              onChange={e => setF({ ...f, billing_address: e.target.value, shipping_address: f.shipping_same_as_billing ? e.target.value : f.shipping_address })} />
+            <textarea className="customer-shipping-field" placeholder="Shipping Address" value={f.shipping_address} disabled={f.shipping_same_as_billing}
+              onChange={e => setF({ ...f, shipping_address: e.target.value })} />
+            <label className="customer-same-billing">
+              <input type="checkbox" checked={f.shipping_same_as_billing} onChange={e => setSame(e.target.checked)} />
+              <span>Same as Billing</span>
+            </label>
+            <select value={f.preferred_payment} onChange={e => setF({ ...f, preferred_payment: e.target.value })}>
+              {PAYMENT_METHODS.map(x => <option key={x}>{x}</option>)}
+            </select>
+            <select value={f.payment_terms} onChange={e => setF({ ...f, payment_terms: e.target.value })}>
+              {TERMS.map(x => <option key={x}>{x}</option>)}
+            </select>
+            <input placeholder="Tax ID / Seller Permit" value={f.tax_id} onChange={e => setF({ ...f, tax_id: e.target.value })} />
+            <input placeholder="Customer Note" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
+            <select value={f.status} onChange={e => setF({ ...f, status: e.target.value })}>
+              {STATUSES.map(x => <option key={x}>{x}</option>)}
+            </select>
+            <div className="customer-form-actions">
+              <button type="button" className="customer-save-btn" onClick={save}>Save Customer</button>
+              {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel</button>}
+            </div>
           </div>
-        </div>
-        <h2>Customers</h2>
-        <input className="search" placeholder="Search customer..." value={q} onChange={e => setQ(e.target.value)} />
-        <div className="table-wrap customer-table">
-          <table>
-            <thead><tr><th>Business</th><th>Contact</th><th>Phone</th><th>Status</th><th>Balance</th><th>Last Order</th><th></th></tr></thead>
-            <tbody>{customers.map(c => {
-              const s = customerStats(c, data)
+        </section>
+        <section className="panel customers-list-panel">
+          <h2>Customers</h2>
+          <input className="search customers-local-search" placeholder="Search customer..." value={q} onChange={e => setQ(e.target.value)} />
+          <div className="customer-cards">
+            {customers.map(c => {
+              const isSelected = String(selected) === String(c.id) || String(editingId) === String(c.id)
               return (
-                <tr key={c.id} id={`customer-row-${c.id}`} onClick={() => loadCustomer(c)}
-                  className={String(selected) === String(c.id) || String(editingId) === String(c.id) ? 'sel' : ''}>
-                  <td><b>{c.company || '—'}</b></td>
-                  <td>{c.name}</td>
-                  <td>{c.phone}</td>
-                  <td><span className={`status-badge status-${(c.status || 'Active').toLowerCase()}`}>{c.status || 'Active'}</span></td>
-                  <td>{money(s.balance)}</td>
-                  <td>{s.lastOrder || '—'}</td>
-                  <td className="row-actions" onClick={e => e.stopPropagation()}>
-                    <button type="button" className="soft" onClick={() => loadCustomer(c)}>Edit</button>
-                  </td>
-                </tr>
+                <article
+                  key={c.id}
+                  id={`customer-card-${c.id}`}
+                  className={`customer-card${isSelected ? ' sel' : ''}`}
+                  onClick={() => loadCustomer(c)}
+                >
+                  <div className="customer-card-head">
+                    <strong className="customer-card-name">{c.company || c.name || '—'}</strong>
+                    <span className={`status-badge status-${(c.status || 'Active').toLowerCase()}`}>{c.status || 'Active'}</span>
+                  </div>
+                  {c.company && c.name ? <p className="customer-card-meta"><span className="customer-card-label">Contact:</span> {c.name}</p> : null}
+                  <p className="customer-card-meta"><span className="customer-card-label">Phone:</span> {c.phone || '—'}</p>
+                  <p className="customer-card-meta"><span className="customer-card-label">Email:</span> {c.email || '—'}</p>
+                  <p className="customer-card-meta"><span className="customer-card-label">Billing:</span> {customerBillingCityState(c)}</p>
+                  <button
+                    type="button"
+                    className="soft customer-card-edit"
+                    onClick={e => { e.stopPropagation(); loadCustomer(c) }}
+                  >
+                    Edit
+                  </button>
+                </article>
               )
-            })}</tbody>
-          </table>
-        </div>
+            })}
+            {customers.length === 0 && <p className="customer-cards-empty">No customers found.</p>}
+          </div>
+          <div className="table-wrap customer-table">
+            <table>
+              <thead><tr><th>Business</th><th>Contact</th><th>Phone</th><th>Status</th><th>Balance</th><th>Last Order</th><th></th></tr></thead>
+              <tbody>{customers.map(c => {
+                const s = customerStats(c, data)
+                return (
+                  <tr key={c.id} id={`customer-row-${c.id}`} onClick={() => loadCustomer(c)}
+                    className={String(selected) === String(c.id) || String(editingId) === String(c.id) ? 'sel' : ''}>
+                    <td><b>{c.company || '—'}</b></td>
+                    <td>{c.name}</td>
+                    <td>{c.phone}</td>
+                    <td><span className={`status-badge status-${(c.status || 'Active').toLowerCase()}`}>{c.status || 'Active'}</span></td>
+                    <td>{money(s.balance)}</td>
+                    <td>{s.lastOrder || '—'}</td>
+                    <td className="row-actions" onClick={e => e.stopPropagation()}>
+                      <button type="button" className="soft" onClick={() => loadCustomer(c)}>Edit</button>
+                    </td>
+                  </tr>
+                )
+              })}</tbody>
+            </table>
+          </div>
+        </section>
       </div>
       <CustomerDetail customer={selectedCustomer} data={data} deleteRow={deleteRow} onNavigate={onNavigate} />
     </div>
@@ -2113,16 +3003,18 @@ function Customers({ data, addRow, updateRow, deleteRow, onNavigate, selectedCus
 }
 
 function CustomerDetail({ customer, data, deleteRow, onNavigate }) {
-  if (!customer) return <div className="panel detail"><h2>Customer Detail</h2><p>Select a customer.</p></div>
+  if (!customer) return <div className="panel detail customers-detail-panel"><h2>Customer Detail</h2><p>Select a customer.</p></div>
   const s = customerStats(customer, data)
   const moneyCols = ['total', 'amount']
   const cellValue = (r, c) => {
     if (c === 'status') return normalizeOrderStatus(r[c])
-    return moneyCols.includes(c) ? money(r[c]) : c === 'created_at' ? dateOnly(r[c]) : String(r[c] ?? '')
+    if (moneyCols.includes(c)) return money(r[c])
+    if (isDisplayDateField(c)) return formatDisplayDate(r[c])
+    return String(r[c] ?? '')
   }
 
   return (
-    <div className="panel detail">
+    <div className="panel detail customers-detail-panel">
       <h2>{customer.company || customer.name}</h2>
       <p>
         <b>Business:</b> {customer.company || '—'}<br />
@@ -2186,17 +3078,119 @@ function CustomerDetail({ customer, data, deleteRow, onNavigate }) {
   )
 }
 
-function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
-  const blank = { style: '', brand: '', category: '', qty: '', buying_price: '', shipping_cost: '', selling_price: '', reorder_limit: 5 }
+function InventorySalesHistoryDialog({ item, orders, orderItems, onClose, onOpenInvoice }) {
+  const { rows, totalQtySold } = useMemo(
+    () => buildInventorySalesHistory(item.id, orders, orderItems),
+    [item.id, orders, orderItems],
+  )
+  const productName = item.style || 'Product'
+
+  return (
+    <div className="restore-dialog-overlay inventory-sales-history-overlay" onClick={onClose}>
+      <div
+        className="restore-dialog inventory-sales-history-dialog"
+        onClick={e => e.stopPropagation()}
+        role="dialog"
+        aria-labelledby="inventory-sales-history-title"
+      >
+        <header className="inventory-sales-history-header">
+          <h2 id="inventory-sales-history-title" className="inventory-sales-history-product">{productName}</h2>
+          <p className="inventory-sales-history-subtitle">Sales History</p>
+        </header>
+
+        <dl className="inventory-sales-history-summary">
+          <div className="inventory-sales-history-summary-card">
+            <dt>Current Stock On Hand</dt>
+            <dd>{item.stockOnHand ?? item.qty ?? 0}</dd>
+          </div>
+          <div className="inventory-sales-history-summary-card">
+            <dt>Total Qty Sold</dt>
+            <dd>{totalQtySold}</dd>
+          </div>
+        </dl>
+
+        <div className="inventory-sales-history-body">
+          {rows.length === 0 ? (
+            <p className="hint inventory-sales-history-empty">No sales history for this product.</p>
+          ) : (
+            <div className="table-wrap inventory-sales-history-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Order Date</th>
+                    <th>Invoice No</th>
+                    <th className="col-customer-name">Customer Name</th>
+                    <th className="col-qty-sold">Qty Sold</th>
+                    <th className="col-sales-person">Sales Person</th>
+                    <th className="col-unit-price">Unit Price</th>
+                    <th className="col-line-total">Line Total</th>
+                    <th className="col-status">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(row => (
+                    <tr key={`${row.orderId}-${row.orderItemId}`}>
+                      <td className="col-order-date">{formatDisplayDate(row.orderDate)}</td>
+                      <td className="col-invoice-no">
+                        <button
+                          type="button"
+                          className="link-cell invoice-link"
+                          onClick={() => onOpenInvoice?.(row.orderId)}
+                        >
+                          {row.invoiceNo}
+                        </button>
+                      </td>
+                      <td className="col-customer-name">{row.customerName}</td>
+                      <td className="col-qty-sold">{row.qtySold}</td>
+                      <td className="col-sales-person">{row.salesPerson}</td>
+                      <td className="col-unit-price">{money(row.unitPrice)}</td>
+                      <td className="col-line-total">{money(row.lineTotal)}</td>
+                      <td className="col-status"><OrderStatusBadge status={row.status} backorderQty={row.backorderQty} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <footer className="inventory-sales-history-footer">
+          <button type="button" className="soft inventory-sales-history-close" onClick={onClose}>Close</button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders, inventoryLoadError = '', dataLoading = false, onNavigate }) {
+  const blank = {
+    style: '', brand: '', category: '', qty: '', buying_price: '', shipping_cost: '', selling_price: '',
+    low_stock: 5, supplier: '', default_middleman_name: '', default_commission_type: '', default_commission_value: '',
+  }
   const [f, setF] = useState(blank)
   const [editingId, setEditingId] = useState(null)
+  const [formError, setFormError] = useState('')
   const [allocPrompt, setAllocPrompt] = useState(null)
   const [allocSummary, setAllocSummary] = useState(null)
-  const margin = formatMargin(f.buying_price, f.selling_price, f.shipping_cost)
-  const profit = calcProfit(f.buying_price, f.selling_price, f.shipping_cost)
+  const [salesHistoryItem, setSalesHistoryItem] = useState(null)
+  const middlemanOptions = useMemo(
+    () => collectMiddlemanOptions(data.purchase_orders || [], data.inventory || []),
+    [data.purchase_orders, data.inventory],
+  )
+  const supplierOptions = useMemo(
+    () => collectSupplierOptions(data.purchase_orders || [], data.inventory || []),
+    [data.purchase_orders, data.inventory],
+  )
+  const margin = Number(f.selling_price) > 0
+    ? formatMargin(f.buying_price, f.selling_price, f.shipping_cost)
+    : 'Not Set'
+  const profit = Number(f.selling_price) > 0
+    ? money(calcProfit(f.buying_price, f.selling_price, f.shipping_cost))
+    : 'Not Set'
 
   function loadItem(item) {
     setEditingId(item.id)
+    setFormError('')
     setF({
       style: item.style || '',
       brand: item.brand || '',
@@ -2205,13 +3199,33 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
       buying_price: itemBuying(item) || '',
       shipping_cost: item.shipping_cost ?? '',
       selling_price: itemSelling(item) || '',
-      reorder_limit: itemMinimumStockOrDefault(item, 5),
+      low_stock: itemMinimumStockOrDefault(item, 5),
+      supplier: item.supplier || '',
+      default_middleman_name: item.default_middleman_name || '',
+      default_commission_type: item.default_commission_type || '',
+      default_commission_value: item.default_commission_value ?? '',
     })
+    if (window.matchMedia('(max-width: 1023px)').matches) {
+      requestAnimationFrame(() => {
+        document.getElementById('inventory-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+    }
   }
 
   function cancelEdit() {
     setEditingId(null)
+    setFormError('')
     setF(blank)
+  }
+
+  function formatDefaultCommissionOnly(item) {
+    const type = item.default_commission_type || ''
+    const value = Number(item.default_commission_value) || 0
+    if (!type || value <= 0) return 'Not Set'
+    if (type === 'percentage') return `${value}%`
+    if (type === 'fixed_per_unit') return `$${value.toFixed(2)}/unit`
+    if (type === 'fixed_total') return `$${value.toFixed(2)} total`
+    return 'Not Set'
   }
 
   async function performSave(row) {
@@ -2225,16 +3239,26 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
   async function save() {
     const buying = Number(f.buying_price) || 0, shippingCost = Number(f.shipping_cost) || 0
     const selling = Number(f.selling_price) || 0
+    const commissionErr = validateInventoryCommissionDefaults(f)
+    if (commissionErr) {
+      setFormError(commissionErr)
+      return
+    }
+    setFormError('')
     const row = {
       style: f.style, brand: f.brand, category: f.category,
       qty: Number(f.qty) || 0, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
       cost: buying, price: selling,
-      ...minimumStockPayload(f.reorder_limit),
+      supplier: String(f.supplier || '').trim(),
+      default_middleman_name: String(f.default_middleman_name || '').trim(),
+      default_commission_type: f.default_commission_type || '',
+      default_commission_value: f.default_commission_value !== '' ? Math.max(Number(f.default_commission_value) || 0, 0) : 0,
+      ...minimumStockPayload(f.low_stock),
     }
     const oldItem = editingId ? data.inventory.find(i => String(i.id) === String(editingId)) : null
     const oldQty = Number(oldItem?.qty || 0)
     const stockIncrease = editingId ? Math.max(row.qty - oldQty, 0) : 0
-    const backorders = editingId ? activeBackorderOrders(data.orders, editingId) : []
+    const backorders = editingId ? activeBackorderOrders(data.orders, editingId, data.order_items) : []
     const inventoryId = editingId
 
     await performSave(row)
@@ -2260,12 +3284,13 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
   const rows = data.inventory.map(item => {
     const buying = itemBuying(item), shippingCost = itemShipping(item), selling = itemSelling(item)
     const stockOnHand = inventoryStockView(item)
-    const backOrdered = backOrderedQtyForProduct(data.orders, item.id)
+    const backOrdered = backOrderedQtyForProduct(data.orders, item.id, data.order_items)
     const reorder = inventoryReorderView(item)
     return {
       ...item, buying_price: buying, shipping_cost: shippingCost, selling_price: selling,
-      profit: calcProfit(buying, selling, shippingCost),
-      margin: formatMargin(buying, selling, shippingCost),
+      profit: formatInventoryProfit(buying, selling, shippingCost),
+      margin: formatInventoryMargin(buying, selling, shippingCost),
+      sellingDisplay: formatSellingDisplay(selling),
       stock: stockLevel(stockOnHand.display),
       stockOnHand: stockOnHand.display,
       stockRaw: stockOnHand.raw,
@@ -2276,12 +3301,34 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
       needToOrder: reorder.needToOrder,
       stockStatus: reorder.status,
       stockStatusClass: reorder.statusClass,
+      supplierDisplay: String(item.supplier || '').trim() || 'Not Set',
+      defaultMiddleman: String(item.default_middleman_name || '').trim() || 'Not Set',
+      defaultCommission: formatDefaultCommissionOnly(item),
     }
   })
 
+  function handleExportInventoryCsv() {
+    exportInventoryCsv(data.inventory)
+  }
+
+  function openSalesHistory(row) {
+    setSalesHistoryItem(row)
+  }
+
+  function openInvoiceFromSalesHistory(orderId) {
+    setSalesHistoryItem(null)
+    onNavigate?.('Invoice', orderId)
+  }
+
   return (
     <div className="panel inventory-page">
-      <h2>{editingId ? 'Edit Inventory Item' : 'Add Inventory Item'}</h2>
+      <h2 id="inventory-form">{editingId ? 'Edit Inventory Item' : 'Add Inventory Item'}</h2>
+      {dataLoading && <p className="hint">Loading inventory…</p>}
+      {inventoryLoadError && (
+        <p className="field-error inventory-load-error" role="alert">
+          Inventory load failed: {inventoryLoadError}
+        </p>
+      )}
       <div className="inventory-form">
         <div className="form-section">
           <h3>Product Details</h3>
@@ -2292,7 +3339,7 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
             <label>Qty<input type="number" min="0" value={f.qty} onChange={e => setF({ ...f, qty: e.target.value })} /></label>
             <label className="inventory-minimum-field">
               Minimum Stock
-              <input type="number" min="0" value={f.reorder_limit} onChange={e => setF({ ...f, reorder_limit: e.target.value })} />
+              <input type="number" min="0" value={f.low_stock} onChange={e => setF({ ...f, low_stock: e.target.value })} />
               <span className="field-hint">Low stock alerts appear when Stock On Hand is at or below this quantity.</span>
             </label>
           </div>
@@ -2304,17 +3351,70 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
             <label>Shipping Cost<input type="number" min="0" step="0.01" value={f.shipping_cost} onChange={e => setF({ ...f, shipping_cost: e.target.value })} /></label>
             <label>Selling Price<input type="number" min="0" step="0.01" value={f.selling_price} onChange={e => setF({ ...f, selling_price: e.target.value })} /></label>
             <div className="margin-display">
-              <span>Profit $</span><strong>{money(profit)}</strong>
+              <span>Profit $</span><strong>{profit}</strong>
               <span>Margin</span><strong className="margin-value">{margin}</strong>
             </div>
           </div>
         </div>
+        <div className="form-section">
+          <h3>Default Purchase Order Settings</h3>
+          <p className="hint">Optional. These values auto-fill when this product is added to a Purchase Order.</p>
+          <div className="form-grid inventory-grid">
+            <label>Supplier
+              <input
+                list="inventory-supplier-options"
+                value={f.supplier}
+                placeholder="Select or type supplier"
+                onChange={e => setF({ ...f, supplier: e.target.value })}
+              />
+            </label>
+            <label>Default Middle Man
+              <input
+                list="inventory-middleman-options"
+                value={f.default_middleman_name}
+                placeholder="Select or type name"
+                onChange={e => setF({ ...f, default_middleman_name: e.target.value })}
+              />
+            </label>
+            <label>Default Commission Type
+              <select
+                value={f.default_commission_type}
+                onChange={e => setF({ ...f, default_commission_type: e.target.value })}
+              >
+                <option value="">None</option>
+                {COMMISSION_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
+            </label>
+            <label>Default Commission Value
+              <input
+                type="number"
+                min="0"
+                step={f.default_commission_type === 'percentage' ? '0.01' : '0.01'}
+                value={f.default_commission_value}
+                disabled={!f.default_commission_type}
+                onChange={e => setF({ ...f, default_commission_value: e.target.value })}
+              />
+            </label>
+          </div>
+          <datalist id="inventory-middleman-options">
+            {middlemanOptions.map(name => <option key={name} value={name} />)}
+          </datalist>
+          <datalist id="inventory-supplier-options">
+            {supplierOptions.map(name => <option key={name} value={name} />)}
+          </datalist>
+        </div>
+        {formError && <p className="field-error">{formError}</p>}
         <div className="inventory-actions">
-          <button className="inventory-save" onClick={save}>Save Item</button>
+          <button type="button" className="inventory-save" onClick={save}>Save Item</button>
           {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel</button>}
         </div>
       </div>
-      <h2>Inventory</h2>
+      <div className="inventory-list-header">
+        <h2>Inventory</h2>
+        <button type="button" className="soft inventory-export-btn" onClick={handleExportInventoryCsv}>
+          Export CSV
+        </button>
+      </div>
       {allocPrompt && (
         <div className="alloc-prompt panel-inline">
           <p><strong>Stock saved.</strong> New stock is available for existing Back Orders.<br />Would you like to allocate it now?</p>
@@ -2347,20 +3447,131 @@ function Inventory({ data, addRow, updateRow, deleteRow, allocateBackOrders }) {
           </div>
         </div>
       )}
-      <InventoryTable rows={rows} editingId={editingId} onEdit={loadItem} onDelete={id => deleteRow('inventory', id)} />
+      <InventoryTable
+        rows={rows}
+        editingId={editingId}
+        onEdit={loadItem}
+        onDelete={id => deleteRow('inventory', id)}
+        onStockClick={openSalesHistory}
+      />
+      {salesHistoryItem && (
+        <InventorySalesHistoryDialog
+          item={salesHistoryItem}
+          orders={data.orders}
+          orderItems={data.order_items}
+          onClose={() => setSalesHistoryItem(null)}
+          onOpenInvoice={openInvoiceFromSalesHistory}
+        />
+      )}
     </div>
   )
 }
 
-function InventoryTable({ rows, editingId, onEdit, onDelete }) {
+function InventoryTable({ rows, editingId, onEdit, onDelete, onStockClick }) {
   return (
-    <div className="table-wrap inventory-table">
+    <>
+      <div className="inventory-cards">
+        {rows.map(r => (
+          <article
+            key={r.id}
+            className={`inventory-card${String(editingId) === String(r.id) ? ' sel' : ''}`}
+            onClick={() => onEdit(r)}
+          >
+            <h3 className="inventory-card-title">{r.style || '—'}</h3>
+            <dl className="inventory-card-meta">
+              <div className="inventory-card-row">
+                <dt>Brand</dt>
+                <dd>{r.brand || '—'}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Category</dt>
+                <dd>{r.category || '—'}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Supplier</dt>
+                <dd>{r.supplierDisplay}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Stock On Hand</dt>
+                <dd>
+                  <button
+                    type="button"
+                    className={`stock-badge stock-badge-link ${r.stock.cls}`}
+                    onClick={e => { e.stopPropagation(); onStockClick?.(r) }}
+                    aria-label={`View sales history for ${r.style || 'product'}`}
+                  >
+                    {r.stockOnHand}
+                  </button>
+                  {r.stockNegative && <span className="negative-stock-warn" title={`Stored qty: ${r.stockRaw}`}> ⚠</span>}
+                </dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Back Ordered</dt>
+                <dd>{r.backOrdered > 0 ? <span className="backorder-badge">{r.backOrdered}</span> : '0'}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Available</dt>
+                <dd>{r.available}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Minimum Stock</dt>
+                <dd>{r.minimumStock}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Need To Order</dt>
+                <dd>{r.needToOrder}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Buying Price</dt>
+                <dd>{money(r.buying_price)}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Shipping Cost</dt>
+                <dd>{money(r.shipping_cost)}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Selling Price</dt>
+                <dd>{formatSellingDisplay(r.selling_price)}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Default Middle Man</dt>
+                <dd>{r.defaultMiddleman}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Default Commission</dt>
+                <dd>{r.defaultCommission}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Profit</dt>
+                <dd>{r.profit}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Margin</dt>
+                <dd className="margin-cell">{r.margin}</dd>
+              </div>
+              <div className="inventory-card-row">
+                <dt>Status</dt>
+                <dd><span className={`stock-status-badge ${r.stockStatusClass}`}>{r.stockStatus}</span></dd>
+              </div>
+            </dl>
+            <div className="inventory-card-actions" onClick={e => e.stopPropagation()}>
+              <button type="button" className="soft" onClick={e => { e.stopPropagation(); onEdit(r) }}>Edit</button>
+              <button type="button" className="danger" onClick={() => onDelete(r.id)}>Delete</button>
+            </div>
+          </article>
+        ))}
+        {rows.length === 0 && <p className="inventory-cards-empty">No inventory items found.</p>}
+      </div>
+      <div className="table-wrap inventory-table">
       <table>
         <thead><tr>
           <th>Style / SKU</th><th>Brand</th><th>Category</th>
+          <th className="inventory-default-col">Supplier</th>
           <th>Stock On Hand</th><th>Back Ordered</th><th>Available</th>
           <th>Minimum Stock</th><th>Need to Order</th>
           <th>Buying Price</th><th>Shipping Cost</th><th>Selling Price</th>
+          <th className="inventory-default-col">Default Middle Man</th>
+          <th className="inventory-default-col">Default Commission</th>
           <th>Profit</th><th>Margin</th><th>Status</th><th>Edit</th><th>Delete</th>
         </tr></thead>
         <tbody>{rows.map(r => (
@@ -2368,15 +3579,28 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
             <td><b>{r.style || '—'}</b></td>
             <td>{r.brand || '—'}</td>
             <td>{r.category || '—'}</td>
-            <td><span className={`stock-badge ${r.stock.cls}`}>{r.stockOnHand}</span>{r.stockNegative && <span className="negative-stock-warn" title={`Stored qty: ${r.stockRaw}`}> ⚠</span>}</td>
+            <td className="inventory-default-col">{r.supplierDisplay}</td>
+            <td>
+              <button
+                type="button"
+                className={`stock-badge stock-badge-link ${r.stock.cls}`}
+                onClick={e => { e.stopPropagation(); onStockClick?.(r) }}
+                aria-label={`View sales history for ${r.style || 'product'}`}
+              >
+                {r.stockOnHand}
+              </button>
+              {r.stockNegative && <span className="negative-stock-warn" title={`Stored qty: ${r.stockRaw}`}> ⚠</span>}
+            </td>
             <td>{r.backOrdered > 0 ? <span className="backorder-badge">{r.backOrdered}</span> : '0'}</td>
             <td>{r.available}</td>
             <td>{r.minimumStock}</td>
             <td>{r.needToOrder}</td>
             <td>{money(r.buying_price)}</td>
             <td>{money(r.shipping_cost)}</td>
-            <td>{money(r.selling_price)}</td>
-            <td>{money(r.profit)}</td>
+            <td>{formatSellingDisplay(r.selling_price)}</td>
+            <td className="inventory-default-col">{r.defaultMiddleman}</td>
+            <td className="inventory-default-col">{r.defaultCommission}</td>
+            <td>{r.profit}</td>
             <td className="margin-cell">{r.margin}</td>
             <td>
               <span className={`stock-status-badge ${r.stockStatusClass}`}>{r.stockStatus}</span>
@@ -2391,13 +3615,195 @@ function InventoryTable({ rows, editingId, onEdit, onDelete }) {
         ))}</tbody>
       </table>
     </div>
+    </>
   )
 }
 
-function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillment, selectedOrderId, focusFulfillment, clearSelection }) {
+function OrderMemoIndicator({ order }) {
+  if (!orderHasMemo(order)) return null
+  const internal = orderInternalNote(order)
+  const customer = orderCustomerNote(order)
+  return (
+    <span className="order-memo-cell">
+      <button type="button" className="order-memo-trigger soft" aria-label="View order memos">Memo</button>
+      <span className="order-memo-popover" role="tooltip">
+        {internal && (
+          <span className="order-memo-popover-block">
+            <strong>Internal Memo</strong>
+            <span>{internal}</span>
+          </span>
+        )}
+        {customer && (
+          <span className="order-memo-popover-block">
+            <strong>Customer Note</strong>
+            <span>{customer}</span>
+          </span>
+        )}
+      </span>
+    </span>
+  )
+}
+
+function OrderTrackingEditor({ values, onChange, showLabel = true, readOnly = false }) {
+  const rows = values?.length ? values : [blankTrackingRow()]
+  return (
+    <div className="order-tracking-list">
+      {showLabel && <span className="order-tracking-label">Tracking Numbers</span>}
+      {rows.map((row, idx) => (
+        <div key={`track-${idx}`} className="order-tracking-row">
+          <select
+            className="order-tracking-carrier"
+            value={row.carrier || 'USPS'}
+            disabled={readOnly}
+            onChange={e => {
+              const next = rows.map((r, i) => (i === idx ? { ...r, carrier: e.target.value } : r))
+              onChange(next)
+            }}
+          >
+            {TRACKING_CARRIERS.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <input
+            placeholder="Tracking Number"
+            value={row.tracking_number || ''}
+            disabled={readOnly}
+            onChange={e => {
+              const next = rows.map((r, i) => (i === idx ? { ...r, tracking_number: e.target.value } : r))
+              onChange(next)
+            }}
+          />
+          {!readOnly && rows.length > 1 && (
+            <button
+              type="button"
+              className="soft order-tracking-remove"
+              onClick={() => {
+                const next = rows.filter((_, i) => i !== idx)
+                onChange(next.length ? next : [blankTrackingRow()])
+              }}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      ))}
+      {!readOnly && (
+        <button
+          type="button"
+          className="soft order-tracking-add"
+          onClick={() => onChange([...rows, blankTrackingRow()])}
+        >
+          + Add Tracking Number
+        </button>
+      )}
+    </div>
+  )
+}
+
+function ManageTrackingModal({ draft, onChange, onSave, onCancel, busy, error }) {
+  return (
+    <div className="restore-dialog-overlay tracking-modal-overlay" onClick={onCancel}>
+      <div className="restore-dialog tracking-modal" onClick={e => e.stopPropagation()} role="dialog" aria-labelledby="tracking-modal-title">
+        <h3 id="tracking-modal-title">Manage Tracking</h3>
+        <OrderTrackingEditor values={draft} onChange={onChange} showLabel={false} />
+        {error && <p className="field-error">{error}</p>}
+        <div className="restore-dialog-actions">
+          <button type="button" className="soft" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" onClick={onSave} disabled={busy}>{busy ? 'Saving…' : 'Save Tracking'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function OrderMobileCards({
+  orders, orderItems, staffUsers, readOnly, editingId, highlightId,
+  formatOrderDate, onEdit, onDelete, onInvoice,
+}) {
+  return (
+    <div className="order-cards">
+      {orders.map(o => {
+        const ff = normalizeFulfillment(o, orderItems)
+        const voided = isVoidOrder(o)
+        const isSelected = String(highlightId) === String(o.id) || String(editingId) === String(o.id)
+        return (
+          <article
+            key={o.id}
+            id={`order-card-${o.id}`}
+            className={`order-card${isSelected ? ' sel' : ''}`}
+          >
+            <div className="order-card-head">
+              <div className="order-card-invoice">{o.invoice_no || '—'}</div>
+              <div className="order-card-date">{formatOrderDate(o)}</div>
+            </div>
+            <p className="order-card-customer">{o.customer_name || '—'}</p>
+            <dl className="order-card-meta">
+              <div className="order-card-row">
+                <dt>Sales Person</dt>
+                <dd>{orderSalesPersonDisplay(o, staffUsers)}</dd>
+              </div>
+              <div className="order-card-row">
+                <dt>Product</dt>
+                <dd className="order-card-product">{orderDisplayProduct(o, orderItems)}</dd>
+              </div>
+              <div className="order-card-row">
+                <dt>Qty</dt>
+                <dd>{ff.qty}</dd>
+              </div>
+              <div className="order-card-row">
+                <dt>Allocated</dt>
+                <dd>{ff.allocated_qty}</dd>
+              </div>
+              <div className="order-card-row">
+                <dt>Back Order</dt>
+                <dd>{ff.backorder_qty > 0 ? <span className="backorder-badge">{ff.backorder_qty}</span> : ff.backorder_qty}</dd>
+              </div>
+              <div className="order-card-row">
+                <dt>Fulfillment</dt>
+                <dd>{o.shipping_method || '—'}</dd>
+              </div>
+              <div className="order-card-row">
+                <dt>Tracking</dt>
+                <dd className="order-card-tracking">{fulfillmentHandledBy(o)}</dd>
+              </div>
+              <div className="order-card-row">
+                <dt>Status</dt>
+                <dd><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></dd>
+              </div>
+              <div className="order-card-row">
+                <dt>Payment</dt>
+                <dd>{o.payment_status || '—'}</dd>
+              </div>
+            </dl>
+            {orderHasMemo(o) && (
+              <div className="order-card-memo">
+                <OrderMemoIndicator order={o} />
+              </div>
+            )}
+            {!readOnly && (
+              <div className="order-card-actions">
+                {!voided && (
+                  <button type="button" className="soft" onClick={() => onEdit(o)}>Edit</button>
+                )}
+                {onInvoice && (
+                  <button type="button" className="soft" onClick={() => onInvoice(o.id)}>Invoice</button>
+                )}
+                <button type="button" className="danger order-card-delete" onClick={() => onDelete(o.id)}>Delete</button>
+              </div>
+            )}
+          </article>
+        )
+      })}
+      {orders.length === 0 && <p className="order-cards-empty">No orders found.</p>}
+    </div>
+  )
+}
+
+function Orders({ data, staffUsers, createOrder, updateOrder, deleteOrder, selectedOrderId, focusFulfillment, clearSelection, readOnly = false, onNavigate, currentUserId = '' }) {
   const blank = {
-    customer_id: '', inventory_id: '', customer_name: '', style: '', qty: '', price: '',
-    shipping_method: '', shipping: '0', discount: '0', status: 'Open', note: '', tracking: '',
+    customer_id: '', customer_name: '',
+    sales_person_id: '',
+    lines: [{ ...blankOrderLine(), _clientKey: newClientOrderLineKey() }],
+    shipping_method: '', shipping: '0', discount: '0', tax: '0',
+    status: 'Completed', internal_note: '', customer_note: '', tracking_entries: [blankTrackingRow()],
     due_date: '', order_date: '', fulfillment_date: '', delivered_by: '', picked_up_by: '',
     fulfillment_note: '', signature_name: '',
   }
@@ -2406,18 +3812,15 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
   const [editingId, setEditingId] = useState(null)
   const [editSnapshot, setEditSnapshot] = useState(null)
   const [editError, setEditError] = useState('')
-  const [fulfillError, setFulfillError] = useState('')
   const [statusFilter, setStatusFilter] = useState('All')
+  const [salesPersonFilter, setSalesPersonFilter] = useState('All')
   const [showBackorderConfirm, setShowBackorderConfirm] = useState(false)
-  const [shipWarning, setShipWarning] = useState('')
 
   const method = f.shipping_method || ''
   const showCarrierFields = isCarrierMethod(method)
   const showDeliveryFields = isCompanyDelivery(method)
   const showPickupFields = isCustomerPickup(method)
   const editingOrder = editingId ? data.orders.find(o => String(o.id) === String(editingId)) : null
-  const editingStatus = normalizeOrderStatus(editingOrder?.status || f.status)
-  const canCompleteFulfillment = editingId && editingStatus === 'Ready to Fulfill'
   const lastNavRef = useRef('')
 
   useEffect(() => {
@@ -2438,37 +3841,45 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
     setEditingId(null)
     setEditSnapshot(null)
     setEditError('')
-    setFulfillError('')
-    setShipWarning('')
-    setF(blank)
+    setF({ ...blank, lines: [{ ...blankOrderLine(), _clientKey: newClientOrderLineKey() }] })
   }
 
   function loadOrderForEdit(order, scrollToFulfillment = false) {
     if (isVoidOrder(order)) return
     setEditingId(order.id)
-    const f0 = normalizeFulfillment(order)
+    const orderLines = itemsForOrder(order, data.order_items)
     setEditSnapshot({
-      inventory_id: order.inventory_id,
-      allocated_qty: f0.allocated_qty,
-      shipped_qty: f0.shipped_qty,
+      lines: orderLines.map(line => ({
+        id: line.id,
+        inventory_id: line.inventory_id,
+        allocated_qty: line.allocated_qty,
+      })),
     })
     setEditError('')
-    setFulfillError('')
-    setShipWarning('')
     setHighlightId(order.id)
     setF({
       customer_id: order.customer_id || '',
-      inventory_id: order.inventory_id || '',
       customer_name: order.customer_name || '',
-      style: order.style || '',
-      qty: order.qty ?? '',
-      price: order.price ?? '',
+      sales_person_id: order.sales_person_id || '',
+      lines: orderLines.length
+        ? orderLines.map(line => ({
+          id: line.id,
+          _clientKey: String(line.id || newClientOrderLineKey()),
+          inventory_id: line.inventory_id || '',
+          style: line.style || '',
+          qty: line.qty ?? '',
+          price: line.price ?? '',
+          discount: line.discount ?? '0',
+        }))
+        : [blankOrderLine()],
       shipping_method: order.shipping_method || '',
       shipping: order.shipping ?? '0',
       discount: order.discount ?? '0',
-      status: normalizeOrderStatus(order.status || 'Open'),
-      note: order.note || '',
-      tracking: order.tracking || '',
+      tax: order.tax ?? '0',
+      status: normalizeOrderStatus(order.status || 'Completed'),
+      internal_note: orderInternalNote(order),
+      customer_note: orderCustomerNote(order),
+      tracking_entries: trackingEntriesToFormValues(data.order_tracking_numbers, order.id, order.tracking),
       due_date: toDbDate(order.due_date || ''),
       order_date: toDbDate(order.order_date || order.created_at || ''),
       fulfillment_date: toDbDate(order.fulfillment_date || ''),
@@ -2494,23 +3905,19 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
 
   async function handleSave() {
     if (editingId) {
-      const preview = previewAllocation()
-      const warn = validateFulfillmentStatus(f.status, preview.backorder_qty)
-      if (warn) {
-        setShipWarning(warn)
-        setEditError(warn)
-        return
-      }
       const result = await updateOrder(editingId, f, editSnapshot)
       if (result?.error) {
         setEditError(result.error)
         return
       }
+      if (result?.mergedCount > 0) {
+        setEditError(`Duplicate products were merged into single lines (${result.mergedCount} merge${result.mergedCount === 1 ? '' : 's'}).`)
+      }
       cancelEdit()
       return
     }
-    const preview = previewAllocation()
-    if (preview.backorder_qty > 0) {
+    const preview = previewTotals()
+    if (preview.totalBackorder > 0) {
       setShowBackorderConfirm(true)
       return
     }
@@ -2519,19 +3926,10 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
       setEditError(result.error)
       return
     }
-    setEditError('')
-    setF(blank)
-  }
-
-  async function handleCompleteFulfillment() {
-    if (!editingId) return
-    setFulfillError('')
-    const result = await completeFulfillment(editingId, f)
-    if (result?.error) {
-      setFulfillError(result.error)
-      return
-    }
-    cancelEdit()
+    setEditError(result?.mergedCount > 0
+      ? `Duplicate products were merged into single lines (${result.mergedCount} merge${result.mergedCount === 1 ? '' : 's'}). Invoice created.`
+      : '')
+    setF({ ...blank, lines: [{ ...blankOrderLine(), _clientKey: newClientOrderLineKey() }] })
   }
 
   async function confirmCreateWithBackorder() {
@@ -2541,8 +3939,10 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
       setEditError(result.error)
       return
     }
-    setEditError('')
-    setF(blank)
+    setEditError(result?.mergedCount > 0
+      ? `Duplicate products were merged into single lines (${result.mergedCount} merge${result.mergedCount === 1 ? '' : 's'}). Invoice created with back order.`
+      : '')
+    setF({ ...blank, lines: [{ ...blankOrderLine(), _clientKey: newClientOrderLineKey() }] })
   }
 
   async function handleDeleteOrder(id) {
@@ -2555,32 +3955,90 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
     setF({ ...f, customer_id: id, customer_name: c?.company || c?.name || '', due_date: toDbDate(calcDueDate(c?.payment_terms, today())) })
   }
 
-  function chooseItem(id) {
-    const i = data.inventory.find(x => String(x.id) === String(id))
-    setF({ ...f, inventory_id: id, style: i?.style || '', price: itemSelling(i) || '' })
+  function updateLine(idx, patch) {
+    setF(prev => ({
+      ...prev,
+      lines: prev.lines.map((line, i) => i === idx ? { ...line, ...patch } : line),
+    }))
   }
 
-  const item = data.inventory.find(i => String(i.id) === String(f.inventory_id))
-  const itemStock = inventoryStockView(item)
-  const qty = Number(f.qty || 0), price = Number(f.price || 0)
-  const outboundShipping = Number(f.shipping || 0), discount = Number(f.discount || 0)
-  const unitCost = item ? itemUnitCost(item) : 0
-  const lineProfit = qty * price + outboundShipping - discount - qty * unitCost
-
-  function previewAllocation() {
-    const orderQty = Number(f.qty || 0)
-    const stock = itemStock.display
-    if (editingId && editSnapshot) {
-      const sameProduct = String(editSnapshot.inventory_id || '') === String(f.inventory_id || '')
-      const restoreQty = Math.max(Number(editSnapshot.allocated_qty || 0) - Number(editSnapshot.shipped_qty || 0), 0)
-      const available = sameProduct ? stock + restoreQty : stock
-      return { currentStock: stock, orderQty, stockRaw: itemStock.raw, stockNegative: itemStock.isNegative, ...calcAllocation(orderQty, available) }
-    }
-    return { currentStock: stock, orderQty, stockRaw: itemStock.raw, stockNegative: itemStock.isNegative, ...calcAllocation(orderQty, stock) }
+  function pickLineProduct(idx, inventoryId) {
+    const item = data.inventory.find(x => String(x.id) === String(inventoryId))
+    updateLine(idx, {
+      inventory_id: inventoryId,
+      style: item?.style || '',
+      price: orderItemSelling(item) || '',
+    })
   }
 
-  const allocPreview = previewAllocation()
-  const filteredOrders = data.orders.filter(o => statusMatchesFilterWithVoid(o, statusFilter))
+  function removeLine(idx) {
+    setF(prev => ({
+      ...prev,
+      lines: prev.lines.length <= 1 ? prev.lines : prev.lines.filter((_, i) => i !== idx),
+    }))
+  }
+
+  function addLine() {
+    setF(prev => ({ ...prev, lines: [...prev.lines, { ...blankOrderLine(), _clientKey: newClientOrderLineKey() }] }))
+  }
+
+  function applyVoiceOrderToForm(voicePatch) {
+    const customer = voicePatch.customerId
+      ? data.customers.find(c => String(c.id) === String(voicePatch.customerId))
+      : null
+    const terms = voicePatch.paymentTerms || customer?.payment_terms || 'COD'
+    const newLines = (voicePatch.lines || []).map(line => {
+      const item = data.inventory.find(i => String(i.id) === String(line.inventoryId))
+      return {
+        ...blankOrderLine(),
+        _clientKey: newClientOrderLineKey(),
+        inventory_id: line.inventoryId,
+        style: item?.style || '',
+        price: orderItemSelling(item) || '',
+        qty: line.qty,
+      }
+    })
+    setF(prev => ({
+      ...prev,
+      customer_id: voicePatch.customerId || prev.customer_id,
+      customer_name: customer?.company || customer?.name || prev.customer_name,
+      sales_person_id: voicePatch.salesPersonId || prev.sales_person_id,
+      shipping_method: voicePatch.shippingMethod || prev.shipping_method,
+      due_date: voicePatch.customerId ? toDbDate(calcDueDate(terms, prev.order_date || today())) : prev.due_date,
+      customer_note: voicePatch.customerNote ? voicePatch.customerNote : prev.customer_note,
+      lines: newLines.length ? newLines : prev.lines,
+    }))
+    setEditError('')
+    requestAnimationFrame(() => {
+      document.getElementById('order-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }
+
+  function previewTotals() {
+    const snapshots = editingId && editSnapshot?.lines ? editSnapshot.lines : null
+    const linesWithContext = (f.lines || []).map(line => {
+      const snap = snapshots?.find(s =>
+        (line.id && String(s.id) === String(line.id))
+        || String(s.inventory_id || '') === String(line.inventory_id || ''),
+      )
+      return { ...line, _editContext: snap }
+    })
+    return calcOrderTotals(linesWithContext, f, data.inventory)
+  }
+
+  const totalsPreview = previewTotals()
+  const allocPreview = {
+    allocated_qty: totalsPreview.totalAllocated,
+    backorder_qty: totalsPreview.totalBackorder,
+    orderQty: totalsPreview.totalQty,
+  }
+  const filteredOrders = data.orders.filter(o => {
+    if (!statusMatchesFilterWithVoid(o, statusFilter)) return false
+    if (salesPersonFilter === 'All') return true
+    if (salesPersonFilter === 'None') return !o.sales_person_id && !o.sales_person_name
+    return String(o.sales_person_id) === String(salesPersonFilter)
+  })
+  const salesStaff = salesStaffOptions(staffUsers)
 
   function filterLabel(s) {
     if (s === 'All') return 'All'
@@ -2589,20 +4047,96 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
       return count ? `Void (${count})` : 'Void'
     }
     const count = countOrdersByStatus(data.orders, s)
-    if (['Back Order', 'Ready to Fulfill', 'Completed'].includes(s)) return `${s} (${count})`
+    if (['Back Order', 'Partially Allocated', 'Completed'].includes(s)) return `${s} (${count})`
     return s
   }
 
-  function formatOrderDate(order) {
-    const raw = order.order_date || order.created_at
-    if (!raw) return '—'
-    const dt = new Date(raw)
-    if (Number.isNaN(dt.getTime())) return '—'
-    return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
-  }
+  const formatOrderDate = order => formatDisplayDate(order.order_date || order.created_at)
 
   const dateFieldLabel = showDeliveryFields ? 'Delivery Date' : showPickupFields ? 'Pickup Date' : 'Fulfillment Date'
   const noteFieldLabel = showDeliveryFields ? 'Delivery Note' : showPickupFields ? 'Pickup Note' : 'Fulfillment Note'
+
+  if (readOnly) {
+    return (
+      <div className="panel">
+        <h2>Orders</h2>
+        <p className="hint">View-only access.</p>
+        <div className="orders-list-section">
+        <div className="order-filters">
+          {['All', ...ORDER_FILTER_STATUSES].map(s => (
+            <button key={s} type="button" className={statusFilter === s ? 'filter-btn active' : 'filter-btn soft'} onClick={() => setStatusFilter(s)}>{filterLabel(s)}</button>
+          ))}
+        </div>
+        <div className="order-filters order-sales-person-filter">
+          <label>
+            Sales Person
+            <select value={salesPersonFilter} onChange={e => setSalesPersonFilter(e.target.value)}>
+              <option value="All">All Sales People</option>
+              <option value="None">Unassigned</option>
+              {salesStaff.map(u => (
+                <option key={u.id} value={u.id}>{staffSalesPersonLabel(u)}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <OrderMobileCards
+          orders={filteredOrders}
+          orderItems={data.order_items}
+          staffUsers={staffUsers}
+          readOnly
+          editingId={editingId}
+          highlightId={highlightId}
+          formatOrderDate={formatOrderDate}
+          onEdit={loadOrderForEdit}
+          onDelete={handleDeleteOrder}
+        />
+        <div className="table-wrap orders-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Order Date</th>
+                <th>Invoice No</th>
+                <th>Customer Name</th>
+                <th>Sales Person</th>
+                <th>Product</th>
+                <th>Qty</th>
+                <th>Allocated</th>
+                <th>Back Order</th>
+                <th>Fulfillment Method</th>
+                <th>Tracking / Handled By</th>
+                <th>Status</th>
+                <th>Payment Status</th>
+                <th>Memo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredOrders.map(o => {
+                const ff = normalizeFulfillment(o, data.order_items)
+                return (
+                  <tr key={o.id} id={`order-row-${o.id}`}>
+                    <td>{formatOrderDate(o)}</td>
+                    <td>{o.invoice_no || '—'}</td>
+                    <td>{o.customer_name || '—'}</td>
+                    <td>{orderSalesPersonDisplay(o, staffUsers)}</td>
+                    <td>{orderDisplayProduct(o, data.order_items)}</td>
+                    <td>{ff.qty}</td>
+                    <td>{ff.allocated_qty}</td>
+                    <td>{ff.backorder_qty > 0 ? <span className="backorder-badge">{ff.backorder_qty}</span> : ff.backorder_qty}</td>
+                    <td>{o.shipping_method || '—'}</td>
+                    <td>{fulfillmentHandledBy(o)}</td>
+                    <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
+                    <td>{o.payment_status || '—'}</td>
+                    <td className="order-memo-col"><OrderMemoIndicator order={o} /></td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="panel">
@@ -2613,42 +4147,153 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
         </p>
       )}
       {editError && <p className="field-error order-edit-error">{editError}</p>}
+      {!editingId && !readOnly && (
+        <VoiceOrderPanel
+          customers={data.customers}
+          inventory={data.inventory}
+          staffUsers={salesStaff}
+          currentUserId={currentUserId}
+          onApplyToForm={applyVoiceOrderToForm}
+        />
+      )}
       <div className="form-grid">
         <select value={f.customer_id} onChange={e => chooseCustomer(e.target.value)}>
           <option value="">Select Customer</option>
           {data.customers.map(c => <option key={c.id} value={c.id}>{c.company || c.name}</option>)}
         </select>
-        <select value={f.inventory_id} onChange={e => chooseItem(e.target.value)}>
-          <option value="">Select Product</option>
-          {data.inventory.map(i => (
-            <option key={i.id} value={i.id}>{i.style}{i.brand ? ` · ${i.brand}` : ''} — Stock {i.qty}</option>
-          ))}
-        </select>
-        {item && qty > 0 && (
-          <div className="order-stock-preview">
-            <p>Current Stock: <strong>{allocPreview.currentStock}</strong></p>
-            <p>Order Qty: <strong>{allocPreview.orderQty}</strong></p>
-            <p>Allocated Now: <strong>{allocPreview.allocated_qty}</strong></p>
-            <p>Back Order: <strong>{allocPreview.backorder_qty}</strong></p>
-            {allocPreview.backorder_qty > 0 && !editingId && (
-              <p className="field-error backorder-warning">
-                Only {allocPreview.allocated_qty} unit{allocPreview.allocated_qty === 1 ? '' : 's'} are currently available.
-                {' '}{allocPreview.backorder_qty} unit{allocPreview.backorder_qty === 1 ? '' : 's'} will be placed on Back Order.
-              </p>
-            )}
+        <label className="order-field">
+          Sales Person
+          <select value={f.sales_person_id} onChange={e => setF({ ...f, sales_person_id: e.target.value })}>
+            <option value="">Select Sales Person</option>
+            {salesStaff.map(u => (
+              <option key={u.id} value={u.id}>{staffSalesPersonLabel(u)}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {editingId && editingOrder && (
+        <div className="form-section order-details-section">
+          <h3>Order Details</h3>
+          <div className="order-details-grid">
+            <p><strong>Invoice #:</strong> {editingOrder.invoice_no || '—'}</p>
+            <p><strong>Customer:</strong> {editingOrder.customer_name || '—'}</p>
+            <p><strong>Sales Person:</strong> {
+              f.sales_person_id
+                ? staffSalesPersonLabel(salesStaff.find(u => String(u.id) === String(f.sales_person_id)))
+                : orderSalesPersonDisplay(editingOrder, staffUsers)
+            }</p>
+            <p><strong>Status:</strong> {normalizeOrderStatus(editingOrder.status)}</p>
+            <p><strong>Payment:</strong> {editingOrder.payment_status || '—'}</p>
           </div>
-        )}
-        {item && (
-          <div className="stock-info">
-            Physical Stock: <strong>{itemStock.display}</strong>
-            {itemStock.isNegative && (
-              <span className="negative-stock-warn"> Warning: stored qty is {itemStock.raw}. Use Repair Negative Inventory in Settings.</span>
-            )}
-          </div>
-        )}
-        <input placeholder="Qty" type="number" min="1" value={f.qty} onChange={e => setF({ ...f, qty: e.target.value })} />
-        <input placeholder="Selling Price (auto)" value={f.price} onChange={e => setF({ ...f, price: e.target.value })} />
-        <div className="profit-preview">Profit: <strong>{money(lineProfit)}</strong></div>
+        </div>
+      )}
+
+      <div className="form-section order-lines-section">
+        <h3>Product Lines</h3>
+        {(f.lines || []).map((line, idx) => {
+          const item = data.inventory.find(i => String(i.id) === String(line.inventory_id))
+          const itemStock = inventoryStockView(item)
+          const snap = editingId && editSnapshot?.lines
+            ? editSnapshot.lines.find(s =>
+              (line.id && String(s.id) === String(line.id))
+              || String(s.inventory_id || '') === String(line.inventory_id || ''),
+            )
+            : null
+          const lineAlloc = previewLineAllocation(line, item, snap)
+          const lineCalc = totalsPreview.lines[idx] || calcOrderTotals([line], f, data.inventory).lines[0]
+          return (
+            <div key={line._clientKey || line.id || idx} className="order-line-card">
+              <div className="form-grid order-line-grid order-line-row">
+                <label>Product / SKU
+                  <select value={line.inventory_id || ''} onChange={e => pickLineProduct(idx, e.target.value)}>
+                    <option value="">Select Product</option>
+                    {data.inventory.map(i => (
+                      <option key={i.id} value={i.id}>{i.style}{i.brand ? ` · ${i.brand}` : ''}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>Current Stock
+                  <span className="order-line-readonly">{item ? itemStock.display : '—'}</span>
+                </label>
+                <label>Order Qty
+                  <input type="number" min="1" value={line.qty} onChange={e => updateLine(idx, { qty: e.target.value })} />
+                </label>
+                <label>Unit Price
+                  <input type="number" min="0" step="0.01" value={line.price} onChange={e => updateLine(idx, { price: e.target.value })} />
+                </label>
+                <label>Discount
+                  <input type="number" min="0" step="0.01" value={line.discount} onChange={e => updateLine(idx, { discount: e.target.value })} />
+                </label>
+                <label>Line Total
+                  <span className="order-line-readonly">{money(lineCalc?.line_total || 0)}</span>
+                </label>
+                <label>Profit
+                  <span className="order-line-readonly">{money(lineCalc?.profit || 0)}</span>
+                </label>
+                <div className="order-line-actions">
+                  <button type="button" className="danger soft" onClick={() => removeLine(idx)} disabled={(f.lines || []).length <= 1}>Remove</button>
+                </div>
+              </div>
+              {item && Number(line.qty || 0) > 0 && (
+                <div className="order-stock-preview order-line-allocation">
+                  <p>Allocated Now: <strong>{lineAlloc.allocated_qty}</strong></p>
+                  <p>Back Order: <strong>{lineAlloc.backorder_qty}</strong></p>
+                  {itemStock.isNegative && (
+                    <p className="field-error">Warning: stored qty is {itemStock.raw}. Use Repair Negative Inventory in Settings.</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
+        <button type="button" className="soft" onClick={addLine}>+ Add Product Line</button>
+      </div>
+
+      {allocPreview.backorder_qty > 0 && !editingId && (
+        <p className="field-error backorder-warning">
+          {allocPreview.allocated_qty} unit{allocPreview.allocated_qty === 1 ? '' : 's'} allocated now.
+          {' '}{allocPreview.backorder_qty} unit{allocPreview.backorder_qty === 1 ? '' : 's'} will be placed on Back Order.
+        </p>
+      )}
+
+      <div className="order-totals-box">
+        <p><strong>Subtotal:</strong> {money(totalsPreview.subtotal)}</p>
+        <p><strong>Line Discounts:</strong> {money(totalsPreview.lineDiscountTotal)}</p>
+        <p><strong>Shipping Charge:</strong> {money(totalsPreview.shipping)}</p>
+        <p><strong>Tax:</strong> {money(totalsPreview.tax)}</p>
+        <p className="order-grand-total-preview"><strong>Grand Total:</strong> {money(totalsPreview.grandTotal)}</p>
+      </div>
+
+      <div className="form-section order-memo-section">
+        <h3>Order Memos</h3>
+        <div className="order-memo-grid">
+          <label className="order-field order-memo-field">
+            Internal Memo
+            <span className="hint-inline">Staff only — not shown on invoice</span>
+            <textarea
+              className="order-memo-textarea order-memo-internal"
+              placeholder="Internal notes for staff only"
+              value={f.internal_note}
+              onChange={e => setF({ ...f, internal_note: e.target.value })}
+              rows={4}
+            />
+          </label>
+          <label className="order-field order-memo-field">
+            Customer Note
+            <span className="hint-inline">Shown on the customer invoice</span>
+            <textarea
+              className="order-memo-textarea order-memo-customer"
+              placeholder="Message shown on the customer invoice"
+              value={f.customer_note}
+              onChange={e => setF({ ...f, customer_note: e.target.value })}
+              rows={3}
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="form-grid">
         <label className="order-field fulfillment-method-field" id="fulfillment-method-field">
           Fulfillment Method
           <select id="fulfillment-method-select" value={f.shipping_method} onChange={e => setF({ ...f, shipping_method: e.target.value })}>
@@ -2661,35 +4306,32 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
           <input placeholder="Shipping Charge" type="number" min="0" step="0.01" value={f.shipping} onChange={e => setF({ ...f, shipping: e.target.value })} />
         </label>
         <label className="order-field">
-          Discount
-          <input placeholder="Discount" type="number" min="0" step="0.01" value={f.discount} onChange={e => setF({ ...f, discount: e.target.value })} />
+          Invoice Discount
+          <input placeholder="Invoice Discount" type="number" min="0" step="0.01" value={f.discount} onChange={e => setF({ ...f, discount: e.target.value })} />
+        </label>
+        <label className="order-field">
+          Tax
+          <input placeholder="Tax" type="number" min="0" step="0.01" value={f.tax} onChange={e => setF({ ...f, tax: e.target.value })} />
         </label>
         <label className="order-field">
           Order Date
           <input type="date" value={f.order_date} onChange={e => setF({ ...f, order_date: e.target.value })} />
         </label>
         <input type="date" placeholder="Due Date" value={f.due_date} onChange={e => setF({ ...f, due_date: e.target.value })} />
-        <select value={f.status} onChange={e => {
-          setF({ ...f, status: e.target.value })
-          setShipWarning('')
-          const preview = previewAllocation()
-          const warn = validateFulfillmentStatus(e.target.value, preview.backorder_qty)
-          if (warn) setShipWarning(warn)
-        }}>
+        <select value={f.status} onChange={e => setF({ ...f, status: e.target.value })}>
           {ORDER_STATUSES.map(x => <option key={x}>{x}</option>)}
         </select>
-        {shipWarning && <p className="field-error order-edit-error">{shipWarning}</p>}
-        <input placeholder="Order Note" value={f.note} onChange={e => setF({ ...f, note: e.target.value })} />
 
         {(showCarrierFields || showDeliveryFields || showPickupFields) && (
           <div className="fulfillment-fields" id="fulfillment-fields">
             <h3>Fulfillment Details</h3>
             {showCarrierFields && (
               <>
-                <label className="order-field">
-                  Tracking Number
-                  <input placeholder="Tracking Number" value={f.tracking} onChange={e => setF({ ...f, tracking: e.target.value })} />
-                </label>
+                <OrderTrackingEditor
+                  values={f.tracking_entries}
+                  onChange={tracking_entries => setF({ ...f, tracking_entries })}
+                  readOnly={readOnly}
+                />
                 <label className="order-field">
                   Fulfillment Date
                   <input type="date" value={f.fulfillment_date} onChange={e => setF({ ...f, fulfillment_date: e.target.value })} />
@@ -2747,26 +4389,12 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
           {editingId && <button type="button" className="soft" onClick={cancelEdit}>Cancel Edit</button>}
         </div>
 
-        {canCompleteFulfillment && (
-          <div className="fulfillment-complete panel-inline">
-            <h3>Complete Fulfillment</h3>
-            {allocPreview.backorder_qty > 0 ? (
-              <p className="field-error">This order still has {allocPreview.backorder_qty} units on Back Order.</p>
-            ) : (
-              <>
-                <p className="hint">Fill in the required fulfillment details above, then complete this order.</p>
-                {fulfillError && <p className="field-error order-edit-error">{fulfillError}</p>}
-                <button type="button" className="fulfill-btn" onClick={handleCompleteFulfillment}>Complete Fulfillment</button>
-              </>
-            )}
-          </div>
-        )}
       </div>
       {showBackorderConfirm && (
         <div className="restore-dialog-overlay" onClick={() => setShowBackorderConfirm(false)}>
           <div className="restore-dialog" onClick={e => e.stopPropagation()}>
             <p className="restore-dialog-text">
-              Only {allocPreview.allocated_qty} unit{allocPreview.allocated_qty === 1 ? '' : 's'} are currently available.
+              {allocPreview.allocated_qty} unit{allocPreview.allocated_qty === 1 ? '' : 's'} allocated now.
               {' '}{allocPreview.backorder_qty} unit{allocPreview.backorder_qty === 1 ? '' : 's'} will be placed on Back Order.
             </p>
             <div className="restore-dialog-actions">
@@ -2776,12 +4404,37 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
           </div>
         </div>
       )}
+      <div className="orders-list-section">
       <h2>Orders</h2>
       <div className="order-filters">
         {['All', ...ORDER_FILTER_STATUSES].map(s => (
           <button key={s} type="button" className={statusFilter === s ? 'filter-btn active' : 'filter-btn soft'} onClick={() => setStatusFilter(s)}>{filterLabel(s)}</button>
         ))}
       </div>
+      <div className="order-filters order-sales-person-filter">
+        <label>
+          Sales Person
+          <select value={salesPersonFilter} onChange={e => setSalesPersonFilter(e.target.value)}>
+            <option value="All">All Sales People</option>
+            <option value="None">Unassigned</option>
+            {salesStaff.map(u => (
+              <option key={u.id} value={u.id}>{staffSalesPersonLabel(u)}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <OrderMobileCards
+        orders={filteredOrders}
+        orderItems={data.order_items}
+        staffUsers={staffUsers}
+        readOnly={false}
+        editingId={editingId}
+        highlightId={highlightId}
+        formatOrderDate={formatOrderDate}
+        onEdit={loadOrderForEdit}
+        onDelete={handleDeleteOrder}
+        onInvoice={id => onNavigate?.('Invoice', id)}
+      />
       <div className="table-wrap orders-table">
         <table>
           <thead>
@@ -2789,22 +4442,23 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
               <th>Order Date</th>
               <th>Invoice No</th>
               <th>Customer Name</th>
+              <th>Sales Person</th>
               <th>Product</th>
               <th>Qty</th>
               <th>Allocated</th>
               <th>Back Order</th>
-              <th>Fulfilled</th>
               <th>Fulfillment Method</th>
               <th>Tracking / Handled By</th>
               <th>Status</th>
               <th>Payment Status</th>
+              <th>Memo</th>
               <th>Edit</th>
               <th>Delete</th>
             </tr>
           </thead>
           <tbody>
             {filteredOrders.map(o => {
-              const ff = normalizeFulfillment(o)
+              const ff = normalizeFulfillment(o, data.order_items)
               return (
               <tr
                 key={o.id}
@@ -2814,15 +4468,16 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
                 <td>{formatOrderDate(o)}</td>
                 <td>{o.invoice_no || '—'}</td>
                 <td>{o.customer_name || '—'}</td>
-                <td>{o.style || '—'}</td>
+                <td>{orderSalesPersonDisplay(o, staffUsers)}</td>
+                <td>{orderDisplayProduct(o, data.order_items)}</td>
                 <td>{ff.qty}</td>
                 <td>{ff.allocated_qty}</td>
                 <td>{ff.backorder_qty > 0 ? <span className="backorder-badge">{ff.backorder_qty}</span> : ff.backorder_qty}</td>
-                <td>{ff.fulfilled_qty}</td>
                 <td>{o.shipping_method || '—'}</td>
                 <td>{fulfillmentHandledBy(o)}</td>
                 <td><OrderStatusBadge status={o.status} backorderQty={ff.backorder_qty} /></td>
                 <td>{o.payment_status || '—'}</td>
+                <td className="order-memo-col"><OrderMemoIndicator order={o} /></td>
                 <td className="row-actions">
                   {isVoidOrder(o) ? '—' : (
                     <button type="button" className="soft" onClick={() => loadOrderForEdit(o)}>Edit</button>
@@ -2836,11 +4491,12 @@ function Orders({ data, createOrder, updateOrder, deleteOrder, completeFulfillme
           </tbody>
         </table>
       </div>
+      </div>
     </div>
   )
 }
 
-function VoidInvoiceModal({ order, paid, restoreQty, fulfilledQty, onCancel, onConfirm }) {
+function VoidInvoiceModal({ order, paid, restoreQty, onCancel, onConfirm }) {
   const [reason, setReason] = useState('')
   const [note, setNote] = useState('')
   const [confirmText, setConfirmText] = useState('')
@@ -2871,11 +4527,6 @@ function VoidInvoiceModal({ order, paid, restoreQty, fulfilledQty, onCancel, onC
           <li>Preserve the invoice number and full history</li>
           <li>Preserve payment records for audit purposes</li>
         </ul>
-        {fulfilledQty > 0 && (
-          <p className="field-error void-modal-warn">
-            This invoice has {fulfilledQty} fulfilled unit{fulfilledQty === 1 ? '' : 's'}. Only unfulfilled allocated stock ({restoreQty}) will be restored.
-          </p>
-        )}
         {paid > 0 && (
           <p className="field-error void-modal-warn">
             This invoice has recorded payments. Voiding the invoice does not issue a refund or remove payment history.
@@ -2910,11 +4561,15 @@ function VoidInvoiceModal({ order, paid, restoreQty, fulfilledQty, onCancel, onC
   )
 }
 
-function Invoice({ data, updateRow, voidInvoice, role, profile, selectedOrderId, clearSelection }) {
+function Invoice({ data, staffUsers, updateRow, saveOrderTrackingNumbers, reloadData, voidInvoice, role, profile, selectedOrderId, clearSelection }) {
   const [id, setId] = useState('')
   const [highlightId, setHighlightId] = useState('')
   const [invoiceFilter, setInvoiceFilter] = useState('All')
   const [showVoidModal, setShowVoidModal] = useState(false)
+  const [showTrackingModal, setShowTrackingModal] = useState(false)
+  const [trackingDraft, setTrackingDraft] = useState([blankTrackingRow()])
+  const [trackingError, setTrackingError] = useState('')
+  const [trackingBusy, setTrackingBusy] = useState(false)
   const isAdmin = (role || 'Admin') === 'Admin'
 
   useEffect(() => {
@@ -2937,6 +4592,7 @@ function Invoice({ data, updateRow, voidInvoice, role, profile, selectedOrderId,
     || data.orders.find(x => String(x.id) === String(id))
     || filteredOrderList[0]
     || data.orders[0]
+
   const c = data.customers.find(x => String(x.id) === String(o?.customer_id))
   if (!o) return <div className="panel">No invoice yet. Create an order first.</div>
 
@@ -2945,34 +4601,51 @@ function Invoice({ data, updateRow, voidInvoice, role, profile, selectedOrderId,
   const voided = isVoidOrder(o)
   const fulfillmentStatus = voided ? 'Void' : normalizeOrderStatus(o.status)
   const paymentDisplay = voided ? (o.payment_status || (paid > 0 ? 'VOID — Payment Recorded' : 'VOID')) : o.payment_status
-  const subtotal = Number(o.qty || 0) * Number(o.price || 0)
+  const invoiceLines = itemsForOrder(o, data.order_items)
+  const subtotal = invoiceLines.reduce((s, line) => s + Number(line.qty || 0) * Number(line.price || 0), 0)
+  const lineDiscountTotal = invoiceLines.reduce((s, line) => s + Number(line.discount || 0), 0)
   const shippingCharge = Number(o.shipping || 0)
-  const discount = Number(o.discount || 0)
-  const fulfillment = normalizeFulfillment(o)
-  const restoreQty = voidRestoreQty(o)
+  const headerDiscount = Number(o.discount || 0)
+  const tax = Number(o.tax || 0)
+  const discountTotal = lineDiscountTotal + headerDiscount
+  const restoreQty = voidRestoreQty(o, data.order_items)
   const method = o.shipping_method || ''
-  const fulfillmentDateLabel = isCompanyDelivery(method) ? 'Delivery Date' : isCustomerPickup(method) ? 'Pickup Date' : 'Fulfillment Date'
-  const handledByLabel = isCarrierMethod(method) ? 'Tracking Number' : isCompanyDelivery(method) ? 'Delivered By' : isCustomerPickup(method) ? 'Picked Up By' : 'Tracking / Handled By'
-  const handledByValue = fulfillmentHandledBy(o)
+  const trackingEntries = trackingEntriesForOrder(data.order_tracking_numbers, o.id, o.tracking)
+  const shipmentStatus = shipmentStatusLabel(o, trackingEntries)
+  const showShipmentSection = !voided && (isCarrierMethod(method) || trackingEntries.length > 0)
+  const customerNote = orderCustomerNote(o)
   const company = c?.company || o.customer_name || ''
   const contact = c?.name && c.name !== company ? c.name : ''
   const billLines = addressLines(c?.billing_address || c?.address)
   const shipLines = addressLines(c?.shipping_address || c?.billing_address || c?.address)
-  const isCompleted = normalizeOrderStatus(o.status) === 'Completed'
 
   function handleVoidClick() {
-    if (isCompleted) {
-      const ok = window.confirm(
-        'This invoice is Completed. Voiding will restore only unfulfilled allocated inventory and preserve fulfilled quantity for history. Continue?',
-      )
-      if (!ok) return
-    }
     setShowVoidModal(true)
+  }
+
+  function openTrackingModal() {
+    setTrackingDraft(trackingEntriesToFormValues(data.order_tracking_numbers, o.id, o.tracking))
+    setTrackingError('')
+    setShowTrackingModal(true)
+  }
+
+  async function handleSaveTracking() {
+    if (!o?.id || trackingBusy) return
+    setTrackingBusy(true)
+    setTrackingError('')
+    const result = await saveOrderTrackingNumbers(o.id, trackingDraft)
+    setTrackingBusy(false)
+    if (result.error) {
+      setTrackingError(result.error)
+      return
+    }
+    if (hasSupabaseConfig) await reloadData?.()
+    setShowTrackingModal(false)
   }
 
   return (
     <div className="panel" id="invoice-panel">
-      <div className="invoice-toolbar">
+      <div className="invoice-toolbar no-print">
         <select
           className={String(highlightId) === String(id || o.id) ? 'sel' : ''}
           value={id || o.id}
@@ -2997,12 +4670,21 @@ function Invoice({ data, updateRow, voidInvoice, role, profile, selectedOrderId,
           <div className="invoice-void-watermark" aria-hidden="true"><span>VOID</span></div>
         )}
         <div className="invoice-header">
-          <div><h1>INNER SOURCE BEAUTY</h1><p className="invoice-sub">Professional Beauty Distribution</p></div>
+          <div className="invoice-brand">
+            <img src={COMPANY_LOGO_SRC} alt="Inner Source Beauty" className="invoice-logo" />
+            <div className="invoice-company-contact">
+              <span>11511 GARVEY AVE</span>
+              <span>EL MONTE CA 91732</span>
+              <span>714-249-5678</span>
+              <a href="https://innersourcebeauty.com">https://innersourcebeauty.com</a>
+            </div>
+          </div>
           <div className="invoice-meta">
             <h2>INVOICE</h2>
             <p><b>Invoice #:</b> {o.invoice_no}<br />
-              <b>Date:</b> {dateOnly(o.created_at) || today()}<br />
-              <b>Due Date:</b> {o.due_date || calcDueDate(c?.payment_terms, o.created_at)}<br />
+              <b>Date:</b> {formatDisplayDate(o.order_date || o.created_at)}<br />
+              <b>Sales Person:</b> {orderSalesPersonDisplay(o, staffUsers)}<br />
+              <b>Due Date:</b> {formatDisplayDate(o.due_date || calcDueDate(c?.payment_terms, o.order_date || o.created_at))}<br />
               <b>Payment Status:</b> <span className={voided ? 'void-text' : ''}>{paymentDisplay}</span><br />
               <b>Fulfillment Status:</b> <span className={voided ? 'void-text' : ''}>{fulfillmentStatus}</span><br />
               {!voided && (
@@ -3045,66 +4727,98 @@ function Invoice({ data, updateRow, voidInvoice, role, profile, selectedOrderId,
           <p>{c?.payment_terms || 'COD'}<br />Preferred: {c?.preferred_payment || '—'}</p>
         </div>
         <table className="invoice-table">
-          <thead><tr><th>Style</th><th>Qty</th><th>Unit Price</th><th>Line Total</th></tr></thead>
-          <tbody><tr>
-            <td>{o.style}</td><td>{o.qty}</td><td>{money(o.price)}</td><td>{money(subtotal)}</td>
-          </tr></tbody>
+          <thead><tr><th>Style</th><th>Qty</th><th>Unit Price</th><th>Discount</th><th>Line Total</th></tr></thead>
+          <tbody>
+            {invoiceLines.map((line, idx) => (
+              <tr key={line.id || idx}>
+                <td>{line.style || '—'}</td>
+                <td>{line.qty}</td>
+                <td>{money(line.price)}</td>
+                <td>{money(line.discount || 0)}</td>
+                <td>{money(line.line_total ?? (Number(line.qty || 0) * Number(line.price || 0) - Number(line.discount || 0)))}</td>
+              </tr>
+            ))}
+          </tbody>
         </table>
         <div className="invoice-totals">
           <p><b>Subtotal:</b> {money(subtotal)}</p>
+          <p><b>Discount:</b> {money(discountTotal)}</p>
           <p><b>Shipping Charge:</b> {money(shippingCharge)}</p>
-          <p><b>Discount:</b> {money(discount)}</p>
-          <p className="invoice-grand-total"><b>Total:</b> {money(o.total)}</p>
+          <p><b>Tax:</b> {money(tax)}</p>
+          <p className="invoice-grand-total"><b>Grand Total:</b> {money(o.total)}</p>
           <p><b>Amount Paid:</b> {money(paid)}</p>
           {!voided && <p className="balance-due"><b>Balance Due:</b> {money(due)}</p>}
         </div>
-        <div className="invoice-fulfillment">
-          <h3>Fulfillment</h3>
-          {!voided && <p><b>Fulfillment Method:</b> {o.shipping_method || '—'}</p>}
-          {!voided && method && (
-            <>
-              {isCarrierMethod(method) && o.tracking && <p><b>Tracking Number:</b> {o.tracking}</p>}
-              {!isCarrierMethod(method) && handledByValue !== '—' && <p><b>{handledByLabel}:</b> {handledByValue}</p>}
-              {o.fulfillment_date && <p><b>{fulfillmentDateLabel}:</b> {formatFulfillmentDate(o)}</p>}
-              {isCompanyDelivery(method) && o.delivered_by && <p><b>Delivered By:</b> {o.delivered_by}</p>}
-              {isCustomerPickup(method) && o.picked_up_by && <p><b>Picked Up By:</b> {o.picked_up_by}</p>}
-            </>
-          )}
-          <p><b>Ordered Qty:</b> {fulfillment.qty}</p>
-          <p><b>Allocated Qty:</b> {fulfillment.allocated_qty}</p>
-          <p><b>Back Order Qty:</b> {fulfillment.backorder_qty}</p>
-          <p><b>Fulfilled Qty:</b> {fulfillment.fulfilled_qty}</p>
-          {!voided && fulfillment.backorder_qty > 0 && (
-            <p className="invoice-backorder-flag">BACK ORDER: {fulfillment.backorder_qty}</p>
-          )}
-        </div>
+        {customerNote && (
+          <div className="invoice-block invoice-customer-note-block">
+            <h3>Customer Note</h3>
+            <p className="invoice-customer-note">{customerNote}</p>
+          </div>
+        )}
+        {trackingEntries.length > 0 && (
+          <div className="invoice-shipment-section invoice-shipment-print-wrap">
+            <div className="invoice-shipment-print">
+              <h3 className="invoice-shipment-print-title">TRACKING</h3>
+              <div className="invoice-tracking-list">
+                {trackingEntries.map((entry, idx) => (
+                  <p key={`print-${entry.tracking_number}-${idx}`} className="invoice-tracking-line">
+                    {formatTrackingPrintLine(entry)}
+                  </p>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+        {showShipmentSection && (
+          <div className="invoice-shipment-section invoice-shipment-screen no-print">
+            <h3>Shipment</h3>
+            {trackingEntries.length === 0 ? (
+              <>
+                <p className="invoice-shipment-meta"><b>Tracking:</b> None</p>
+                <button type="button" className="soft invoice-shipment-btn" onClick={openTrackingModal}>Add Tracking</button>
+              </>
+            ) : (
+              <>
+                <p className="invoice-shipment-meta"><b>Status:</b> {shipmentStatus}</p>
+                <div className="invoice-shipment-lines">
+                  {trackingEntries.map((entry, idx) => (
+                    <p key={`screen-${entry.tracking_number}-${idx}`} className="invoice-shipment-line">
+                      {formatTrackingScreenLine(entry)}
+                    </p>
+                  ))}
+                </div>
+                <button type="button" className="soft invoice-shipment-btn" onClick={openTrackingModal}>Manage Tracking</button>
+              </>
+            )}
+          </div>
+        )}
         <p className="terms">ALL RETURNS ARE STORE CREDIT ONLY. RETURNS MUST BE DONE WITHIN 10 BUSINESS DAYS. 20% RESTOCKING FEE MAY APPLY. SHIPPING AND HANDLING ARE NOT REFUNDABLE BOTH WAYS.</p>
         <div className="signature-line">
           <div className="sig-box"><div className="sig-line" /><p>Authorized Signature</p></div>
           <div className="sig-box"><div className="sig-line" /><p>Date</p></div>
         </div>
-        <div className="invoice-actions">
-          {!voided && (
-            <>
-              <input placeholder="Update Tracking #" defaultValue={o.tracking || ''} id="track-input" />
-              <button onClick={() => {
-                const v = document.getElementById('track-input').value
-                updateRow('orders', o.id, { tracking: v })
-              }}>Save Tracking</button>
-            </>
-          )}
-          <button onClick={() => window.print()}>Print / Save PDF</button>
+        <div className="invoice-actions no-print">
+          <button type="button" onClick={() => window.print()}>Print / Save PDF</button>
           {isAdmin && !voided && (
             <button type="button" className="danger void-invoice-btn" onClick={handleVoidClick}>VOID INVOICE</button>
           )}
         </div>
       </div>
+      {showTrackingModal && (
+        <ManageTrackingModal
+          draft={trackingDraft}
+          onChange={setTrackingDraft}
+          onSave={handleSaveTracking}
+          onCancel={() => { setShowTrackingModal(false); setTrackingError('') }}
+          busy={trackingBusy}
+          error={trackingError}
+        />
+      )}
       {showVoidModal && (
         <VoidInvoiceModal
           order={o}
           paid={paid}
           restoreQty={restoreQty}
-          fulfilledQty={fulfillment.fulfilled_qty}
           onCancel={() => setShowVoidModal(false)}
           onConfirm={async (form) => {
             const result = await voidInvoice(o.id, form)
@@ -3113,6 +4827,173 @@ function Invoice({ data, updateRow, voidInvoice, role, profile, selectedOrderId,
           }}
         />
       )}
+    </div>
+  )
+}
+
+function OpenInvoiceMobileCards({ invoices, orderCustomerName, paymentBadgeClass, onNavigate, onReceivePayment }) {
+  return (
+    <div className="open-invoice-cards">
+      {invoices.map(o => (
+        <article key={o.id} className="open-invoice-card">
+          <p className="open-invoice-customer">
+            {o.customer_id ? (
+              <button
+                type="button"
+                className="link-cell"
+                onClick={() => onNavigate('Customers', o.customer_id)}
+              >
+                {orderCustomerName(o)}
+              </button>
+            ) : orderCustomerName(o)}
+          </p>
+          <p className="open-invoice-no">
+            <button
+              type="button"
+              className="link-cell"
+              onClick={() => onNavigate('Invoice', o.id)}
+            >
+              {o.invoice_no || '—'}
+            </button>
+          </p>
+          <p className="open-invoice-date">{o.invoice_date}</p>
+          <dl className="open-invoice-meta">
+            <div className="open-invoice-row">
+              <dt>Total</dt>
+              <dd>{money(o.total)}</dd>
+            </div>
+            <div className="open-invoice-row">
+              <dt>Paid</dt>
+              <dd>{money(o.paid)}</dd>
+            </div>
+            <div className="open-invoice-row">
+              <dt>Balance</dt>
+              <dd>{money(o.balance)}</dd>
+            </div>
+            <div className="open-invoice-row">
+              <dt>Status</dt>
+              <dd>
+                <span className={`status-badge ${paymentBadgeClass(o.payment_status)}`}>
+                  {o.payment_status}
+                </span>
+              </dd>
+            </div>
+          </dl>
+          <button type="button" className="open-invoice-receive-btn" onClick={() => onReceivePayment(o)}>
+            Receive Payment
+          </button>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function ReceiveInvoiceMobileCards({
+  invoices, selectedIds, applyAmounts, paymentBadgeClass, toggleInvoice, updateApplyAmount,
+}) {
+  return (
+    <div className="receive-invoice-cards">
+      {invoices.map(o => {
+        const selected = selectedIds.includes(String(o.id))
+        return (
+          <article key={o.id} className={`receive-invoice-card${selected ? ' sel' : ''}`}>
+            <label className="receive-invoice-select">
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={e => toggleInvoice(o.id, e.target.checked)}
+              />
+              <span>Select invoice {o.invoice_no || '—'}</span>
+            </label>
+            <dl className="receive-invoice-meta">
+              <div className="receive-invoice-row">
+                <dt>Invoice Date</dt>
+                <dd>{o.invoice_date}</dd>
+              </div>
+              <div className="receive-invoice-row">
+                <dt>Original Total</dt>
+                <dd>{money(o.total)}</dd>
+              </div>
+              <div className="receive-invoice-row">
+                <dt>Amount Paid</dt>
+                <dd>{money(o.paid)}</dd>
+              </div>
+              <div className="receive-invoice-row">
+                <dt>Balance Due</dt>
+                <dd>{money(o.balance)}</dd>
+              </div>
+              <div className="receive-invoice-row">
+                <dt>Status</dt>
+                <dd>
+                  <span className={`status-badge ${paymentBadgeClass(o.payment_status)}`}>
+                    {o.payment_status}
+                  </span>
+                </dd>
+              </div>
+            </dl>
+            <label className="receive-invoice-apply">
+              Apply Amount
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                max={o.balance}
+                disabled={!selected}
+                value={selected ? (applyAmounts[o.id] ?? '') : ''}
+                onChange={e => updateApplyAmount(o.id, e.target.value)}
+                className="apply-amount-input"
+              />
+            </label>
+          </article>
+        )
+      })}
+    </div>
+  )
+}
+
+function PaymentHistoryMobileCards({ rows, highlightId, onDelete }) {
+  return (
+    <div className="payment-history-cards">
+      {rows.map(p => (
+        <article
+          key={p.id}
+          id={`payment-card-${p.id}`}
+          className={`payment-history-card${String(highlightId) === String(p.id) ? ' sel' : ''}`}
+        >
+          <p className="payment-history-date">{formatDisplayDate(p.payment_date)}</p>
+          <p className="payment-history-customer">{p.customer_name || '—'}</p>
+          <dl className="payment-history-meta">
+            <div className="payment-history-row">
+              <dt>Invoice</dt>
+              <dd>{p.invoice_no || '—'}</dd>
+            </div>
+            <div className="payment-history-row">
+              <dt>Amount</dt>
+              <dd>{money(p.amount)}</dd>
+            </div>
+            <div className="payment-history-row">
+              <dt>Method</dt>
+              <dd>{p.method || '—'}</dd>
+            </div>
+            <div className="payment-history-row">
+              <dt>Reference</dt>
+              <dd>{p.reference_no || '—'}</dd>
+            </div>
+            {p.note ? (
+              <div className="payment-history-row">
+                <dt>Note</dt>
+                <dd>{p.note}</dd>
+              </div>
+            ) : null}
+          </dl>
+          {onDelete && (
+            <button type="button" className="danger payment-history-delete" onClick={() => onDelete(p.id)}>
+              Delete
+            </button>
+          )}
+        </article>
+      ))}
+      {rows.length === 0 && <p className="payment-history-empty">No payment records found.</p>}
     </div>
   )
 }
@@ -3159,28 +5040,14 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
     return 'Partial'
   }
 
-  function formatInvoiceDate(order) {
-    const raw = order.order_date || order.created_at
-    if (!raw) return '—'
-    const dt = new Date(raw)
-    if (Number.isNaN(dt.getTime())) return '—'
-    return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
-  }
+  const formatInvoiceDate = order => formatDisplayDate(order.order_date || order.created_at)
 
-  function formatDueDate(order) {
-    const raw = order.due_date || calcDueDate(
+  const formatDueDate = order => formatDisplayDate(
+    order.due_date || calcDueDate(
       data.customers.find(c => String(c.id) === String(order.customer_id))?.payment_terms,
-      order.created_at
-    )
-    if (!raw) return '—'
-    if (/^\d{4}-\d{2}-\d{2}$/.test(String(raw))) {
-      const [y, m, d] = String(raw).split('-')
-      return `${m}/${d}/${y}`
-    }
-    const dt = new Date(raw)
-    if (Number.isNaN(dt.getTime())) return String(raw)
-    return `${String(dt.getMonth() + 1).padStart(2, '0')}/${String(dt.getDate()).padStart(2, '0')}/${dt.getFullYear()}`
-  }
+      order.order_date || order.created_at,
+    ),
+  )
 
   function paymentBadgeClass(status) {
     if (String(status || '').startsWith('VOID')) return 'payment-status-void'
@@ -3411,6 +5278,7 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
     clearSelection?.()
     requestAnimationFrame(() => {
       document.getElementById(`payment-row-${selectedPaymentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      document.getElementById(`payment-card-${selectedPaymentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     })
   }, [selectedPaymentId, clearSelection, data.payments])
 
@@ -3463,6 +5331,14 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
         {openInvoices.length === 0 ? (
           <p className="hint">No invoices match this filter.</p>
         ) : (
+          <>
+          <OpenInvoiceMobileCards
+            invoices={openInvoices}
+            orderCustomerName={orderCustomerName}
+            paymentBadgeClass={paymentBadgeClass}
+            onNavigate={onNavigate}
+            onReceivePayment={pickOpenInvoice}
+          />
           <div className="table-wrap open-invoices-table">
             <table>
               <thead>
@@ -3515,6 +5391,7 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
 
@@ -3541,6 +5418,15 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
             {customerOpenInvoices.length === 0 ? (
               <p className="hint">No open invoices for this customer.</p>
             ) : (
+              <>
+              <ReceiveInvoiceMobileCards
+                invoices={customerOpenInvoices}
+                selectedIds={selectedIds}
+                applyAmounts={applyAmounts}
+                paymentBadgeClass={paymentBadgeClass}
+                toggleInvoice={toggleInvoice}
+                updateApplyAmount={updateApplyAmount}
+              />
               <div className="table-wrap receive-invoices-table">
                 <table>
                   <thead>
@@ -3595,6 +5481,7 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
                   </tbody>
                 </table>
               </div>
+              </>
             )}
 
             <div className="receive-totals">
@@ -3632,23 +5519,94 @@ function Payments({ data, recordMultiPayment, deleteRow, onNavigate, selectedPay
         )}
       </div>
 
-      <div className="panel">
+      <div className="panel payment-history-section">
         <h2>Payment History</h2>
-        <Table rows={paymentRows} cols={['payment_date', 'customer_name', 'invoice_no', 'amount', 'method', 'reference_no', 'note']}
-          highlightId={highlightId} rowIdPrefix="payment-row-" onDelete={id => deleteRow('payments', id)} />
+        <PaymentHistoryMobileCards rows={paymentRows} highlightId={highlightId} onDelete={id => deleteRow('payments', id)} />
+        <div className="payment-history-table">
+          <Table rows={paymentRows} cols={['payment_date', 'customer_name', 'invoice_no', 'amount', 'method', 'reference_no', 'note']}
+            highlightId={highlightId} rowIdPrefix="payment-row-" onDelete={id => deleteRow('payments', id)} />
+        </div>
       </div>
     </div>
   )
 }
 
-function Reports({ data, stats, poStats }) {
+function CustomerRankingMobileCards({ ranked }) {
+  return (
+    <div className="report-customer-ranking-cards">
+      {ranked.map((c, i) => (
+        <article key={c.id} className="report-ranking-card">
+          <p className="report-ranking-rank">#{i + 1}</p>
+          <p className="report-ranking-customer">{c.company || c.name || '—'}</p>
+          <p className="report-ranking-sales">Sales: {money(c.sales)}</p>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function BackOrderCustomerMobileCards({ rows }) {
+  return (
+    <div className="report-backorder-customer-cards">
+      {rows.map(r => (
+        <article key={r.customer} className="report-backorder-card">
+          <p className="report-backorder-title">{r.customer}</p>
+          <dl className="report-card-meta">
+            <div className="report-card-row"><dt>Orders</dt><dd>{r.orders}</dd></div>
+            <div className="report-card-row"><dt>Units</dt><dd>{r.units}</dd></div>
+            <div className="report-card-row"><dt>Value</dt><dd>{money(r.value)}</dd></div>
+          </dl>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function BackOrderProductMobileCards({ rows }) {
+  return (
+    <div className="report-backorder-product-cards">
+      {rows.map(r => (
+        <article key={r.product} className="report-backorder-card">
+          <p className="report-backorder-title">{r.product}</p>
+          <dl className="report-card-meta">
+            <div className="report-card-row"><dt>Orders</dt><dd>{r.orders}</dd></div>
+            <div className="report-card-row"><dt>Units</dt><dd>{r.units}</dd></div>
+            <div className="report-card-row"><dt>Value</dt><dd>{money(r.value)}</dd></div>
+          </dl>
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function Reports({ data, staffUsers, stats, poStats }) {
   const [reportFilter, setReportFilter] = useState('Active')
+  const [plMonth, setPlMonth] = useState(currentMonthKey())
   const [poDateFrom, setPoDateFrom] = useState('')
   const [poDateTo, setPoDateTo] = useState('')
+  const plOrders = ordersForDashboardSales(filterOrdersForMonth(data.orders, plMonth))
+  const plSummary = calcMonthFinancialSummary(
+    plOrders,
+    data.order_items,
+    data.inventory,
+    data.expenses || [],
+    plMonth,
+  )
   const activeOrders = ordersForSalesMetrics(data.orders)
   const voidOrders = data.orders.filter(isVoidOrder)
   const ranked = [...data.customers].map(c => ({ ...c, ...customerStats(c, data) })).sort((a, b) => b.sales - a.sales)
-  const boReport = backOrderReports(data.orders)
+  const boReport = backOrderReports(data.orders, data.order_items)
+  const salesByPersonMap = {}
+  activeOrders.forEach(o => {
+    const label = orderSalesPersonDisplay(o, staffUsers)
+    if (!salesByPersonMap[label]) salesByPersonMap[label] = { sales: 0, profit: 0, orders: 0 }
+    salesByPersonMap[label].sales += Number(o.total || 0)
+    salesByPersonMap[label].profit += orderProfit(o)
+    salesByPersonMap[label].orders += 1
+  })
+  const salesByPerson = Object.entries(salesByPersonMap)
+    .map(([name, statsRow]) => ({ name, ...statsRow }))
+    .sort((a, b) => b.sales - a.sales)
   const monthlyBreakdown = {}
   activeOrders.forEach(o => {
     const m = localDateKey(o.created_at).slice(0, 7)
@@ -3670,7 +5628,7 @@ function Reports({ data, stats, poStats }) {
   const showVoidAudit = reportFilter === 'Void' || reportFilter === 'All'
 
   return (
-    <div className="panel">
+    <div className="panel reports-page">
       <h2>Reports</h2>
       <div className="report-filters">
         {['Active', 'Void', 'All'].map(f => (
@@ -3686,6 +5644,49 @@ function Reports({ data, stats, poStats }) {
       </div>
       {showActiveReports && (
         <>
+      <h3>Profit &amp; Loss Summary</h3>
+      <div className="report-pl-toolbar">
+        <label>
+          Month
+          <input type="month" value={plMonth} onChange={e => setPlMonth(e.target.value)} />
+        </label>
+        <p className="hint report-pl-hint">
+          {plOrders.length} invoice{plOrders.length === 1 ? '' : 's'} in {plMonth}. COGS uses landed unit cost for units sold only.
+        </p>
+      </div>
+      <div className="panel panel-compact dashboard-profit-breakdown report-pl-summary">
+        <ProfitLossSummary summary={plSummary} />
+      </div>
+      {plSummary.monthExpenses.length > 0 && (
+        <>
+          <h3>Expenses — {plMonth}</h3>
+          <div className="table-wrap profit-details-expenses-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Category</th>
+                  <th>Description</th>
+                  <th>Amount</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {plSummary.monthExpenses.map(expense => (
+                  <tr key={expense.id}>
+                    <td>{formatDisplayDate(expenseDateKey(expense))}</td>
+                    <td>{expense.category || '—'}</td>
+                    <td>{expense.description || '—'}</td>
+                    <td>{money(expense.amount)}</td>
+                    <td>{expense.note || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
       <div className="cards">
         <Card t="Total Sales" v={money(stats.sales)} />
         <Card t="Total Profit" v={money(totalProfit)} />
@@ -3695,10 +5696,24 @@ function Reports({ data, stats, poStats }) {
         <Card t="Customers" v={stats.customers} />
       </div>
       <h3>Customer Ranking</h3>
+      <CustomerRankingMobileCards ranked={ranked} />
+      <div className="table-wrap report-customer-ranking-table">
       <table><thead><tr><th>#</th><th>Customer</th><th>Sales</th><th>Paid</th><th>Balance</th><th>Orders</th></tr></thead>
         <tbody>{ranked.map((c, i) => (
           <tr key={c.id}><td>{i + 1}</td><td>{c.company || c.name}</td><td>{money(c.sales)}</td><td>{money(c.paid)}</td><td>{money(c.balance)}</td><td>{c.orders.length}</td></tr>
         ))}</tbody></table>
+      </div>
+      <h3>Sales by Sales Person</h3>
+      {salesByPerson.length === 0 ? (
+        <p className="hint">No sales recorded yet.</p>
+      ) : (
+        <table>
+          <thead><tr><th>Sales Person</th><th>Orders</th><th>Sales</th><th>Profit</th></tr></thead>
+          <tbody>{salesByPerson.map(row => (
+            <tr key={row.name}><td>{row.name}</td><td>{row.orders}</td><td>{money(row.sales)}</td><td>{money(row.profit)}</td></tr>
+          ))}</tbody>
+        </table>
+      )}
       <h3>Monthly Sales Breakdown</h3>
       <table><thead><tr><th>Month</th><th>Sales</th></tr></thead>
         <tbody>{Object.entries(monthlyBreakdown).sort((a, b) => b[0].localeCompare(a[0])).map(([m, v]) => (
@@ -3752,19 +5767,29 @@ function Reports({ data, stats, poStats }) {
       {boReport.byCustomer.length === 0 ? (
         <p className="hint">No open back orders.</p>
       ) : (
+        <>
+        <BackOrderCustomerMobileCards rows={boReport.byCustomer} />
+        <div className="table-wrap report-backorder-customer-table">
         <table><thead><tr><th>Customer</th><th>Orders</th><th>Units</th><th>Value</th></tr></thead>
           <tbody>{boReport.byCustomer.map(r => (
             <tr key={r.customer}><td>{r.customer}</td><td>{r.orders}</td><td>{r.units}</td><td>{money(r.value)}</td></tr>
           ))}</tbody></table>
+        </div>
+        </>
       )}
       <h4>Open Back Orders by Product</h4>
       {boReport.byProduct.length === 0 ? (
         <p className="hint">No open back orders.</p>
       ) : (
+        <>
+        <BackOrderProductMobileCards rows={boReport.byProduct} />
+        <div className="table-wrap report-backorder-product-table">
         <table><thead><tr><th>Product</th><th>Orders</th><th>Units</th><th>Value</th></tr></thead>
           <tbody>{boReport.byProduct.map(r => (
             <tr key={r.product}><td>{r.product}</td><td>{r.orders}</td><td>{r.units}</td><td>{money(r.value)}</td></tr>
           ))}</tbody></table>
+        </div>
+        </>
       )}
         </>
       )}
@@ -3793,7 +5818,7 @@ function Reports({ data, stats, poStats }) {
                     <tr key={o.id}>
                       <td>{o.invoice_no || '—'}</td>
                       <td>{o.customer_name || '—'}</td>
-                      <td>{dateOnly(o.created_at) || '—'}</td>
+                      <td>{formatDisplayDate(o.order_date || o.created_at)}</td>
                       <td>{formatVoidDate(o.voided_at)}</td>
                       <td>{o.void_reason || '—'}{o.void_note ? ` — ${o.void_note}` : ''}</td>
                       <td>{o.voided_by || '—'}</td>
@@ -3818,8 +5843,9 @@ function Reports({ data, stats, poStats }) {
   )
 }
 
-function Settings({ data, reload, profile, setProfile, session, fetchProfilesForBackup, restoreBackupData, setLocalData, repairNegativeInventory }) {
+function Settings({ data, reload, profile, setProfile, session, fetchProfilesForBackup, restoreBackupData, setLocalData, repairNegativeInventory, saveStaffProfile, reloadStaffUsers, currentUserId }) {
   const isAdmin = (profile.role || 'Admin') === 'Admin'
+  const [settingsSection, setSettingsSection] = useState('general')
   const [busy, setBusy] = useState(false)
   const [repairSummary, setRepairSummary] = useState(null)
   const [status, setStatus] = useState('')
@@ -3833,6 +5859,13 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
   const [restoreStats, setRestoreStats] = useState(null)
   const [backupDetails, setBackupDetails] = useState(null)
   const [showRestoreDialog, setShowRestoreDialog] = useState(false)
+  const [myFullName, setMyFullName] = useState(profile.full_name || '')
+  const [userMgmtStatus, setUserMgmtStatus] = useState('')
+  const [userMgmtBusy, setUserMgmtBusy] = useState(false)
+
+  useEffect(() => {
+    setMyFullName(profile.full_name || '')
+  }, [profile.full_name])
 
   function setStatusMsg(msg, isError = false) {
     setStatus(msg)
@@ -3840,7 +5873,7 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
   }
 
   const exportLabels = {
-    customers: 'Customers', inventory: 'Inventory', orders: 'Orders', payments: 'Payments',
+    customers: 'Customers', inventory: 'Inventory', orders: 'Orders', order_items: 'Invoice Line Items', payments: 'Payments',
     purchase_orders: 'Purchase Orders', purchase_order_items: 'PO Line Items', purchase_order_receipts: 'PO Receipts', purchase_order_receives: 'PO Receives', purchase_order_commission_payments: 'PO Commission Payments',
   }
 
@@ -3872,8 +5905,16 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
 
   async function updateRole(newRole) {
     if (!hasSupabaseConfig || !session?.user?.id) { setProfile({ ...profile, role: newRole }); return }
-    await supabase.from('profiles').upsert({ id: session.user.id, email: session.user.email, role: newRole })
+    await supabase.from('profiles').upsert({ id: session.user.id, email: session.user.email, role: newRole, full_name: profile.full_name || '' })
     setProfile({ ...profile, role: newRole })
+  }
+
+  async function saveMyFullName() {
+    setUserMgmtBusy(true)
+    setUserMgmtStatus('')
+    const result = await saveStaffProfile(profile.id || session?.user?.id, { full_name: myFullName })
+    setUserMgmtStatus(result.error || 'Your name was saved.')
+    setUserMgmtBusy(false)
   }
 
   async function runBackupAll() {
@@ -4000,6 +6041,32 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
 
   return (
     <div className="settings-page">
+      {isAdmin && (
+        <div className="settings-subnav">
+          <button
+            type="button"
+            className={settingsSection === 'general' ? 'filter-btn active' : 'filter-btn soft'}
+            onClick={() => setSettingsSection('general')}
+          >
+            General
+          </button>
+          <button
+            type="button"
+            className={settingsSection === 'staff' ? 'filter-btn active' : 'filter-btn soft'}
+            onClick={() => setSettingsSection('staff')}
+          >
+            Staff Management
+          </button>
+        </div>
+      )}
+
+      {settingsSection === 'staff' && isAdmin ? (
+        <StaffManagement
+          currentUserId={profile.id || session?.user?.id}
+          reloadStaffUsers={reloadStaffUsers}
+        />
+      ) : (
+        <>
       <div className="panel">
         <h2>Settings</h2>
         <p>INNER SOURCE BEAUTY ERP v2 — Supabase Cloud</p>
@@ -4010,7 +6077,18 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
             </select>
           </label>
         </div>
-        <p className="hint">Admin: all features · Staff: orders &amp; customers · Warehouse: inventory only</p>
+        <div className="settings-row">
+          <label>Your Full Name
+            <input
+              placeholder="Full Name"
+              value={myFullName}
+              onChange={e => setMyFullName(e.target.value)}
+            />
+          </label>
+          <button type="button" className="soft" disabled={userMgmtBusy} onClick={saveMyFullName}>Save Name</button>
+        </div>
+        {userMgmtStatus && <p className="hint">{userMgmtStatus}</p>}
+        <p className="hint">Admin: all features · Staff: customers, orders, invoices, payments, reports · Warehouse: inventory, purchase orders, orders (view only)</p>
         <button type="button" onClick={reload} disabled={busy}>Reload Cloud Data</button>
       </div>
 
@@ -4185,6 +6263,8 @@ function Settings({ data, reload, profile, setProfile, session, fetchProfilesFor
           )}
         </div>
       )}
+        </>
+      )}
     </div>
   )
 }
@@ -4198,7 +6278,11 @@ function Table({ rows, cols, onDelete, highlightId, rowIdPrefix }) {
         <tbody>{rows.map(r => (
           <tr key={r.id} id={rowIdPrefix ? `${rowIdPrefix}${r.id}` : undefined}
             className={highlightId && String(highlightId) === String(r.id) ? 'sel' : ''}>
-            {cols.map(c => <td key={c}>{moneyCols.includes(c) ? money(r[c]) : c === 'created_at' ? dateOnly(r[c]) : String(r[c] ?? '')}</td>)}
+            {cols.map(c => <td key={c}>{
+              moneyCols.includes(c) ? money(r[c])
+                : isDisplayDateField(c) ? formatDisplayDate(r[c])
+                  : String(r[c] ?? '')
+            }</td>)}
             {onDelete && <td><button className="danger" onClick={() => onDelete(r.id)}>Delete</button></td>}
           </tr>
         ))}</tbody>

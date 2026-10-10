@@ -1,0 +1,3 @@
+-- DEPRECATED: Do not run on production.
+-- Minimum stock is stored in inventory.low_stock (see supabase-v2-full-migration.sql).
+-- The app no longer writes to reorder_limit. This file is kept for reference only.
